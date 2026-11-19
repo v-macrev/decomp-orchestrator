@@ -5,3 +5,4 @@ data/worktrees/
 data/sim/
 .env
 config/accounts.json
+config/orchestrator.json

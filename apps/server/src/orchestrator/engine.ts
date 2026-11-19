@@ -286,11 +286,12 @@ export class RunEngine {
   }
 
   /** Give back local claims of packets that will not be submitted (dead, quarantined, cancelled). */
-  private async releaseUnsubmitted(runId: string, why: string) {
+  private async releaseUnsubmitted(runId: string, why: string, all = false) {
     const repo = this.deps.repo;
     if (!repo.releaseClaims) return;
+    const states = all ? `'dead','quarantined','cancelled','passed','staged'` : `'dead','quarantined','cancelled'`;
     const rows = this.deps.store.db
-      .prepare(`SELECT functions_json FROM tasks WHERE run_id = ? AND state IN ('dead','quarantined','cancelled') AND sr_task_id IS NOT NULL`)
+      .prepare(`SELECT functions_json FROM tasks WHERE run_id = ? AND state IN (${states}) AND sr_task_id IS NOT NULL`)
       .all(runId) as Array<{ functions_json: string }>;
     const rvas = [...new Set(rows.flatMap((r) => (JSON.parse(r.functions_json) as Array<{ rva: string }>).map((f) => f.rva)))];
     if (!rvas.length) return;
@@ -814,9 +815,12 @@ export class RunEngine {
     this.active.delete(runId);
     if (run.cancel.signal.aborted) return;
     if (this.queue.hasOpenWork(runId)) return; // paused/hard-stopped with work left
-    await this.releaseUnsubmitted(runId, 'not matched in this run');
+    const stagingOff = run.row.config.staging === 'off';
+    // Staging off: nothing will be submitted from this run, so every claim it took goes back.
+    await this.releaseUnsubmitted(runId, stagingOff ? 'test run with staging off: nothing is submitted' : 'not matched in this run', stagingOff);
     try {
-      const batches = await stageRun(store, this.deps.repo, events, runId, run.row.config.prBatchSize);
+      if (stagingOff) events.emit('run.staging', 'staging off: nothing committed in the target repository; accepted files stay in this run\'s attempts', { runId });
+      const batches = stagingOff ? 0 : await stageRun(store, this.deps.repo, events, runId, run.row.config.prBatchSize);
       store.setRunStatus(runId, 'completed', ['running', 'paused']);
       const fc = store.functionCounts(runId);
       events.emit('run.completed', `completed: ${(fc.passed ?? 0) + (fc.staged ?? 0)} functions matched, ${fc.dead ?? 0} dead-lettered, ${fc.quarantined ?? 0} quarantined; ${batches} PR batch(es) staged`, { runId, data: fc });

@@ -280,6 +280,12 @@ export const RunConfig = z.object({
    * with the lease). Balances load across the topology and bounds each worker's session/quota exposure.
    */
   maxFunctionsPerWorker: z.number().int().min(1).max(5_000).default(60),
+  /**
+   * branches: accepted units are committed to local branches (decomp/<run>-b<n>) and re-verified.
+   * off: nothing is committed in the target repository; accepted files stay in this tool's
+   * database (task drawer / API) and every local claim of the run is released at the end.
+   */
+  staging: z.enum(['branches', 'off']).default('branches'),
   /** Passing functions per staged PR batch (repo cap is 60). */
   prBatchSize: z.number().int().min(1).max(60).default(40),
   /**

@@ -70,7 +70,7 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
     name: `run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, flowId: 'default', source: mode === 'sim' ? 'synthetic' : 'sr_next',
     count: 500, maxSize: 64, rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: false, draftedBy: 'operator',
     routing: true, llmTieBreak: false, promoteAfter: 2, workStealing: true, contextMode: 'budgeted',
-    skills: true, autoCurate: false,
+    skills: true, autoCurate: false, staging: mode === 'sim' ? 'branches' : 'off',
     capPerWorker: 60, gMaxSize: 256, gNamespaces: '', gModules: '', gRange: '', gExcludeGuess: false, gExcludeDrafted: false,
   });
   const [err, setErr] = useState('');
@@ -105,7 +105,7 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
     const selection = f.source === 'rva_list' ? { source: 'rva_list', rvas: f.rvas.split(/[\s,]+/).filter(Boolean) } : f.source === 'synthetic' ? { source: 'synthetic', count: f.count, seed: Math.floor(Math.random() * 1e6) } : f.source === 'gather' ? { source: 'gather', filter: gatherFilter() } : { source: 'sr_next', count: f.count, maxSize: f.maxSize };
     try {
       const r = await api.createRun(f.name, f.flowId, {
-        selection, maxFunctionsPerWorker: f.capPerWorker, packetMaxFunctions: f.packetMaxFunctions, gateConcurrency: f.gateConcurrency, prBatchSize: f.prBatchSize,
+        selection, maxFunctionsPerWorker: f.capPerWorker, staging: f.staging, packetMaxFunctions: f.packetMaxFunctions, gateConcurrency: f.gateConcurrency, prBatchSize: f.prBatchSize,
         exposureConsent: f.exposureConsent, draftedBy: f.draftedBy, ...(f.budgetUsd ? { budgetUsd: Number(f.budgetUsd) } : {}),
         routing: { enabled: f.routing, llmTieBreak: f.llmTieBreak, promoteAfterFailures: f.promoteAfter, workStealing: f.workStealing },
         context: { mode: f.contextMode },
@@ -157,6 +157,7 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
         <label>Concurrent compares<input type="number" min={1} max={64} value={f.gateConcurrency} onChange={(e) => set('gateConcurrency', Number(e.target.value))} style={{ width: 80 }} /></label>
         <label>Functions / PR (≤60)<input type="number" min={1} max={60} value={f.prBatchSize} onChange={(e) => set('prBatchSize', Number(e.target.value))} style={{ width: 80 }} /></label>
         <label>Budget USD<input value={f.budgetUsd} placeholder="none" onChange={(e) => set('budgetUsd', e.target.value)} style={{ width: 80 }} /></label>
+        <label title="Off: nothing is committed in the target repository and every claim is released at the end">Staging<select value={f.staging} onChange={(e) => set('staging', e.target.value)}><option value="off">off (no commits)</option><option value="branches">local branches</option></select></label>
         <label title="Hard ceiling of distinct functions one worker instance may take in this run">Max fn / worker<input type="number" min={1} max={5000} value={f.capPerWorker} onChange={(e) => set('capPerWorker', Number(e.target.value))} style={{ width: 80 }} /></label>
       </div>
       {capacity && (

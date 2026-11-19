@@ -236,6 +236,20 @@ describe('end to end: gather → classify → capped tiered distribution', () =>
     expect(cap).toMatchObject({ capacity: 1200, batch: 500 });
   }, 180_000);
 
+  it('staging off commits nothing: passed packets stay passed and no batch is staged', async () => {
+    const w = world(10);
+    const f = defaultFlow();
+    const run = w.engine.createRun('dry', { flowId: f.id, selection: { source: 'gather', filter: { maxFunctions: 40 } }, staging: 'off', skills: { enabled: false } }, f);
+    await w.engine.start(run.id);
+    await w.engine.waitFor(run.id);
+    expect(w.store.getRun(run.id)!.status).toBe('completed');
+    const fc = w.store.functionCounts(run.id);
+    expect(fc.staged ?? 0).toBe(0);
+    expect(fc.passed ?? 0).toBeGreaterThan(0);
+    expect(w.store.listBatches(run.id)).toHaveLength(0);
+    expect(w.events.query({ runId: run.id, limit: 500 }).some((e) => e.kind === 'run.staging')).toBe(true);
+  }, 120_000);
+
   it('pauses with a capacity error when every eligible worker is capped, and resumes after the cap is raised', async () => {
     const w = world(6);
     const f = defaultFlow();
