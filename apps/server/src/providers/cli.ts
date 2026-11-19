@@ -3,16 +3,49 @@
 // so several separately-authenticated accounts run side by side. The CLI runs in an empty
 // scratch directory with tools disabled — it can only return text, never touch the repo.
 // The scrubbed environment strips ANTHROPIC_API_KEY / OPENAI_API_KEY so they cannot shadow the profile.
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { isAbsolute, join } from 'node:path';
 import type { Account } from '@decomp/core';
 import { runBounded } from '../util/proc.js';
 import { ProviderError, type CompletionRequest, type CompletionResponse, type ProviderAdapter } from './types.js';
 
+const resolved = new Map<string, string>();
+
+/**
+ * Windows: a bare command name cannot be spawned without a shell when it is an npm `.cmd` shim
+ * (Node refuses to spawn .cmd/.bat directly). Resolve it to a real executable: `<name>.exe` on PATH,
+ * or the `.exe` an npm shim launches (`"%dp0%\node_modules\...\claude.exe"`). Elsewhere: unchanged.
+ */
+export function resolveCliBinary(name: string): string {
+  if (process.platform !== 'win32' || isAbsolute(name) || /[\\/]/.test(name)) return name;
+  const hit = resolved.get(name);
+  if (hit) return hit;
+  let out = name;
+  for (const dir of (process.env.PATH ?? process.env.Path ?? '').split(';').filter(Boolean)) {
+    const exe = join(dir, `${name}.exe`);
+    if (existsSync(exe)) {
+      out = exe;
+      break;
+    }
+    const cmd = join(dir, `${name}.cmd`);
+    if (existsSync(cmd)) {
+      const m = /"%dp0%\\([^"]+\.exe)"/i.exec(readFileSync(cmd, 'utf8'));
+      if (m && existsSync(join(dir, m[1]!))) {
+        out = join(dir, m[1]!);
+        break;
+      }
+    }
+  }
+  resolved.set(name, out);
+  return out;
+}
+
 function classifyCliFailure(text: string, timedOut: boolean, aborted: boolean): ProviderError {
   const t = text.toLowerCase();
   if (aborted) return new ProviderError('aborted', 'aborted');
+  // A missing binary is configuration, not a provider fault: do not retry it as a server error.
+  if (/spawn error|enoent|is not recognized as an internal or external command/.test(t)) return new ProviderError('auth', `CLI binary not found: ${text.trim().slice(0, 160)}`);
   if (timedOut) return new ProviderError('timeout', 'cli timed out');
   if (/usage limit|limit reached|quota|credit balance|billing/.test(t)) return new ProviderError('quota', 'cli usage limit reached', 30 * 60_000);
   if (/rate.?limit|429|too many requests/.test(t)) return new ProviderError('rate_limited', 'cli rate limited');
@@ -39,8 +72,12 @@ export class ClaudeCliAdapter implements ProviderAdapter {
       const effort = req.effort ?? req.model.defaultEffort;
       if (effort) args.push('--effort', effort);
       if (req.jsonSchema && account.options.cliJsonSchema !== false) args.push('--json-schema', JSON.stringify(req.jsonSchema));
-      const r = await runBounded(account.auth.binary ?? 'claude', args, {
-        cwd: dir, stdin: req.prompt, timeoutMs: req.timeoutMs, signal: req.signal, maxOutputBytes: 8 * 1024 * 1024,
+      // One fixed, empty working directory for every call: the CLI records each new cwd as a project
+      // in the profile's .claude.json, so per-call temp dirs would pile up entries there.
+      const cwd = join(tmpdir(), 'decomp-cli-work');
+      mkdirSync(cwd, { recursive: true });
+      const r = await runBounded(resolveCliBinary(account.auth.binary ?? 'claude'), args, {
+        cwd, stdin: req.prompt, timeoutMs: req.timeoutMs, signal: req.signal, maxOutputBytes: 8 * 1024 * 1024,
         env: { CLAUDE_CONFIG_DIR: account.auth.configDir },
       });
       let parsed: any = null;
@@ -85,7 +122,7 @@ export class CodexCliAdapter implements ProviderAdapter {
       const effort = req.effort ?? req.model.defaultEffort;
       if (effort) args.push('-c', `model_reasoning_effort=${effort === 'max' || effort === 'xhigh' ? 'high' : effort}`);
       args.push('-');
-      const r = await runBounded(account.auth.binary ?? 'codex', args, {
+      const r = await runBounded(resolveCliBinary(account.auth.binary ?? 'codex'), args, {
         cwd: dir, stdin: `${req.system}\n\n${req.prompt}`, timeoutMs: req.timeoutMs, signal: req.signal, maxOutputBytes: 16 * 1024 * 1024,
         env: { CODEX_HOME: account.auth.configDir },
       });

@@ -281,7 +281,8 @@ export class RunEngine {
     const n = this.queue.cancelOpen(runId);
     this.deps.store.setRunStatus(runId, 'cancelled', ['created', 'discovering', 'running', 'paused']);
     this.deps.events.emit('run.cancelled', `cancelled (${n} open task(s) cancelled)`, { runId, level: 'warn' });
-    await this.releaseUnsubmitted(runId, 'run cancelled');
+    // Staging off: nothing from this run will ever be submitted, so matched functions' claims go back too.
+    await this.releaseUnsubmitted(runId, 'run cancelled', this.deps.store.getRun(runId)?.config.staging === 'off');
     return true;
   }
 
