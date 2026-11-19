@@ -1,7 +1,23 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
+import { DIFFICULTIES, compileFlowPlan, type ModelSpec } from '@decomp/core';
 import type { Store } from '../db/store.js';
 import type { RunEngine } from '../orchestrator/engine.js';
 import type { AccountPool } from '../pool/scheduler.js';
+
+/** Token + caching economics of a run, priced per (account, model) actually used. */
+function tokenEconomics(store: Store, runId: string) {
+  const models = new Map<string, ModelSpec>();
+  for (const a of store.listAccounts()) for (const m of a.models) models.set(`${a.id}\0${m.id}`, m);
+  let savedByCachingUsd = 0;
+  for (const r of store.usageByAccount(runId)) {
+    const m = models.get(`${r.account_id}\0${r.model}`);
+    if (!m) continue;
+    const reads = r.cached_input_tokens ?? 0;
+    const writes = m.priceCacheWritePerMTok !== undefined ? r.cache_write_tokens ?? 0 : 0;
+    savedByCachingUsd += (reads * (m.priceInPerMTok - m.priceCacheReadPerMTok) - writes * ((m.priceCacheWritePerMTok ?? m.priceInPerMTok) - m.priceInPerMTok)) / 1_000_000;
+  }
+  return { savedByCachingUsd: Math.round(savedByCachingUsd * 10_000) / 10_000 };
+}
 
 export function runMetrics(store: Store, engine: RunEngine, pool: AccountPool, runId: string) {
   const run = store.getRun(runId);
@@ -31,8 +47,43 @@ export function runMetrics(store: Store, engine: RunEngine, pool: AccountPool, r
     const end = now - (14 - i) * 60_000;
     return { t: end, passed: passRows.filter((r) => r.t <= end && r.t > end - 60_000).reduce((s, r) => s + r.n, 0) };
   });
+  // Routing: plan, where packets sit by difficulty, attempts/pass per (difficulty, tier), adaptive moves.
+  let plan: ReturnType<typeof compileFlowPlan> | null = null;
+  try {
+    plan = compileFlowPlan(run.flow);
+  } catch {
+    /* invalid snapshot: routing panel stays empty */
+  }
+  const moves = Object.fromEntries(
+    (store.db.prepare(`SELECT kind, COUNT(*) n FROM events WHERE run_id = ? AND kind IN ('task.stolen','task.promoted','task.rerouted','task.escalated') GROUP BY kind`).all(runId) as Array<{ kind: string; n: number }>).map((r) => [r.kind.slice(5), r.n]),
+  );
+  const diffRows = store.difficultyCounts(runId);
+  const byDifficulty = Object.fromEntries(
+    DIFFICULTIES.map((d) => {
+      const rows = diffRows.filter((r) => r.difficulty === d);
+      const fns = (states: string[]) => rows.filter((r) => states.includes(r.state)).reduce((s, r) => s + r.functions, 0);
+      return [d, { packets: rows.reduce((s, r) => s + r.n, 0), functions: fns(['pending', 'leased', 'gating', 'passed', 'staged', 'dead', 'quarantined', 'cancelled']), open: fns(['pending', 'leased', 'gating']), matched: fns(['passed', 'staged']), dead: fns(['dead', 'quarantined']) }];
+    }),
+  );
+  const inTok = usage.input_tokens ?? 0;
+  const cached = usage.cache_read_tokens ?? 0;
+  const ctxSent = usage.context_tokens ?? 0;
+  const ctxRaw = usage.context_raw_tokens ?? 0;
+  const matchedFns = (functions.passed ?? 0) + (functions.staged ?? 0);
   return {
-    run: { id: run.id, name: run.name, status: run.status, costUsd: run.costUsd, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, budgetUsd: run.config.budgetUsd ?? null, error: run.error },
+    run: { id: run.id, name: run.name, status: run.status, costUsd: run.costUsd, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, budgetUsd: run.config.budgetUsd ?? null, error: run.error, contextMode: run.config.context.mode, routingEnabled: run.config.routing.enabled },
+    routing: plan
+      ? {
+          enabled: run.config.routing.enabled,
+          tiers: plan.tiers.map((t) => ({ index: t.index, node: t.node.id, label: t.node.data.label || t.node.id, capability: t.capability, inferred: t.capabilityInferred, instances: t.node.data.instances })),
+          route: plan.route,
+          routeSource: plan.routeSource,
+          byDifficulty,
+          matrix: store.routingMatrix(runId),
+          moves,
+        }
+      : null,
+    knowledge: { byKind: store.knowledgeStats(runId), recent: store.listKnowledge(runId, 8).map((k) => ({ kind: k.kind, symbol: k.symbol, sourceUnit: k.sourceUnit, uses: k.uses })) },
     engine: engine.status(runId),
     tasks,
     functions,
@@ -44,9 +95,19 @@ export function runMetrics(store: Store, engine: RunEngine, pool: AccountPool, r
       attempts: usage.attempts ?? 0,
       providerErrors: usage.provider_errors ?? 0,
       parseErrors: usage.parse_errors ?? 0,
-      inputTokens: usage.input_tokens ?? 0,
+      inputTokens: inTok,
       outputTokens: usage.output_tokens ?? 0,
-      cacheReadTokens: usage.cache_read_tokens ?? 0,
+      cacheReadTokens: cached,
+      cacheWriteTokens: usage.cache_write_tokens ?? 0,
+      /** Share of input tokens served from provider prompt caches. */
+      cacheHitRate: inTok ? Math.round((cached / inTok) * 1000) / 1000 : 0,
+      /** Bundle tokens actually sent vs. what the unsliced sources (≈ legacy bundles) would have cost. */
+      contextTokens: ctxSent,
+      contextRawTokens: ctxRaw,
+      contextSavedPct: ctxRaw ? Math.round((1 - ctxSent / ctxRaw) * 1000) / 10 : 0,
+      tokensPerMatchedFunction: matchedFns ? Math.round((inTok + (usage.output_tokens ?? 0)) / matchedFns) : null,
+      costPerMatchedFunction: matchedFns ? Math.round(((usage.cost_usd ?? 0) / matchedFns) * 10_000) / 10_000 : null,
+      ...tokenEconomics(store, runId),
       costUsd: usage.cost_usd ?? 0,
     },
     throughput: { passedPerMin5: Math.round(perMin5 * 10) / 10, etaMinutes: perMin5 > 0 ? Math.round(open / perMin5) : null, series },

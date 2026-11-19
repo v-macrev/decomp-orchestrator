@@ -94,3 +94,22 @@ tr.click:hover td { background: var(--panel-2); cursor: pointer; }
   .palette { display: flex; gap: 8px; border-right: none; border-bottom: 1px solid var(--border); }
   .page { padding: 10px; }
 }
+
+/* Phase 2: difficulty + capability badges (shape differs per level, not only colour) */
+.diff { display: inline-flex; align-items: center; gap: 4px; padding: 1px 8px; border-radius: 999px; font-size: 11px; font-weight: 650; border: 1px solid var(--border); background: var(--panel-2); white-space: nowrap; }
+.diff::before { content: ''; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.diff.easy { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.diff.medium { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }
+.diff.medium::before { border-radius: 1px; }
+.diff.hard { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 50%, transparent); }
+.diff.hard::before { border-radius: 0; transform: rotate(45deg); width: 6px; height: 6px; }
+.cap { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; border: 1px solid var(--border); color: var(--muted); }
+.cap.fast { color: var(--worker); border-color: color-mix(in srgb, var(--worker) 45%, transparent); }
+.cap.balanced { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.cap.frontier { color: var(--orch); border-color: color-mix(in srgb, var(--orch) 45%, transparent); }
+.meter { display: grid; gap: 4px; }
+.meter .track { height: 8px; background: var(--panel-2); border-radius: 4px; overflow: hidden; }
+.meter .fill { height: 100%; background: var(--ok); border-radius: 4px; }
+.edge-rule { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: var(--panel); border: 1px solid var(--border); color: var(--text); pointer-events: all; }
+.toggle-row { display: flex; gap: 6px; flex-wrap: wrap; }
+.toggle-row button.on { border-color: var(--accent); color: var(--accent); }

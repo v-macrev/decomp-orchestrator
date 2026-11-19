@@ -18,8 +18,22 @@ Bulk LLM orchestration for function matching in
   * Integrity and tamper digests.
   * Bounded, env-scrubbed processes in per-slot git worktrees, with optional Docker.
   * Structured verdicts with exact `file:line` reasons that route back to workers.
+* **Capability routing.** Each function is scored from its shape: branches, loops, virtual calls,
+  SSE, EH funclets, earlier failures. Packets go to fast, balanced or frontier worker tiers. Idle
+  higher tiers steal lower-tier backlog, and failing packets are promoted up the ladder.
+* **Token-efficient context.** Each attempt gets a budgeted bundle:
+  * a cached static prefix with distilled repo rules
+  * tree-sitter-sliced headers
+  * pattern-matched lessons
+  * declarations verified earlier in the run
+  * a structured retry delta
+  * function-level edits for large units
+
+  On real packets this sends 67% fewer tokens than full context (−77% with the cached prefix).
+  See [docs/PHASE2.md](docs/PHASE2.md).
 * **Visual flow builder.** A React Flow canvas for Orchestrator, Worker-tier and Gate Keeper
-  topologies (fan-out, fan-in, retry loops, escalation), saved as named presets.
+  topologies (fan-out, fan-in, retry loops, escalation, difficulty rules on dispatch edges), saved
+  as named presets.
 * **Live telemetry.** Queue depth, slots, pass/retry/escalate/dead/quarantine, per-account health
   and throughput, tokens and cost, and per-packet attempts, verdicts and diffs.
 
@@ -40,7 +54,8 @@ crash at 40% and resume):
 
 ```sh
 npm run sim -- --count 500 --crash-at 0.4 --speed 4
-npm test               # scheduler, gate-rule corpus (0 FP / 0 FN), gate pipeline, engine + crash recovery
+npm test               # scheduler, gate-rule corpus (0 FP / 0 FN), gate pipeline, engine + crash recovery, routing, context
+npm run bench:context -w @decomp/server -- --count 500   # legacy vs budgeted vs routed: tokens and cost per matched function
 ```
 
 ## Against a real skyrim_decomp checkout

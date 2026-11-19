@@ -3,7 +3,7 @@
 // throughput, token/cost tracking, per-function drill-down with diffs and Gate Keeper verdicts.
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { Flow, Task, TelemetryEvent } from '@decomp/core';
-import { api, stream, type AccountView, type Batch, type Metrics, type RunSummary } from '../api';
+import { api, stream, type AccountView, type Batch, type Metrics, type RoutingMetrics, type RunSummary } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { TaskDrawer } from '../components/TaskDrawer';
 
@@ -69,6 +69,7 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
   const [f, setF] = useState({
     name: `run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, flowId: 'default', source: mode === 'sim' ? 'synthetic' : 'sr_next',
     count: 500, maxSize: 64, rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: false, draftedBy: 'operator',
+    routing: true, llmTieBreak: false, promoteAfter: 2, workStealing: true, contextMode: 'budgeted',
   });
   const [err, setErr] = useState('');
   useEffect(() => {
@@ -86,6 +87,8 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
       const r = await api.createRun(f.name, f.flowId, {
         selection, packetMaxFunctions: f.packetMaxFunctions, gateConcurrency: f.gateConcurrency, prBatchSize: f.prBatchSize,
         exposureConsent: f.exposureConsent, draftedBy: f.draftedBy, ...(f.budgetUsd ? { budgetUsd: Number(f.budgetUsd) } : {}),
+        routing: { enabled: f.routing, llmTieBreak: f.llmTieBreak, promoteAfterFailures: f.promoteAfter, workStealing: f.workStealing },
+        context: { mode: f.contextMode },
       });
       onCreated(r.id);
     } catch (x) {
@@ -114,6 +117,13 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
         <label>Concurrent compares<input type="number" min={1} max={64} value={f.gateConcurrency} onChange={(e) => set('gateConcurrency', Number(e.target.value))} style={{ width: 80 }} /></label>
         <label>Functions / PR (≤60)<input type="number" min={1} max={60} value={f.prBatchSize} onChange={(e) => set('prBatchSize', Number(e.target.value))} style={{ width: 80 }} /></label>
         <label>Budget USD<input value={f.budgetUsd} placeholder="none" onChange={(e) => set('budgetUsd', e.target.value)} style={{ width: 80 }} /></label>
+      </div>
+      <div className="row" style={{ alignItems: 'center' }}>
+        <label className="inline"><input type="checkbox" checked={f.routing} onChange={(e) => set('routing', e.target.checked)} />Route by complexity</label>
+        <label className="inline" title="Idle higher tiers pull lower-tier backlog"><input type="checkbox" checked={f.workStealing} disabled={!f.routing} onChange={(e) => set('workStealing', e.target.checked)} />Work stealing</label>
+        <label className="inline" title="Borderline scores go to the Orchestrator's model (shape counts only, never listings)"><input type="checkbox" checked={f.llmTieBreak} disabled={!f.routing} onChange={(e) => set('llmTieBreak', e.target.checked)} />LLM tie-break</label>
+        <label>Promote after<input type="number" min={1} max={20} value={f.promoteAfter} disabled={!f.routing} onChange={(e) => set('promoteAfter', Number(e.target.value))} style={{ width: 60 }} /></label>
+        <label>Context<select value={f.contextMode} onChange={(e) => set('contextMode', e.target.value)}><option value="budgeted">budgeted bundles (v2)</option><option value="legacy">legacy bundles</option></select></label>
       </div>
       <label>Drafted by (recorded on claims)<input value={f.draftedBy} onChange={(e) => set('draftedBy', e.target.value)} /></label>
       <label className="inline" style={{ alignItems: 'flex-start' }}>
@@ -192,6 +202,9 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
         <Sparkline series={m.throughput.series} />
       </div>
 
+      <TokenPanel m={m} />
+      {m.routing && <RoutingPanel r={m.routing} knowledge={m.knowledge} />}
+
       <div className="grid2">
         <div className="panel">
           <h2>Account pool</h2>
@@ -212,16 +225,21 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
           </select>
         </div>
         <table>
-          <thead><tr><th>Unit</th><th>Functions</th><th>State</th><th>Tier</th><th>Attempts</th><th>Best bytes</th></tr></thead>
+          <thead><tr><th>Unit</th><th>Functions</th><th>Difficulty</th><th>State</th><th>Tier</th><th>Attempts</th><th>Best bytes</th></tr></thead>
           <tbody>
-            {tasks.map((t) => (
-              <tr key={t.id} className="click" onClick={() => setTask(t.id)}>
-                <td className="mono">{t.unit.replace(/^reconstruction\//, '')}</td>
-                <td>{t.functions.map((x) => x.name ?? x.rva).join(', ')}</td>
-                <td><span className={`chip ${t.state}`}>{t.state}</span></td>
-                <td>{t.tier}</td><td>{t.attemptsTotal}</td><td>{t.bestExactBytes}</td>
-              </tr>
-            ))}
+            {tasks.map((t) => {
+              const tier = m.routing?.tiers[t.tier];
+              return (
+                <tr key={t.id} className="click" onClick={() => setTask(t.id)}>
+                  <td className="mono">{t.unit.replace(/^reconstruction\//, '')}</td>
+                  <td>{t.functions.map((x) => x.name ?? x.rva).join(', ')}</td>
+                  <td><DifficultyBadge d={t.difficulty} score={t.complexity} promoted={!!t.assessment && t.assessment.difficulty !== t.difficulty} /></td>
+                  <td><span className={`chip ${t.state}`}>{t.state}</span></td>
+                  <td>{tier ? <><span className={`cap ${tier.capability}`}>{tier.capability}</span> <span className="muted">{t.tier}</span></> : t.tier}</td>
+                  <td>{t.attemptsTotal}</td><td>{t.bestExactBytes}</td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -267,12 +285,108 @@ export function AccountsTable({ accounts, usage }: { accounts: AccountView[]; us
                 ))}
               </td>
               <td>{a.rateLimitedTotal} / {a.failuresTotal}</td>
-              <td className="muted" style={{ fontSize: 12 }}>{u.map((x) => <div key={x.model}>{x.model}: {x.attempts} att · ${Number(x.cost_usd ?? 0).toFixed(2)}</div>)}</td>
+              <td className="muted" style={{ fontSize: 12 }}>{u.map((x) => <div key={x.model}>{x.model}: {x.attempts} att · ${Number(x.cost_usd ?? 0).toFixed(2)} · cache {Math.round(Number(x.cache_hit_rate ?? 0) * 100)}%</div>)}</td>
             </tr>
           );
         })}
       </tbody>
     </table>
+  );
+}
+
+export function DifficultyBadge({ d, score, promoted }: { d: string; score?: number; promoted?: boolean }) {
+  return (
+    <span className={`diff ${d}`} title={`${d}${score !== undefined ? ` · complexity ${score}` : ''}${promoted ? ' · promoted after failed attempts' : ''}`}>
+      {d}{promoted ? ' ↑' : ''}
+    </span>
+  );
+}
+
+/** Token efficiency: what was sent vs. what unsliced context would have cost, and the prompt-cache share. */
+function TokenPanel({ m }: { m: Metrics }) {
+  const u = m.usage;
+  const hit = Math.round(u.cacheHitRate * 100);
+  const saved = u.contextSavedPct;
+  return (
+    <div className="panel">
+      <div className="row"><h2 className="grow" style={{ margin: 0 }}>Token efficiency</h2><span className="muted" style={{ fontSize: 12 }}>context: {m.run.contextMode} · routing: {m.run.routingEnabled ? 'on' : 'off'}</span></div>
+      <div className="kpis" style={{ marginTop: 10 }}>
+        <Kpi l="Prompt-cache hit" v={`${hit}%`} c={hit >= 40 ? 'var(--ok)' : undefined} />
+        <Kpi l="Context trimmed" v={u.contextRawTokens ? `${saved}%` : '—'} c={saved >= 40 ? 'var(--ok)' : undefined} />
+        <Kpi l="Saved by caching" v={`$${u.savedByCachingUsd.toFixed(2)}`} />
+        <Kpi l="Cached / written" v={`${fmt(u.cacheReadTokens)} / ${fmt(u.cacheWriteTokens)}`} />
+        <Kpi l="Tokens / matched fn" v={u.tokensPerMatchedFunction === null ? '—' : fmt(u.tokensPerMatchedFunction)} />
+        <Kpi l="Cost / matched fn" v={u.costPerMatchedFunction === null ? '—' : `$${u.costPerMatchedFunction.toFixed(4)}`} />
+      </div>
+      <div className="grid2" style={{ marginTop: 12 }}>
+        <Meter label={`Input served from cache · ${fmt(u.cacheReadTokens)} of ${fmt(u.inputTokens)}`} value={u.cacheHitRate} />
+        <Meter label={`Context sent vs. unsliced sources · ${fmt(u.contextTokens)} of ${fmt(u.contextRawTokens)}`} value={u.contextRawTokens ? u.contextTokens / u.contextRawTokens : 0} color="var(--accent)" />
+      </div>
+    </div>
+  );
+}
+
+function Meter({ label, value, color }: { label: string; value: number; color?: string }) {
+  return (
+    <div className="meter">
+      <div className="muted" style={{ fontSize: 12 }}>{label}</div>
+      <div className="track" role="meter" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(value * 100)}><div className="fill" style={{ width: `${Math.max(0, Math.min(1, value)) * 100}%`, ...(color ? { background: color } : {}) }} /></div>
+    </div>
+  );
+}
+
+/** Where work enters the ladder, how it is moving, and what each (difficulty, tier) cell costs. */
+function RoutingPanel({ r, knowledge }: { r: RoutingMetrics; knowledge: Metrics['knowledge'] }) {
+  const ds = ['easy', 'medium', 'hard'] as const;
+  const cell = (d: string, t: number) => r.matrix.find((x) => x.difficulty === d && x.tier === t);
+  return (
+    <div className="grid2">
+      <div className="panel">
+        <div className="row"><h2 className="grow" style={{ margin: 0 }}>Capability routing</h2>{!r.enabled && <span className="chip warn">off: all packets enter at tier 0</span>}</div>
+        <table style={{ marginTop: 8 }}>
+          <thead><tr><th>Difficulty</th><th>Enters at</th><th>Functions</th><th>Open</th><th>Matched</th><th>Dead</th></tr></thead>
+          <tbody>
+            {ds.map((d) => {
+              const b = r.byDifficulty[d];
+              const t = r.tiers[r.route[d]];
+              return (
+                <tr key={d}>
+                  <td><DifficultyBadge d={d} /></td>
+                  <td>{t ? <><span className={`cap ${t.capability}`}>{t.capability}</span> {t.label}{r.routeSource[d] === 'edge' ? <span className="muted"> (edge rule)</span> : <span className="muted"> (nearest capability)</span>}</> : '—'}</td>
+                  <td>{b.functions}</td><td>{b.open}</td><td style={{ color: 'var(--ok)' }}>{b.matched}</td><td style={{ color: b.dead ? 'var(--bad)' : undefined }}>{b.dead}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+        <div className="row" style={{ marginTop: 10, gap: 18 }}>
+          <span><b>{r.moves.stolen ?? 0}</b> <span className="muted">stolen by idle higher tiers</span></span>
+          <span><b>{r.moves.promoted ?? 0}</b> <span className="muted">promoted after failures</span></span>
+          <span><b>{r.moves.rerouted ?? 0}</b> <span className="muted">re-routed by pack analysis</span></span>
+          <span><b>{r.moves.escalated ?? 0}</b> <span className="muted">ladder escalations</span></span>
+        </div>
+      </div>
+      <div className="panel">
+        <h2>Attempts by difficulty × tier</h2>
+        <table>
+          <thead><tr><th />{r.tiers.map((t) => <th key={t.index}><span className={`cap ${t.capability}`}>{t.capability}</span></th>)}</tr></thead>
+          <tbody>
+            {ds.map((d) => (
+              <tr key={d}>
+                <td><DifficultyBadge d={d} /></td>
+                {r.tiers.map((t) => {
+                  const c = cell(d, t.index);
+                  return <td key={t.index} className="mono" style={{ fontSize: 12 }}>{c ? <>{c.passed}/{c.attempts} pass<div className="muted">${Number(c.cost_usd ?? 0).toFixed(2)}</div></> : <span className="muted">—</span>}</td>;
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
+          Run knowledge: {knowledge.byKind.length ? knowledge.byKind.map((k) => `${k.n} ${k.kind.replace('_', ' ')} (${k.uses} uses)`).join(' · ') : 'none yet'}
+        </div>
+      </div>
+    </div>
   );
 }
 

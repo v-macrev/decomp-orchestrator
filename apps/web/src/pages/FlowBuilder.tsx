@@ -8,13 +8,15 @@ import {
   useEdgesState, useNodesState, useReactFlow, type Connection, type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { defaultFlow, type Account, type EdgeKind, type Flow, type FlowNode, type Role } from '@decomp/core';
+import { defaultFlow, type Account, type CapabilityTier, type Difficulty, type EdgeKind, type Flow, type FlowNode, type Role } from '@decomp/core';
 import { api, type FlowIssue } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 
 type NodeData = FlowNode['data'] & { role: Role };
 type RFNode = Node<NodeData, 'role'>;
-type RFEdge = Edge<{ kind: EdgeKind }>;
+type RFEdge = Edge<{ kind: EdgeKind; difficulties?: Difficulty[] }>;
+const DIFFS: Difficulty[] = ['easy', 'medium', 'hard'];
+const CAPS: CapabilityTier[] = ['fast', 'balanced', 'frontier'];
 
 const ROLE_COLOR: Record<Role, string> = { orchestrator: 'var(--orch)', worker: 'var(--worker)', gatekeeper: 'var(--gate)' };
 const ROLE_LABEL: Record<Role, string> = { orchestrator: 'Orchestrator', worker: 'Worker tier', gatekeeper: 'Gate Keeper' };
@@ -22,7 +24,7 @@ const EDGE_STYLE: Record<EdgeKind, { stroke: string; dash?: string; label: strin
   dispatch: { stroke: 'var(--orch)', label: 'dispatch' },
   submit: { stroke: 'var(--worker)', label: 'submit' },
   reject_retry: { stroke: 'var(--bad)', dash: '6 4', label: 'reject → retry' },
-  escalate: { stroke: 'var(--warn)', dash: '2 4', label: 'escalate' },
+  escalate: { stroke: 'var(--warn)', dash: '2 4', label: 'escalate / promote' },
   report: { stroke: 'var(--muted)', dash: '2 3', label: 'report' },
 };
 
@@ -51,6 +53,13 @@ function RoleNode({ data, selected }: NodeProps<RFNode>) {
         {binding}
         {pool.model ? ` · ${pool.model}` : ''}
       </div>
+      {data.role === 'worker' && (
+        <div className="meta">
+          <span className={`cap ${data.capability ?? ''}`} title={data.capability ? 'declared capability' : 'inferred from ladder position'}>{data.capability ?? 'auto'}</span>
+          {data.costWeight ? <> · cost ×{data.costWeight}</> : null}
+          {data.stealDown === false ? ' · no stealing' : ''}
+        </div>
+      )}
       {data.role === 'worker' && <div className="meta">≤{data.maxAttempts} attempts · stuck after {data.stuckAfter}</div>}
       {data.role === 'gatekeeper' && (
         <div className="meta">{Object.entries(data.gate).filter(([, v]) => v).map(([k]) => k).join(' · ')}</div>
@@ -65,7 +74,10 @@ const nodeTypes = { role: RoleNode };
 function toRF(flow: Flow): { nodes: RFNode[]; edges: RFEdge[] } {
   return {
     nodes: flow.nodes.map((n) => ({ id: n.id, type: 'role', position: n.position, data: { ...n.data, role: n.type } })),
-    edges: flow.edges.map((e) => styledEdge({ id: e.id, source: e.source, target: e.target, sourceHandle: e.sourceHandle ?? null, targetHandle: e.targetHandle ?? null, data: { kind: e.kind } })),
+    edges: flow.edges.map((e) => styledEdge({
+      id: e.id, source: e.source, target: e.target, sourceHandle: e.sourceHandle ?? null, targetHandle: e.targetHandle ?? null,
+      data: { kind: e.kind, ...(e.difficulties?.length ? { difficulties: e.difficulties } : {}) },
+    })),
   };
 }
 
@@ -80,7 +92,8 @@ function styledEdge(e: RFEdge): RFEdge {
   const targetHandle = e.targetHandle && HANDLE_IDS.has(e.targetHandle) ? e.targetHandle : loop ? 't' : 'l';
   return {
     ...e,
-    label: s.label,
+    // Routing rules live on the edge: a dispatch edge shows which difficulties enter the ladder there.
+    label: kind === 'dispatch' && e.data!.difficulties?.length ? `dispatch · ${DIFFS.filter((d) => e.data!.difficulties!.includes(d)).join(' + ')}` : s.label,
     animated: kind === 'dispatch',
     sourceHandle,
     targetHandle,
@@ -99,7 +112,10 @@ function fromRF(base: Pick<Flow, 'id' | 'name'>, nodes: RFNode[], edges: RFEdge[
       const { role, ...rest } = data;
       return { id, type: role, position: { x: Math.round(position.x), y: Math.round(position.y) }, data: rest };
     }),
-    edges: edges.map((e) => ({ id: e.id, source: e.source, target: e.target, kind: e.data!.kind, sourceHandle: e.sourceHandle ?? null, targetHandle: e.targetHandle ?? null })),
+    edges: edges.map((e) => ({
+      id: e.id, source: e.source, target: e.target, kind: e.data!.kind, sourceHandle: e.sourceHandle ?? null, targetHandle: e.targetHandle ?? null,
+      ...(e.data!.kind === 'dispatch' && e.data!.difficulties?.length ? { difficulties: e.data!.difficulties } : {}),
+    })),
   };
 }
 
@@ -256,6 +272,16 @@ function Builder() {
   const patchNode = (id: string, patch: Partial<NodeData>) =>
     setNodes((ns) => ns.map((n) => (n.id === id ? { ...n, data: { ...n.data, ...patch } } : n)));
 
+  /** Toggle a difficulty on a dispatch edge. A difficulty belongs to one dispatch edge, so it moves. */
+  const toggleDifficulty = (edgeId: string, d: Difficulty) =>
+    setEdges((es) => es.map((e) => {
+      if (e.data!.kind !== 'dispatch') return e;
+      const cur = e.data!.difficulties ?? [];
+      const next = e.id === edgeId ? (cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d]) : cur.filter((x) => x !== d);
+      if (next.length === cur.length && next.every((x) => cur.includes(x))) return e;
+      return styledEdge({ ...e, data: { ...e.data!, difficulties: next } });
+    }));
+
   const saved = flows.some((f) => f.id === meta.id);
   /** Drafts may be saved with validation errors; a run refuses an invalid flow. */
   const save = async (asNew: boolean) => {
@@ -366,6 +392,19 @@ function Builder() {
             <h2>Edge</h2>
             <p><span className="chip">{EDGE_STYLE[edge.data!.kind].label}</span></p>
             <p className="muted">{edge.source} → {edge.target}</p>
+            {edge.data!.kind === 'dispatch' && (
+              <div style={{ display: 'grid', gap: 6, marginBottom: 10 }}>
+                <h3 style={{ margin: 0 }}>Routing rule</h3>
+                <div className="muted" style={{ fontSize: 12 }}>Packets of these difficulties enter the ladder at this edge's worker tier. Unassigned difficulties go to the tier with the nearest capability.</div>
+                <div className="toggle-row">
+                  {DIFFS.map((d) => (
+                    <button key={d} className={edge.data!.difficulties?.includes(d) ? 'on' : ''} aria-pressed={!!edge.data!.difficulties?.includes(d)} onClick={() => toggleDifficulty(edge.id, d)}>
+                      <span className={`diff ${d}`}>{d}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <button className="danger" onClick={() => setEdges((es) => es.filter((e) => e.id !== edge.id))}>Delete edge</button>
           </div>
         ) : (
@@ -375,8 +414,16 @@ function Builder() {
         {plan ? (
           <div style={{ fontSize: 13 }}>
             {plan.tiers.map((t, i) => (
-              <div key={t.node}>Tier {i}: <b>{t.label}</b> × {t.instances}{t.retryLoop ? ' (retry loop)' : ''}</div>
+              <div key={t.node}>
+                Tier {i}: <span className={`cap ${t.capability}`}>{t.capability}</span> <b>{t.label}</b> × {t.instances}{t.retryLoop ? ' (retry loop)' : ''}
+                {t.capabilityInferred ? <span className="muted"> · inferred</span> : null}
+              </div>
             ))}
+            <div style={{ margin: '6px 0' }}>
+              {DIFFS.map((d) => (
+                <div key={d}><span className={`diff ${d}`}>{d}</span> → tier {plan.route[d]} <span className="muted">({plan.routeSource[d] === 'edge' ? 'edge rule' : 'nearest capability'})</span></div>
+              ))}
+            </div>
             <div className="muted">{plan.workerSlots} worker slots · {plan.gatekeepers} gate keeper node(s) · repo has {repoSlots} worktrees{plan.workerSlots > repoSlots ? ' — will scale down' : ''}</div>
           </div>
         ) : <div className="muted">fix errors to compile a plan</div>}
@@ -444,6 +491,16 @@ function NodeInspector({ node, accounts, onChange, onDelete }: { node: RFNode; a
           <h3>Retry policy</h3>
           <label>Max attempts at this tier<input type="number" min={1} max={20} value={d.maxAttempts} onChange={(e) => onChange({ maxAttempts: Number(e.target.value) })} /></label>
           <label>Escalate after N attempts without byte improvement<input type="number" min={1} max={20} value={d.stuckAfter} onChange={(e) => onChange({ stuckAfter: Number(e.target.value) })} /></label>
+          <h3>Capability routing</h3>
+          <label>Capability tier
+            <select value={d.capability ?? ''} onChange={(e) => { const c = (e.target.value || undefined) as CapabilityTier | undefined; onChange({ capability: c, pool: { ...pool, capability: c } }); }}>
+              <option value="">auto (from ladder position)</option>
+              {CAPS.map((c) => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </label>
+          <div className="muted" style={{ fontSize: 12 }}>Accounts whose model declares this capability are preferred; others are used only when none do.</div>
+          <label>Relative cost weight<input type="number" min={0.1} step={0.1} value={d.costWeight ?? ''} placeholder="—" onChange={(e) => onChange({ costWeight: e.target.value ? Number(e.target.value) : undefined })} /></label>
+          <label className="inline"><input type="checkbox" checked={d.stealDown !== false} onChange={(e) => onChange({ stealDown: e.target.checked })} />Pull lower-tier backlog when idle (work stealing)</label>
         </>
       )}
       {d.role === 'gatekeeper' && (

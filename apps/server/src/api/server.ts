@@ -75,7 +75,10 @@ export async function buildServer(app: App) {
     let plan = null;
     if (!issues.some((i) => i.level === 'error')) {
       const p = compileFlowPlan(flow);
-      plan = { tiers: p.tiers.map((t) => ({ node: t.node.id, label: t.node.data.label, instances: t.node.data.instances, retryLoop: t.retryLoop })), workerSlots: p.workerSlots, gatekeepers: p.gatekeepers.length };
+      plan = {
+        tiers: p.tiers.map((t) => ({ node: t.node.id, label: t.node.data.label, instances: t.node.data.instances, retryLoop: t.retryLoop, capability: t.capability, capabilityInferred: t.capabilityInferred })),
+        workerSlots: p.workerSlots, gatekeepers: p.gatekeepers.length, route: p.route, routeSource: p.routeSource,
+      };
     }
     const unresolved = flow.nodes
       .filter((n) => n.type !== 'gatekeeper' || n.data.gate.llmReview)
@@ -112,6 +115,11 @@ export async function buildServer(app: App) {
     return store.listTasks(req.params.id, { state: q.state as never, limit: Math.min(1000, Number(q.limit ?? 200)), offset: Number(q.offset ?? 0) });
   });
   f.get('/api/runs/:id/batches', async (req: FastifyRequest<{ Params: { id: string } }>) => store.listBatches(req.params.id));
+  f.get('/api/runs/:id/knowledge', async (req: FastifyRequest<{ Params: { id: string }; Querystring: { limit?: string } }>) =>
+    store.listKnowledge(req.params.id, Math.min(1000, Number(req.query.limit ?? 200))));
+
+  // ---------------- context bundles (audit: what a worker was shown; private sections stay redacted)
+  f.get('/api/bundles/:hash', async (req: FastifyRequest<{ Params: { hash: string } }>, reply) => store.getBundle(req.params.hash) ?? notFound(reply, 'bundle'));
 
   // ---------------- tasks
   f.get('/api/tasks/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {

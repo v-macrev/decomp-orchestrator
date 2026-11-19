@@ -4,7 +4,7 @@
 // `prepare`, a comparator with per-function results and partial byte credit, compile errors,
 // flaky infrastructure, and protected inputs whose digest can be tampered with.
 import { createHash } from 'node:crypto';
-import type { CompareFunctionResult, FunctionFeatures, FunctionTarget, SelectionSpec } from '@decomp/core';
+import { ComplexityThresholds, assessPacket, type CompareFunctionResult, type Difficulty, type FunctionFeatures, type FunctionTarget, type SelectionSpec } from '@decomp/core';
 import type { TaskRow } from '../db/store.js';
 import { simIdent, type SimOracle } from '../providers/mock.js';
 import { sleep } from '../util/async.js';
@@ -55,6 +55,10 @@ export class SimRepo implements RepoAdapter, SimOracle {
   }
 
   async init() {}
+
+  difficulty(rva: string, size: number): Difficulty {
+    return assessPacket([simFeatures(rva, size)], THRESHOLDS).difficulty;
+  }
 
   solution(rva: string): string {
     const h = createHash('sha256').update(rva).digest('hex').slice(0, 6);
@@ -185,7 +189,7 @@ export class SimRepo implements RepoAdapter, SimOracle {
   }
   async includedHeaders(_slot: number, _unitFiles: string[], opts: { maxChars?: number } = {}): Promise<DocSection[]> {
     if (!this.realistic) return [];
-    this.sharedHeader ??= simSharedHeader(60);
+    this.sharedHeader ??= simSharedHeader(200); // covers every class a 500-function backlog uses
     const cap = opts.maxChars ?? 8_000;
     const text = this.sharedHeader.length > cap ? `${this.sharedHeader.slice(0, cap)}\n[truncated header]` : this.sharedHeader;
     return [{ id: 'hdr:reconstruction/sim/Sim.h', title: 'reconstruction/sim/Sim.h', source: 'reconstruction/sim/Sim.h', content: text }];
@@ -210,4 +214,5 @@ export class SimRepo implements RepoAdapter, SimOracle {
   }
 }
 
+const THRESHOLDS = ComplexityThresholds.parse({});
 const HEADER = ['// Source exposure: public (community headers).', '// Code origin: original; simulated base', '#include "Sim.h"', ''].join('\n');

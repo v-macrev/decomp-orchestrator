@@ -186,12 +186,15 @@ export class TaskContextBuilder {
 
     // 7. shared run discoveries ------------------------------------------------------------------
     const qualified = [...references].filter((r) => r.includes('::'));
-    const keys = [...new Set([...task.functions.map((f) => f.name ?? '').filter(Boolean), ...qualified, ...primary, ...references])];
+    // Types the slicer pulled in (the packet's class, its bases, referenced types) widen the lookup:
+    // a signature verified on a base class in another unit is exactly what this packet can reuse.
+    const related = slice.included.filter((n) => /^[A-Za-z_]\w*$/.test(n));
+    const keys = [...new Set([...task.functions.map((f) => f.name ?? '').filter(Boolean), ...qualified, ...primary, ...related, ...references])];
     const shownContext = `${unitClip.text}\n${slice.text}`;
-    const cands = this.store.knowledgeFor(opts.runId, keys, 80, primary)
+    const cands = this.store.knowledgeFor(opts.runId, keys, 80, [...new Set([...primary, ...related])])
       .filter((k) => k.sourceUnit !== task.unit || !opts.carried.length)
       .filter((k) => !shownContext.includes(k.content.split('\n')[0]!.trim()))
-      .map((k) => ({ k, s: (keys.includes(k.symbol) ? 3 : 0) + (k.symbols.some((s) => primary.includes(s)) ? 2 : 0) + (k.kind === 'struct_layout' ? 1 : 0) + Math.min(2, k.uses / 5) }))
+      .map((k) => ({ k, s: (keys.includes(k.symbol) ? 3 : 0) + (k.symbols.some((s) => primary.includes(s)) ? 2 : k.symbols.some((s) => related.includes(s)) ? 1 : 0) + (k.kind === 'struct_layout' ? 1 : 0) + Math.min(2, k.uses / 5) }))
       .sort((a, b) => b.s - a.s || b.k.verifiedAt - a.k.verifiedAt);
     const disc: string[] = [];
     const used: Array<{ kind: typeof cands[number]['k']['kind']; symbol: string }> = [];

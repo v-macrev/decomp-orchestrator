@@ -61,7 +61,11 @@ export class PromptCacheSim {
 export interface SimOracle {
   /** The body that matches the target exactly. */
   solution(rva: string): string;
+  /** Ground-truth difficulty of a function (independent of what any prompt claims). */
+  difficulty?(rva: string, size: number): Difficulty;
 }
+
+const RANK: Record<Difficulty, number> = { easy: 0, medium: 1, hard: 2 };
 
 interface SpecFn {
   rva: string;
@@ -138,7 +142,12 @@ export class MockAdapter implements ProviderAdapter {
     // a declared capability (or difficulty) the account's flat `skill` option applies (old behaviour).
     const cap = req.model.capability;
     const matrix = (o.skillMatrix as Record<string, Record<string, number>> | undefined) ?? SKILL_MATRIX;
-    const base = cap && spec.difficulty ? matrix[cap]?.[spec.difficulty] ?? (o.skill ?? 0.6) : (o.skill ?? 0.6);
+    // Ground truth decides, never the prompt: the router's estimate may be wrong, and legacy prompts
+    // carry no difficulty at all — benchmarks must not change the model's odds by changing the prompt.
+    const truth = this.oracle?.difficulty
+      ? spec.functions.map((f) => this.oracle!.difficulty!(f.rva, f.size)).reduce<Difficulty>((m, d) => (RANK[d] > RANK[m] ? d : m), 'easy')
+      : spec.difficulty;
+    const base = cap && truth ? matrix[cap]?.[truth] ?? (o.skill ?? 0.6) : (o.skill ?? 0.6);
     const skill = Math.min(0.97, base + 0.08 * Math.max(0, attempt - 1));
     const edits = spec.outputMode === 'edits' || (spec.outputMode === 'either' && this.rand() < (o.editRate ?? 0.7));
     // Like a well-behaved model: start from the current unit shown in the prompt and keep everything
@@ -155,7 +164,8 @@ export class MockAdapter implements ProviderAdapter {
     if (edits) {
       const functions = spec.functions.map((f) => ({ name: simIdent(f), code: `int ${simIdent(f)}()\n{\n${this.body(f, skill)}\n}` }));
       const header = current && current.trim() ? undefined : ['// Source exposure: public (community headers).', '// Code origin: original; simulated draft', ...spec.functions.map((f) => `// ${f.rva} ${f.name ?? 'Unknown'}`)].join('\n');
-      return JSON.stringify({ edits: [{ path: cpp, ...(header ? { header, declarations: '#include "Sim.h"' } : {}), functions }], notes: `sim attempt ${attempt} (edits)` });
+      const decls = [...(header ? ['#include "Sim.h"'] : []), ...helperDecls(spec.functions)].join('\n');
+      return JSON.stringify({ edits: [{ path: cpp, ...(header ? { header } : {}), ...(decls ? { declarations: decls } : {}), functions }], notes: `sim attempt ${attempt} (edits)` });
     }
     files.push({ path: cpp, content: unit(current, spec.functions.map((f) => ({ f, body: this.body(f, skill) }))) });
     return JSON.stringify({ files, notes: `sim attempt ${attempt}` });
@@ -169,8 +179,27 @@ export class MockAdapter implements ProviderAdapter {
   }
 }
 
+/**
+ * Callee declarations a real draft would carry: methods of the class's base (the sim header's
+ * Class<5k> groups). Harmless to the fake comparator; once a packet passes they become verified
+ * run knowledge that packets of sibling classes are offered.
+ */
+function helperDecls(fns: SpecFn[]): string[] {
+  const out = new Set<string>();
+  for (const f of fns) {
+    const m = /^Class(\d+)::Method(\d+)$/.exec(f.name ?? '');
+    if (!m) continue;
+    const n = Number(m[1]);
+    const base = n % 5 === 0 ? 'BaseForm' : `Class${n - (n % 5)}`;
+    out.add(`std::uint32_t ${base}::Helper${Number(m[2]) % 6}() const;`);
+  }
+  return [...out];
+}
+
 function unit(current: string | null, parts: Array<{ f: SpecFn; body: string }>): string {
   const fns = parts.map(({ f, body }) => `int ${simIdent(f)}()\n{\n${body}\n}\n`);
+  const decls = helperDecls(parts.map((p) => p.f));
+  if (decls.length) fns.unshift(`${decls.join('\n')}\n`);
   if (current && current.trim()) {
     let kept = current;
     for (const { f } of parts) kept = kept.replace(new RegExp(`int ${simIdent(f)}\\(\\)\\n\\{[\\s\\S]*?\\n\\}\\n?`, 'g'), '');

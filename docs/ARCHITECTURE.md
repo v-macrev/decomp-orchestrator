@@ -266,10 +266,14 @@ bottleneck is compare throughput, so set `gateConcurrency` to roughly physical c
   * Deterministic orchestrator.
   * Simulator.
   * API.
-* **Phase 2 (initial versions shipped):**
+* **Phase 2 (shipped):**
   * React Flow builder.
   * Live dashboard.
   * PR-history lesson ingestion.
+  * Complexity classification, capability-tier routing, work stealing and retry promotion.
+  * Budgeted TaskContextBundle v2, prompt caching and token telemetry.
+  * Run knowledge cache.
+  * Details and measured results: **[PHASE2.md](PHASE2.md)**.
 * **Next:**
   * LLM orchestrator planner (prioritisation across units, dependency ordering from call graphs).
   * LLM lesson distillation from review prose.

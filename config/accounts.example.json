@@ -6,9 +6,11 @@
     "provider": "anthropic",
     "workspace": "anthropic:workspace-a",
     "auth": { "type": "api_key", "secretRef": "env:ANTHROPIC_KEY_WS_A" },
+    "_comment_models": "capability = which routing tier the model serves (fast/balanced/frontier); costWeight breaks ties; cache write = 1.25x input (5-minute TTL).",
     "models": [
-      { "id": "claude-sonnet-5-5", "roles": ["worker"], "defaultEffort": "medium", "contextTokens": 1000000, "maxOutputTokens": 64000, "priceInPerMTok": 2, "priceOutPerMTok": 10, "priceCacheReadPerMTok": 0.1 },
-      { "id": "claude-opus-5-5", "roles": ["worker", "gatekeeper", "orchestrator"], "defaultEffort": "high", "contextTokens": 1000000, "maxOutputTokens": 64000, "priceInPerMTok": 4, "priceOutPerMTok": 20, "priceCacheReadPerMTok": 0.2 }
+      { "id": "claude-haiku-5-5", "roles": ["worker", "orchestrator"], "capability": "fast", "costWeight": 1, "defaultEffort": "medium", "contextTokens": 1000000, "maxOutputTokens": 64000, "priceInPerMTok": 0.1, "priceOutPerMTok": 0.5, "priceCacheReadPerMTok": 0.01, "priceCacheWritePerMTok": 0.125 },
+      { "id": "claude-sonnet-5-5", "roles": ["worker"], "capability": "balanced", "costWeight": 4, "defaultEffort": "medium", "contextTokens": 1000000, "maxOutputTokens": 64000, "priceInPerMTok": 2, "priceOutPerMTok": 10, "priceCacheReadPerMTok": 0.1, "priceCacheWritePerMTok": 2.5 },
+      { "id": "claude-opus-5-5", "roles": ["worker", "gatekeeper", "orchestrator"], "capability": "frontier", "costWeight": 10, "defaultEffort": "high", "contextTokens": 1000000, "maxOutputTokens": 64000, "priceInPerMTok": 4, "priceOutPerMTok": 20, "priceCacheReadPerMTok": 0.2, "priceCacheWritePerMTok": 5 }
     ],
     "limits": { "requestsPerMinute": 200, "inputTokensPerMinute": 800000, "outputTokensPerMinute": 160000, "maxConcurrency": 8, "dailyBudgetUsd": 150 },
     "tags": ["cheap", "strong", "orchestrator"],
@@ -21,7 +23,7 @@
     "workspace": "anthropic:workspace-b",
     "auth": { "type": "api_key", "secretRef": "env:ANTHROPIC_KEY_WS_B" },
     "models": [
-      { "id": "claude-sonnet-5-5", "roles": ["worker"], "defaultEffort": "medium", "contextTokens": 1000000, "maxOutputTokens": 64000, "priceInPerMTok": 2, "priceOutPerMTok": 10, "priceCacheReadPerMTok": 0.1 }
+      { "id": "claude-sonnet-5-5", "roles": ["worker"], "capability": "balanced", "costWeight": 4, "defaultEffort": "medium", "contextTokens": 1000000, "maxOutputTokens": 64000, "priceInPerMTok": 2, "priceOutPerMTok": 10, "priceCacheReadPerMTok": 0.1, "priceCacheWritePerMTok": 2.5 }
     ],
     "limits": { "requestsPerMinute": 200, "inputTokensPerMinute": 800000, "outputTokensPerMinute": 160000, "maxConcurrency": 8, "dailyBudgetUsd": 150 },
     "tags": ["cheap"]
@@ -32,7 +34,7 @@
     "label": "Claude Code profile 1",
     "provider": "claude_cli",
     "auth": { "type": "cli_profile", "configDir": "C:/Users/me/.claude-profiles/one" },
-    "models": [{ "id": "claude-opus-5-5", "roles": ["worker"], "defaultEffort": "high", "priceInPerMTok": 0, "priceOutPerMTok": 0 }],
+    "models": [{ "id": "claude-opus-5-5", "roles": ["worker"], "capability": "frontier", "defaultEffort": "high", "priceInPerMTok": 0, "priceOutPerMTok": 0 }],
     "limits": { "requestsPerMinute": 20, "inputTokensPerMinute": 400000, "outputTokensPerMinute": 80000, "maxConcurrency": 2 },
     "tags": ["strong"],
     "enabled": false
@@ -43,7 +45,7 @@
     "label": "OpenAI · org A",
     "provider": "openai",
     "auth": { "type": "api_key", "secretRef": "env:OPENAI_KEY_A" },
-    "models": [{ "id": "gpt-5", "roles": ["worker"], "defaultEffort": "medium", "priceInPerMTok": 0, "priceOutPerMTok": 0 }],
+    "models": [{ "id": "gpt-5", "roles": ["worker"], "capability": "balanced", "defaultEffort": "medium", "priceInPerMTok": 0, "priceOutPerMTok": 0 }],
     "limits": { "requestsPerMinute": 300, "inputTokensPerMinute": 1000000, "outputTokensPerMinute": 200000, "maxConcurrency": 8, "dailyBudgetUsd": 100 },
     "tags": ["cheap"],
     "enabled": false
@@ -55,7 +57,7 @@
     "provider": "openai_compat",
     "baseUrl": "http://127.0.0.1:8000/v1",
     "auth": { "type": "none" },
-    "models": [{ "id": "qwen2.5-coder-32b", "roles": ["worker"], "contextTokens": 32000, "maxOutputTokens": 8000 }],
+    "models": [{ "id": "qwen2.5-coder-32b", "roles": ["worker"], "capability": "fast", "contextTokens": 32000, "maxOutputTokens": 8000 }],
     "limits": { "requestsPerMinute": 10000, "inputTokensPerMinute": 100000000, "outputTokensPerMinute": 100000000, "maxConcurrency": 4 },
     "tags": ["cheap"],
     "priority": -1,

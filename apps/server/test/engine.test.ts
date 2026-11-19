@@ -143,7 +143,8 @@ describe('RunEngine', () => {
 
   it('escalates stuck packets to the strong tier', async () => {
     const s = setup(tmpDb(), { accounts: accounts({ 'claude-ws-a': { skill: 0.05 }, 'claude-ws-b': { skill: 0.05 }, 'gpt-a': { skill: 0.05 } }) });
-    const run = s.engine.createRun('esc', { flowId: 'default', selection: { source: 'synthetic', count: 40, seed: 3 } }, flow(4, 2));
+    // Ladder mechanics in isolation (difficulty routing would send hard packets straight to the strong tier).
+    const run = s.engine.createRun('esc', { flowId: 'default', selection: { source: 'synthetic', count: 40, seed: 3 }, routing: { enabled: false } }, flow(4, 2));
     await s.engine.start(run.id);
     await s.engine.waitFor(run.id);
     const escalations = s.store.db.prepare(`SELECT COUNT(*) n FROM verdicts WHERE route = 'escalate'`).get() as { n: number };
