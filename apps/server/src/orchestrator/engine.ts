@@ -479,7 +479,7 @@ export class RunEngine {
       const batches = await stageRun(store, this.deps.repo, events, runId, run.row.config.prBatchSize);
       store.setRunStatus(runId, 'completed', ['running', 'paused']);
       const fc = store.functionCounts(runId);
-      events.emit('run.completed', `completed: ${fc.passed ?? 0} passed, ${fc.dead ?? 0} dead, ${fc.quarantined ?? 0} quarantined; ${batches} PR batch(es) drafted`, { runId, data: fc });
+      events.emit('run.completed', `completed: ${(fc.passed ?? 0) + (fc.staged ?? 0)} functions matched, ${fc.dead ?? 0} dead-lettered, ${fc.quarantined ?? 0} quarantined; ${batches} PR batch(es) staged`, { runId, data: fc });
     } catch (e) {
       store.setRunStatus(runId, 'failed', undefined, { error: (e as Error).message });
       events.emit('run.failed', `staging failed: ${(e as Error).message}`, { runId, level: 'error' });

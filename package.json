@@ -9,7 +9,7 @@
     "build:web": "npm run build -w @decomp/web",
     "typecheck": "tsc -p packages/core && tsc -p apps/server && tsc -p apps/web --noEmit",
     "test": "npm test -w @decomp/server",
-    "sim": "npm run sim -w @decomp/server"
+    "sim": "npm run sim -w @decomp/server --"
   },
   "engines": { "node": ">=22" }
 }
