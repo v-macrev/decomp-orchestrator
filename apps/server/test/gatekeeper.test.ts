@@ -102,6 +102,35 @@ describe('GateKeeper pipeline', () => {
     expect(r.verdict.route).toBe('retry');
   });
 
+  it('blocks preflight findings in the packet but only warns on untouched files outside it', async () => {
+    class Repo extends SimRepo {
+      override async preflight() {
+        return { completed: true, ok: false, infraError: null, problems: [
+          'reconstruction/sim/Class0.h:1: missing reconstruction origin statement in leading header',
+          'reconstruction/shared/TESForm.h:1: missing reconstruction origin statement in leading header',
+        ] };
+      }
+    }
+    const repo = new Repo({ slots: 1 });
+    const t = task();
+    const r = await run(repo, t, [{ path: t.unit, content: unit(repo, t) }]);
+    const f = r.verdict.findings.filter((x) => x.stage === 'preflight');
+    expect(f.map((x) => [x.code, x.severity, x.file])).toEqual([
+      ['PREFLIGHT_PROBLEM', 'block', 'reconstruction/sim/Class0.h'],
+      ['PREFLIGHT_OUT_OF_SCOPE', 'warn', 'reconstruction/shared/TESForm.h'],
+    ]);
+    expect(r.verdict.decision).toBe('reject');
+
+    class OnlyUpstream extends SimRepo {
+      override async preflight() {
+        return { completed: true, ok: false, infraError: null, problems: ['reconstruction/shared/TESForm.h:1: missing reconstruction origin statement'] };
+      }
+    }
+    const repo2 = new OnlyUpstream({ slots: 1 });
+    const ok = await run(repo2, t, [{ path: t.unit, content: unit(repo2, t) }]);
+    expect(ok.verdict.decision).toBe('pass');
+  });
+
   it('LLM review can block but deterministic failure always wins', async () => {
     const repo = new SimRepo({ slots: 1 });
     const t = task();

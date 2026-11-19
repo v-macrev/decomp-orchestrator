@@ -41,6 +41,14 @@ const LEGIT: Array<[string, string, { before?: string; targets?: FunctionTarget[
   ['pinned 40-hex revision in a label comment', `${HEADER}// Foo: COMMUNITY(owner/repo@0123456789abcdef0123456789abcdef01234567, MIT)\nint F() { return 1; }\n`],
   ['virtual call through vtable member', `${HEADER}void Actor::Kill() { this->Unk_A0(nullptr, 0); }\n`],
   ['string literal containing tooling-like words', `${HEADER}const char* TESForm::Name() const { return "compare"; }\n`],
+  // Real skyrim_decomp header shape: SPDX, labels and compared lines do not count against the budget.
+  ['compact header with SPDX, labels and several compared lines', [
+    '// Source exposure: mixed (community headers; the pinned image listing).',
+    '// SPDX-License-Identifier: MIT (CommonLibSSE-NG declarations, Copyright (c) 2018 Ryan-rsm-McKenzie; full text: licenses/CommonLibSSE-NG.txt)',
+    '// Code origin: original; the listing and community declarations only',
+    '// 0x3cc6d0 TESActorBase::GetHasPLSpecTex', '// 0x3b03a0 TESActorBase::GetIsPlayerOwner', '// 0x3b03c0 TESActorBase::GetIsGhost',
+    '// TESActorBase: COMMUNITY(CharmedBaryon/CommonLibSSE-NG@0d9f1c2, MIT)', '// GetIsGhost: GUESS(low)',
+    '// Adapted bodies: none', '#include "TESActorBase.h"', 'bool TESActorBase::GetIsGhost() const { return flags & 1; }', ''].join('\n')],
 ];
 
 const CHEATS: Array<[string, string, string, { before?: string; targets?: FunctionTarget[] }?]> = [
@@ -77,6 +85,7 @@ const CHEATS: Array<[string, string, string, { before?: string; targets?: Functi
   ['licence text in header', `// Permission is hereby granted, free of charge, to any person\n// Code origin: original\n${HEADER}`, 'CONV_HEADER_LICENCE_TEXT'],
   ['origin placeholder', HEADER.replace('original; the listing and community declarations only', '<fill me>'), 'CONV_ORIGIN_PLACEHOLDER'],
   ['header too long', `${'// note\n'.repeat(8)}${HEADER}`, 'CONV_HEADER_TOO_LONG'],
+  ['unfilled skeleton placeholder', HEADER.replace('// Adapted bodies: none', '// Adapted bodies: SKELETON_TODO_ORIGIN'), 'CONV_ORIGIN_PLACEHOLDER'],
 ];
 
 describe('gate rules: false positives (legit code passes)', () => {

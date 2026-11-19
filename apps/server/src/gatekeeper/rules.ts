@@ -98,9 +98,11 @@ const MACRO_KEYWORDS = new Set([
   '__forceinline', '__declspec', 'assert',
 ]);
 const VERIFIER_REFS = /\b(?:contrib\.py|compare(?:_internal|_runtime)?\.py|leakgrep|target[_-]?hash(?:es)?|ci_hash_check|builds\/target\.json|recipe_sha256|verify_function|\.local[\\/])/i;
-const LICENCE_TEXT = /Permission is hereby granted|GNU (?:Affero |Lesser )?General Public License|THE SOFTWARE IS PROVIDED|Licensed under the Apache License|Redistribution and use in source and binary forms/i;
-const LABEL_LINE = /^\/\/\s*[^:]+:\s*(?:STANDIN\s+)?(?:COMMUNITY\(|GUESS\(|EXE_RTTI|OBSERVED)/;
-const RVA_LINE = /^\/\/\s*0x[0-9a-fA-F]+\s+\S+/;
+// Header budget: a faithful port of lint_reconstruction.header_budget_problems in the target repo.
+const HEADER_LIMIT = 6;
+const FULL_LICENCE = /Permission is hereby granted|THE SOFTWARE IS PROVIDED|^\/\/[ \t]*MIT License[ \t]*$|GNU GENERAL PUBLIC LICENSE|Apache License/m;
+const LABEL_WORD = /(?<![A-Za-z0-9_])(?:COMMUNITY|SIBLING|GUESS|EXE_RTTI|STANDIN|OBSERVED)[A-Za-z0-9_]*/;
+const COMPARED_LINE = /^\/\/[ \t]*0x[0-9a-fA-F]+(?:[ \t]|$)/;
 const TRIVIAL_BODIES = new Set(['', 'return;', 'return 0;', 'return false;', 'return true;', 'return nullptr;', 'return {};', 'return NULL;', 'return 0u;', 'return 0.0f;', 'return 0.0;']);
 /** x64 MSVC: `xor eax,eax; ret` is 3 bytes; anything this large cannot be a trivial return. */
 const STUB_MIN_TARGET_BYTES = 24;
@@ -217,29 +219,42 @@ export function cheatScan(ctx: CheatContext): Finding[] {
     }
   }
 
-  // --- header block conventions (only when the header changed)
+  // --- header block conventions (new or changed headers only, as the repo's header_check does)
   const header = leadingComment(after);
   const prevHeader = ctx.before ? leadingComment(ctx.before) : null;
-  if (header.lines.length && (prevHeader === null || prevHeader.text !== header.text)) {
-    const counted = header.lines.filter((l) => !LABEL_LINE.test(l) && !RVA_LINE.test(l) && !/^\/\/\s*Sibling source:/.test(l) && l.trim() !== '//');
-    if (counted.length > 6) push(f, 'CONV_HEADER_TOO_LONG', 'block', path, 1, `header has ${counted.length} lines (max 6 besides labels, Sibling source and 0x<rva> lines)`);
-    if (LICENCE_TEXT.test(header.text)) push(f, 'CONV_HEADER_LICENCE_TEXT', 'block', path, 1, 'header contains licence text; use the one-line SPDX notice only');
-    const origin = header.lines.find((l) => /^\/\/\s*Code origin:/.test(l));
+  if (header.trim() && prevHeader !== header) {
+    if (FULL_LICENCE.test(header)) push(f, 'CONV_HEADER_LICENCE_TEXT', 'block', path, 1, 'remove the licence text from the header; use the one-line SPDX notice');
+    const counted = countedHeaderLines(header);
+    const shrinks = prevHeader !== null && counted.every((l) => countedHeaderLines(prevHeader).includes(l));
+    if (counted.length > HEADER_LIMIT && !shrinks) {
+      push(f, 'CONV_HEADER_TOO_LONG', 'block', path, 1, `header has ${counted.length} lines besides labels, sources, compared functions and SPDX; keep at most ${HEADER_LIMIT} (drop Task, Labels, Recipe, Evidence, Drafted by, disclaimers, wrapped skeleton guidance)`);
+    }
+    const origin = header.split('\n').find((l) => /^\/\/\s*Code origin:/.test(l));
     if (origin && (/<[^>]*>|TODO|\?\?\?/.test(origin) || /Code origin:\s*$/.test(origin))) {
       push(f, 'CONV_ORIGIN_PLACEHOLDER', 'block', path, 1, 'fill the "Code origin:" header line truthfully');
     }
   }
+  const placeholder = /\bSKELETON_TODO\w*/.exec(after);
+  if (placeholder && !f.some((x) => x.code === 'CONV_ORIGIN_PLACEHOLDER')) {
+    push(f, 'CONV_ORIGIN_PLACEHOLDER', 'block', path, lineOf(after, placeholder.index), `replace the skeleton placeholder ${placeholder[0]}`);
+  }
   return f;
 }
 
-function leadingComment(src: string) {
+/** The comment block at the top of the file (repo: lint_reconstruction.leading_comment). */
+function leadingComment(src: string): string {
   const lines: string[] = [];
-  for (const l of src.split('\n')) {
-    if (/^\s*\/\//.test(l)) lines.push(l.trim());
-    else if (l.trim() === '' && lines.length === 0) continue;
+  for (const line of src.split(/\r?\n/)) {
+    const s = line.trim();
+    if (s.startsWith('//') || s.startsWith('/*') || s.startsWith('*') || !s) lines.push(s);
     else break;
   }
-  return { lines, text: lines.join('\n') };
+  return lines.join('\n');
+}
+
+/** Lines counting against the budget (repo: lint_reconstruction.counted_header_lines). */
+function countedHeaderLines(header: string): string[] {
+  return header.split('\n').filter((ln) => ln.trim() && ln.trim() !== '//' && !LABEL_WORD.test(ln) && !ln.includes('Sibling source:') && !COMPARED_LINE.test(ln.trim()) && !ln.includes('SPDX-License-Identifier'));
 }
 
 // ---------------------------------------------------------------- classification

@@ -182,12 +182,16 @@ export class SrRepo implements RepoAdapter {
     return { srTaskId: j.task, allowedPaths: unit, packs: (j.packs as string[]) ?? [], toolingChanges };
   }
 
-  /** Release local claims taken by `prepare` (operator tooling / cleanup). */
-  async release(rvas: string[], reason: string) {
+  /**
+   * Release local claims taken by `prepare`. Runs from the operator's main checkout (a slot may be
+   * mid-attempt or dirty); `release` only edits SR_LOCAL_DIR/contrib/claims.json when offline.
+   */
+  async releaseClaims(rvas: string[], reason: string) {
     const out: Array<{ rva: string; ok: boolean; error: string | null }> = [];
     for (const rva of rvas) {
-      const r = await this.srMutex.run('sr-local', () => this.sr(this.wt(0), ['release', rva, '--reason', reason], { timeoutMs: 120_000 }));
-      out.push({ rva, ok: r.run.code === 0, error: r.json?.error ?? null });
+      const r = await this.srMutex.run('sr-local', () => this.sr(this.cfg.repoPath, ['release', rva, '--reason', reason], { timeoutMs: 120_000 }));
+      const ok = r.run.code === 0 && r.json?.ok !== false;
+      out.push({ rva, ok, error: ok ? null : (r.json?.error ?? `exit ${r.run.code}: ${(r.run.stderr || r.run.stdout).trim().slice(-300)}`) });
     }
     return out;
   }
@@ -273,7 +277,17 @@ export class SrRepo implements RepoAdapter {
     const { run, json } = await this.sr(this.wt(slot), ['preflight', prep.srTaskId ?? ''], opts);
     if (run.timedOut || run.code === 124 || !json) return { completed: false, ok: false, problems: [], infraError: `preflight failed to run (exit ${run.code}): ${(run.stderr || run.stdout).slice(0, 200)}` };
     if (run.code === 0) return { completed: true, ok: true, problems: [], infraError: null };
-    const problems = [...((json.errors as string[]) ?? []), ...(json.error ? [String(json.error)] : [])].map((s) => String(s).slice(0, 400));
+    // contrib.py preflight returns {problems|blockers, label_findings, origin_findings, warnings, messages}
+    const list = (v: unknown) => (Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x))) : []);
+    const blockers = list(json.problems).length ? list(json.problems) : list(json.blockers);
+    const problems = [
+      ...blockers,
+      ...list(json.label_findings).map((x) => `label: ${x}`),
+      ...list(json.origin_findings).map((x) => `origin: ${x}`),
+      ...list(json.errors),
+      ...(json.error ? [String(json.error)] : []),
+    ].map((s) => s.slice(0, 400));
+    if (!problems.length) problems.push(...list(json.messages).filter((m) => /BLOCKED|error|fail/i.test(m)).map((s) => s.slice(0, 400)));
     return { completed: true, ok: false, problems: problems.length ? problems : [`preflight exit ${run.code}`], infraError: null };
   }
 

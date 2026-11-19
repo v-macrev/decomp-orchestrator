@@ -29,6 +29,22 @@ const { values: a } = parseArgs({
 });
 if (!a.repo || !a.local || !a.worktrees) throw new Error('--repo, --local and --worktrees are required');
 
+/** What a worker is asked to do with the generated header: fill placeholders, drop wrapped guidance. */
+function compactSkeleton(src: string): string {
+  const lines = src.split('\n');
+  let end = 0;
+  while (end < lines.length && (lines[end]!.trim().startsWith('//') || !lines[end]!.trim())) end++;
+  const head = lines.slice(0, end).filter((l) => l.trim());
+  const keep: string[] = [];
+  const exposure = head.find((l) => /Source exposure:/.test(l));
+  if (exposure) keep.push('// Source exposure: mixed (community headers; the pinned image listing).');
+  for (const l of head) if (/SPDX-License-Identifier/.test(l)) keep.push(l);
+  keep.push('// Code origin: original; community declarations only');
+  for (const l of head) if (/^\/\/\s*0x[0-9a-fA-F]+\s/.test(l) || /(COMMUNITY|SIBLING|GUESS|EXE_RTTI|STANDIN|OBSERVED)/.test(l)) keep.push(l);
+  keep.push('// Adapted bodies: none');
+  return [...[...new Set(keep)], ...lines.slice(end)].join('\n');
+}
+
 const t0 = Date.now();
 const step = (s: string) => console.log(`\n[${((Date.now() - t0) / 1000).toFixed(1)}s] ${s}`);
 const repo = new SrRepo({
@@ -76,13 +92,19 @@ try {
   console.log(`  findings ${cheat.verdict.findings.map((f) => f.code).join(', ')}`);
   if (cheat.verdict.decision === 'pass' || cheat.written.length) exitCode = 1;
 
-  step('gate B: unmodified skeleton through the real comparator (expect a mismatch, not infra)');
-  const plain = await gate.evaluate({ task, attemptId: 'smoke-b', slot: 0, prepared: prep, checks, compareTimeoutMs: 900_000, signal: sig, files: [{ path: cpp, content: skeleton }] });
+  step('gate B: skeleton with placeholders filled and header compacted, through the real comparator (expect a mismatch, not infra)');
+  const candidate = compactSkeleton(skeleton);
+  console.log(`  candidate header:\n${candidate.split('\n').slice(0, 8).map((l) => `    | ${l}`).join('\n')}`);
+  const plain = await gate.evaluate({ task, attemptId: 'smoke-b', slot: 0, prepared: prep, checks, compareTimeoutMs: 900_000, signal: sig, files: [{ path: cpp, content: candidate }] });
   console.log(`  decision ${plain.verdict.decision}/${plain.verdict.route}; infra=${plain.infra}; exactBytes=${plain.verdict.exactBytes}`);
   console.log(`  stages ${plain.verdict.stages.map((s) => `${s.name}:${s.skipped ? 'skip' : s.ok ? 'ok' : 'FAIL'}(${s.ms}ms)`).join(' ')}`);
   for (const c of plain.verdict.compare ?? []) console.log(`  compare ${c.rva} ${c.result} reason=${c.reason} first=${c.firstMismatch} bytes=${c.exactBytes}/${c.targetSize} hint=${c.hint ?? ''}`);
   for (const f of plain.verdict.findings) console.log(`  [${f.severity}] ${f.stage} ${f.code}: ${f.message.slice(0, 240)}`);
   if (plain.infra) exitCode = 1;
+  if (plain.verdict.findings.some((f) => f.message === 'preflight exit 1')) {
+    console.log('  preflight returned no parseable reasons');
+    exitCode = 1;
+  }
 
   step('integrity: worktree changes after evaluation');
   console.log(`  changed: ${(await repo.changedPaths(0)).join(', ') || 'none'}`);
@@ -91,7 +113,11 @@ try {
   console.error(`\nFAILED: ${(e as Error).stack ?? e}`);
 } finally {
   step('cleanup');
-  if (claimed.length) console.log(`  release: ${JSON.stringify(await repo.release(claimed, 'decomp-orchestrator smoke test').catch((e) => String(e)))}`);
+  if (claimed.length) {
+    const rel = await repo.releaseClaims(claimed, 'decomp-orchestrator smoke test').catch((e) => [{ rva: '?', ok: false, error: String(e) }]);
+    console.log(`  release: ${JSON.stringify(rel)}`);
+    if (rel.some((r) => !r.ok)) exitCode = 1;
+  }
   if (!a.keep) {
     await repo.removeWorktrees().catch((e) => console.log(`  worktree removal failed: ${e}`));
     console.log('  worktrees removed');

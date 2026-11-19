@@ -70,6 +70,8 @@ export interface RepoAdapter {
   /** Headers included by the unit (one level), for the context bundle. */
   includedHeaders(slot: number, unitFiles: string[]): Promise<DocSection[]>;
   readPack(pack: string): Promise<string | null>;
+  /** Give back local claims taken by `prepare` for packets that will not be submitted. */
+  releaseClaims?(rvas: string[], reason: string): Promise<Array<{ rva: string; ok: boolean; error: string | null }>>;
   /**
    * Assemble a PR batch: write the final unit files on a fresh branch from the base revision,
    * re-verify every packet against the combined result, and commit. Never pushes or opens a PR.

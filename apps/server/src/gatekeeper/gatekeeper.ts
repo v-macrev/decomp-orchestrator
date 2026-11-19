@@ -185,7 +185,16 @@ export class GateKeeper {
         infra = true;
         return [{ stage: 'preflight', code: 'INFRA_PREFLIGHT', severity: 'block', message: r.infraError }];
       }
-      return r.problems.map((p) => ({ stage: 'preflight', code: 'PREFLIGHT_PROBLEM', severity: 'block' as const, message: p }));
+      // A finding on a file the Worker may not edit and did not change is pre-existing upstream state:
+      // blocking on it would trap the packet in an unfixable retry loop, so it is reported, not held.
+      const writable = new Set(input.prepared.allowedPaths);
+      return r.problems.map((p) => {
+        const file = /^([\w./-]+\.(?:h|cpp|hpp|inl)):(\d+):/.exec(p);
+        const outOfScope = file && !writable.has(file[1]!) && !accepted.some((a) => a.path === file[1]);
+        return outOfScope
+          ? { stage: 'preflight', code: 'PREFLIGHT_OUT_OF_SCOPE', severity: 'warn' as const, file: file[1], line: Number(file[2]), message: `pre-existing, outside this packet: ${p}` }
+          : { stage: 'preflight', code: 'PREFLIGHT_PROBLEM', severity: 'block' as const, ...(file ? { file: file[1], line: Number(file[2]) } : {}), message: p };
+      });
     }))) return done('reject', 'retry');
 
     // 9: optional LLM review (block-only) ----------------------------------------------------------

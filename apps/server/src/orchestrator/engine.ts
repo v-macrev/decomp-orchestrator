@@ -179,7 +179,24 @@ export class RunEngine {
     const n = this.queue.cancelOpen(runId);
     this.deps.store.setRunStatus(runId, 'cancelled', ['created', 'discovering', 'running', 'paused']);
     this.deps.events.emit('run.cancelled', `cancelled (${n} open task(s) cancelled)`, { runId, level: 'warn' });
+    await this.releaseUnsubmitted(runId, 'run cancelled');
     return true;
+  }
+
+  /** Give back local claims of packets that will not be submitted (dead, quarantined, cancelled). */
+  private async releaseUnsubmitted(runId: string, why: string) {
+    const repo = this.deps.repo;
+    if (!repo.releaseClaims) return;
+    const rows = this.deps.store.db
+      .prepare(`SELECT functions_json FROM tasks WHERE run_id = ? AND state IN ('dead','quarantined','cancelled') AND sr_task_id IS NOT NULL`)
+      .all(runId) as Array<{ functions_json: string }>;
+    const rvas = [...new Set(rows.flatMap((r) => (JSON.parse(r.functions_json) as Array<{ rva: string }>).map((f) => f.rva)))];
+    if (!rvas.length) return;
+    const res = await repo.releaseClaims(rvas, `decomp-orchestrator: ${why}`).catch((e) => rvas.map((rva) => ({ rva, ok: false, error: String(e) })));
+    const failed = res.filter((r) => !r.ok);
+    this.deps.events.emit('claims.released', `released ${res.length - failed.length}/${res.length} local claim(s) (${why})${failed.length ? `; failed: ${failed.map((f) => `${f.rva} ${f.error}`).join('; ')}` : ''}`, {
+      runId, level: failed.length ? 'warn' : 'info', data: { released: res.length - failed.length, failed: failed.length },
+    });
   }
 
   /** On boot: every lease is stale; resume runs that were running when the process died. */
@@ -475,6 +492,7 @@ export class RunEngine {
     this.active.delete(runId);
     if (run.cancel.signal.aborted) return;
     if (this.queue.hasOpenWork(runId)) return; // paused/hard-stopped with work left
+    await this.releaseUnsubmitted(runId, 'not matched in this run');
     try {
       const batches = await stageRun(store, this.deps.repo, events, runId, run.row.config.prBatchSize);
       store.setRunStatus(runId, 'completed', ['running', 'paused']);
