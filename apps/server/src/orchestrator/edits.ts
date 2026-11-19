@@ -34,19 +34,22 @@ export function applyEdit(src: string, e: UnitEdit): { content: string; problems
   const problems: string[] = [];
   let out = src.replace(/\r\n/g, '\n');
 
+  let extraDecl = '';
   if (e.header !== undefined) {
-    const hdr = e.header.replace(/\r\n/g, '\n').trim();
-    if (hdr && !hdr.split('\n').every((l) => l.trim().startsWith('//'))) problems.push('header edit must contain only // comment lines');
-    else {
-      const lines = out.split('\n');
-      let k = 0;
-      while (k < lines.length && lines[k]!.trim().startsWith('//')) k++;
-      out = [...(hdr ? hdr.split('\n') : []), ...lines.slice(k)].join('\n');
-    }
+    // Comment lines form the header; anything else a worker put there (an #include, a forward
+    // declaration) belongs after the includes — move it instead of failing the whole attempt.
+    const raw = e.header.replace(/\r\n/g, '\n').trim().split('\n');
+    const hdr = raw.filter((l) => l.trim().startsWith('//'));
+    extraDecl = raw.filter((l) => l.trim() && !l.trim().startsWith('//')).join('\n');
+    const lines = out.split('\n');
+    let k = 0;
+    while (k < lines.length && lines[k]!.trim().startsWith('//')) k++;
+    out = [...hdr, ...lines.slice(k)].join('\n');
   }
 
-  if (e.declarations?.trim()) {
-    const decl = e.declarations.replace(/\r\n/g, '\n').trim();
+  const declText = [extraDecl, e.declarations ?? ''].filter((s) => s.trim()).join('\n');
+  if (declText.trim()) {
+    const decl = declText.replace(/\r\n/g, '\n').trim();
     if (!normalise(out).includes(normalise(decl))) {
       const lines = out.split('\n');
       let at = -1;

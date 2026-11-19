@@ -91,17 +91,22 @@ How to work:
 - Write plausible original C++ a programmer could have written. Match control flow, field accesses, call order and store order.
 - Declare (do not define) functions the target calls; the comparator binds them by symbol. A tail jump is \`return Callee(...);\` as the last statement.
 - Prefer the declarations in <run_discoveries> and <local_context>: they are verified against this build.
-- Keep every accepted function exactly as it is. Keep the leading header short and truthful; fill "Code origin:" honestly; label names by origin and mark guesses.
+- Keep every accepted function exactly as it is. Label names by origin and mark guesses.
+
 - On a retry, change only what <retry> reports; keep what already matched.
+
+Leading header (the // block at the top of each file you change; the repo's lint rejects anything else):
+- Always put "codeOrigin" (one sentence: how you wrote this code, e.g. "written for this reconstruction from the listing; names from the header") and "adaptedBodies" ("none", or each adapted body with its upstream file, revision and licence) in your JSON reply. The orchestrator writes them into the header's SKELETON_TODO placeholders and into the .h if you change it — you do not need a "header" edit for that.
+- If you do write header lines: one line per key, at most 200 characters ("// Source exposure:", "// Code origin:", "// Adapted bodies:", the existing SPDX line, one "// 0x<rva> <Name>" line per compared function); replace placeholders instead of adding lines; never add Task, Labels, Recipe, Evidence, "Drafted by" or disclaimer lines; at most 6 lines besides labels, compared-function and SPDX lines.
 
 Never (rejected automatically; repeated attempts are quarantined): inline assembly, __emit or naked functions; #pragma other than once, ##, #line, #undef or keyword macros; byte arrays, \\x strings or embedded machine code; casting absolute addresses to pointers; stubbing a body or returning constants to fake a match; editing anything outside the allowed paths; reproducing listing bytes, mnemonics or decompiler identifiers (FUN_, param_1, local_28, iVar1).
 
 Reply with ONLY one JSON object.
 When task_spec.outputMode is "edits" or "either", prefer edits — return only the functions you add or change:
-{"edits":[{"path":"<allowed path>","header":"<optional: replacement for the leading // lines>","declarations":"<optional: types/callees/globals to add after the includes>","functions":[{"name":"<Qualified::Name>","code":"<the complete definition>"}]}],"notes":"<one short paragraph>"}
+{"edits":[{"path":"<allowed path>","header":"<optional: replacement for the leading // lines>","declarations":"<optional: types/callees/globals to add after the includes>","functions":[{"name":"<Qualified::Name>","code":"<the complete definition>"}]}],"codeOrigin":"<one sentence>","adaptedBodies":"none","notes":"<one short paragraph>"}
 Each function replaces the definition with the same name, or is appended to the file.
 When task_spec.outputMode is "files" or "either", you may instead return complete files:
-{"files":[{"path":"<allowed path>","content":"<the complete file>"}],"notes":"<one short paragraph>"}
+{"files":[{"path":"<allowed path>","content":"<the complete file>"}],"codeOrigin":"<one sentence>","adaptedBodies":"none","notes":"<one short paragraph>"}
 Never return complete files when outputMode is "edits": elided bodies would be lost.`;
 
 export const WORKER_OUTPUT_SCHEMA_V2: Record<string, unknown> = {
@@ -129,8 +134,11 @@ export const WORKER_OUTPUT_SCHEMA_V2: Record<string, unknown> = {
       type: 'array',
       items: { type: 'object', additionalProperties: false, required: ['path', 'content'], properties: { path: { type: 'string' }, content: { type: 'string' } } },
     },
+    codeOrigin: { type: 'string', description: 'One sentence: how this code was written (goes into the "// Code origin:" header line).' },
+    adaptedBodies: { type: 'string', description: '"none", or each adapted body with upstream file, revision and licence.' },
     notes: { type: 'string' },
   },
+  required: ['codeOrigin', 'adaptedBodies'],
 };
 
 /** Static system prefix: contract + distilled rules (+ frozen core skills). Same bytes for every call of a run. */

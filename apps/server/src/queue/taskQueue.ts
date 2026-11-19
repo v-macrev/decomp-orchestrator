@@ -186,15 +186,15 @@ export class TaskQueue {
    * of a higher tier) is too close to its cap and has never been assigned the packet. When all
    * pending packets are blocked and nothing is in flight, the run cannot progress.
    */
-  capacityBlocked(runId: string, stealing: boolean): { pending: number; blocked: number; blockedFunctions: number; inFlight: number } {
+  capacityBlocked(runId: string, stealing: boolean, stealMaxGap = 1): { pending: number; blocked: number; blockedFunctions: number; inFlight: number } {
     const r = this.store.db.prepare(`SELECT
         (SELECT COUNT(*) FROM tasks WHERE run_id = @runId AND state = 'pending') pending,
         (SELECT COUNT(*) FROM tasks WHERE run_id = @runId AND state IN ('leased','gating')) inFlight,
         COUNT(*) blocked, COALESCE(SUM(json_array_length(t.functions_json)), 0) blockedFunctions
       FROM tasks t WHERE t.run_id = @runId AND t.state = 'pending' AND EXISTS (SELECT 1 FROM run_workers WHERE run_id = @runId)
-        AND NOT EXISTS (SELECT 1 FROM run_workers w WHERE w.run_id = t.run_id AND (w.tier = t.tier OR (@steal = 1 AND w.tier > t.tier))
+        AND NOT EXISTS (SELECT 1 FROM run_workers w WHERE w.run_id = t.run_id AND (w.tier = t.tier OR (@steal = 1 AND w.tier > t.tier AND w.tier - t.tier <= @gap))
           AND (EXISTS (SELECT 1 FROM worker_assignments a WHERE a.run_id = w.run_id AND a.worker_id = w.worker_id AND a.task_id = t.id)
-               OR w.assigned_function_count + json_array_length(t.functions_json) <= w.max_functions))`).get({ runId, steal: stealing ? 1 : 0 }) as { pending: number; blocked: number; blockedFunctions: number; inFlight: number };
+               OR w.assigned_function_count + json_array_length(t.functions_json) <= w.max_functions))`).get({ runId, steal: stealing ? 1 : 0, gap: stealMaxGap }) as { pending: number; blocked: number; blockedFunctions: number; inFlight: number };
     return r;
   }
 

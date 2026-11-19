@@ -171,3 +171,23 @@ Saved flows are not changed.
 * The function-table path with a real exporter output: the parser accepts common key names
   (`xrefs_in` / `callers` / `incoming`, `basic_blocks` / `blocks`, …) but has only been exercised by
   the simulator's table.
+
+## First real run (12 gathered functions, Claude Code login) and the fixes it led to
+
+The run used staging off and no listing exposure, and was capped at $3 API-equivalent. It matched
+**7 of 12** functions under the repo's own compare; 3 were dead-lettered, and 2 were pending at
+the cap. Most failed attempts were header conventions, not matching, and each one escalated the
+packet to a costlier tier. Opus took 83% of the spend.
+
+| Problem seen | Fix |
+|---|---|
+| Skeleton `SKELETON_TODO` placeholders left in the header, or kept next to the worker's own line | `orchestrator/headerRepair.ts` runs before the Gate Keeper: a placeholder is dropped once the worker has stated the key, duplicate keys and banned lines (Task, Recipe, Drafted by, disclaimers) the worker added are removed, and lines already in the file are kept. Replaying the run's rejected attempts: convention findings went from 19 to 7 |
+| Edits-mode answers never touch the header, so placeholders survive | The output contract asks for `codeOrigin` and `adaptedBodies` (required in the JSON schema); the repair writes the worker's own statements into the placeholders |
+| A changed `.h` without a `Code origin:` line (repo preflight) | The repair adds the worker's statement to any changed file that lacks one |
+| A header edit containing an `#include` failed the whole attempt | Non-comment lines move to the declarations |
+| Formatting failures escalated packets to Sonnet and Opus | Up to 3 format-only rejections per packet (header, lint, scope line, output contract, no comparator failure) retry on the same tier without counting toward promotion |
+| Idle Opus slots stole easy Haiku packets | `routing.stealMaxGap` (default 1): a slot steals only from the tier directly below it. The capacity planner and stall check use the same rule |
+| `claude` could not be started on Windows (npm `.cmd` shim) | The CLI adapter resolves bare names to the real executable; a missing binary is a configuration error, not a retried server error |
+
+The explicit header rules made the cached static prefix larger, so its budget is now 1,400 tokens
+(was 1,200).

@@ -29,6 +29,7 @@ import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
 import { ContextBuilder } from './context.js';
 import { TaskContextBuilder, shouldCacheTaskPrefix } from './contextBuilder.js';
 import { materialise } from './edits.js';
+import { repairAnswer } from './headerRepair.js';
 import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
 import { stageRun } from './staging.js';
@@ -215,7 +216,7 @@ export class RunEngine {
       const demandByTier = plan.tiers.map((_, i) => demand.find((d) => d.tier === i)?.n ?? 0);
       const cap = planCapacity({
         plan, usable, repoSlots: this.deps.repo.slotCount, maxPerWorker: run.row.config.maxFunctionsPerWorker, batch: demandByTier.reduce((a, b) => a + b, 0),
-        demandByTier, stealing: run.row.config.routing.enabled && run.row.config.routing.workStealing,
+        demandByTier, stealing: run.row.config.routing.enabled && run.row.config.routing.workStealing, stealMaxGap: run.row.config.routing.stealMaxGap,
       });
       store.setRunJson(runId, 'capacity_json', cap);
       events.emit('run.capacity', `${cap.workers} worker(s) × ${cap.maxPerWorker} functions = ${cap.capacity} for ${cap.batch} function(s)${cap.warnings.length ? `: ${cap.warnings.join(' ')}` : ' (ok)'}`, {
@@ -445,7 +446,12 @@ export class RunEngine {
           continue;
         }
         const routing = run.row.config.routing;
-        const steal: StealSource[] = routing.enabled && routing.workStealing ? stealSources(run.plan, tier).map((t) => ({ tier: t, minBacklog: run.idleSlots(t) })) : [];
+        // Steal only from tiers within `stealMaxGap` capability steps: a frontier slot taking a fast
+        // tier's easy packet costs ~40x the tokens for work a cheap model handles.
+        const myRank = CAPABILITY_RANK[run.plan.tiers[tier]!.capability];
+        const steal: StealSource[] = routing.enabled && routing.workStealing
+          ? stealSources(run.plan, tier).filter((t) => myRank - CAPABILITY_RANK[run.plan.tiers[t]!.capability] <= routing.stealMaxGap).map((t) => ({ tier: t, minBacklog: run.idleSlots(t) }))
+          : [];
         const worker = run.workerBySlot.get(slot);
         const [leased] = this.queue.lease(runId, tier, 1, this.opts.leaseMs, { stealFrom: steal, worker });
         if (!leased) {
@@ -455,7 +461,7 @@ export class RunEngine {
             events.emit('worker.capped', `${worker} reached its ${run.row.config.maxFunctionsPerWorker}-function cap for this run; it only finishes its own packets now`, { runId, data: { worker } });
           }
           if (run.busySlots.size === 0 && !run.capacityStalled) {
-            const b = this.queue.capacityBlocked(runId, routing.enabled && routing.workStealing);
+            const b = this.queue.capacityBlocked(runId, routing.enabled && routing.workStealing, routing.stealMaxGap);
             if (b.pending > 0 && b.blocked === b.pending && b.inFlight === 0) {
               run.capacityStalled = true;
               const cap = store.runJson<Record<string, unknown>>(runId, 'capacity_json') ?? {};
@@ -651,6 +657,10 @@ export class RunEngine {
         store.updateAttempt(attempt.id, { status: 'parse_error', error: mat.problems.join('; ').slice(0, 500), files: mat.files, finishedAt: Date.now() });
         return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_EDIT', mat.problems.join('; ').slice(0, 1_000)), { infra: false, strike: false }, tierIdx);
       }
+      // Deterministic header repair (skeleton placeholders, duplicate keys, banned lines, origin in .h).
+      const fixed = await repairAnswer(mat.files, (p) => repo.readFile(slot, p), { codeOrigin: parsed.data.codeOrigin, adaptedBodies: parsed.data.adaptedBodies });
+      mat.files = fixed.files;
+      if (fixed.changes.length) ev('attempt.header_repaired', `header repaired before the Gate Keeper: ${fixed.changes.join('; ').slice(0, 600)}`, 'debug', { changes: fixed.changes });
       store.updateAttempt(attempt.id, { files: mat.files });
 
       // 5. Gate Keeper (always on the complete materialised files)
@@ -746,6 +756,16 @@ export class RunEngine {
     }
     const limit = tierNode.node.data;
     const routing = run.row.config.routing;
+
+    // Format-only rejections (header/lint/output contract with no byte evidence against the code)
+    // say nothing about how hard the function is: retry on the same tier without counting toward
+    // promotion or escalation — at most FORMAT_RETRIES times per packet, then normal rules apply.
+    if (isFormatOnly(verdict) && store.verdictsForTask(task.id).filter((v) => v.route === 'retry' && isFormatOnly(v)).length < FORMAT_RETRIES) {
+      store.insertVerdict({ ...verdict, route: 'retry' });
+      this.queue.transition(task.id, leaseId, from, 'pending', { ...common, attemptsTotal, bestExactBytes, cheatStrikes, notBefore: 0 });
+      events.emit('task.retry', `retry ${fnLabel} on the same tier (format only, not counted toward escalation): ${summarise(verdict)}`, { runId, taskId: task.id, level: 'debug' });
+      return;
+    }
     const attemptsAtDifficulty = task.attemptsAtDifficulty + 1;
     const label = (i: number) => run.plan.tiers[i]!.node.data.label || run.plan.tiers[i]!.node.id;
 
@@ -890,6 +910,14 @@ function mergeGateChecks(plan: FlowPlan) {
 function defaultReviewer(deps: EngineDeps, plan: FlowPlan): Reviewer | null {
   const gk = plan.gatekeepers.find((n) => n.data.gate.llmReview);
   return gk ? new LlmReviewer(deps.pool, deps.providers, gk.data.pool) : null;
+}
+
+/** Header, lint, scope-line and output-contract findings only, and no comparator failure. */
+const FORMAT_CODES = /^(CONV_|PREFLIGHT_|SCOPE_LINE_TOO_LONG|OUTPUT_|LEAK_INCLUDE_OUTSIDE_ROOTS)/;
+const FORMAT_RETRIES = 3;
+export function isFormatOnly(v: Verdict): boolean {
+  const blocks = v.findings.filter((f) => f.severity === 'block');
+  return blocks.length > 0 && blocks.every((f) => FORMAT_CODES.test(f.code)) && !(v.compare ?? []).some((c) => c.result !== 'pass');
 }
 
 function syntheticVerdict(task: TaskRow, attempt: Attempt, code: string, message: string): Verdict {

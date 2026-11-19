@@ -459,6 +459,10 @@ export const WorkerOutput = z
     files: z.array(z.object({ path: z.string().min(1).max(260), content: z.string().max(400_000) })).max(4).optional(),
     edits: z.array(UnitEdit).max(4).optional(),
     notes: z.string().max(4000).optional(),
+    /** The worker's own provenance statement; the orchestrator writes it into header placeholders. */
+    codeOrigin: z.string().min(8).max(300).optional(),
+    /** "none", or each adapted body with its upstream file, revision and licence. */
+    adaptedBodies: z.string().min(4).max(300).optional(),
   })
   .refine((o) => (o.files?.length ?? 0) + (o.edits?.length ?? 0) > 0, { message: 'return at least one file or edit' });
 export type WorkerOutput = z.infer<typeof WorkerOutput>;
@@ -554,6 +558,8 @@ export const RoutingConfig = z.object({
   promoteAfterFailures: z.number().int().min(1).max(20).default(2),
   /** Idle higher-capability slots pull lower-tier backlog. */
   workStealing: z.boolean().default(true),
+  /** How many capability steps down a slot may steal (1: frontier takes balanced work, never fast). */
+  stealMaxGap: z.number().int().min(1).max(2).default(1),
 });
 export type RoutingConfig = z.infer<typeof RoutingConfig>;
 
@@ -578,7 +584,7 @@ export type SectionBudget = z.infer<typeof SectionBudget>;
 
 /** Token budgets per section (estimates; ~3.3 chars/token for code). */
 export const ContextBudgets = z.object({
-  static_system_prefix: SectionBudget.default({ min: 800, max: 1_200 }),
+  static_system_prefix: SectionBudget.default({ min: 800, max: 1_400 }),
   function_spec: SectionBudget.default({ min: 150, max: 300 }),
   disassembly_slice: SectionBudget.default({ min: 500, max: 2_500 }),
   minimal_local_context: SectionBudget.default({ min: 400, max: 2_000 }),

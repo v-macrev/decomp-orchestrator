@@ -49,6 +49,8 @@ export function planCapacity(input: {
   /** Functions per tier index (after classification); omit for a batch-size-only check. */
   demandByTier?: number[];
   stealing: boolean;
+  /** Capability steps a slot may steal across (1 = only the tier directly below). */
+  stealMaxGap?: number;
 }): CapacityPlan {
   const { plan, usable, maxPerWorker: cap, batch } = input;
   const workers = usable.length;
@@ -61,15 +63,30 @@ export function planCapacity(input: {
   });
   let unplaced = 0;
   if (input.demandByTier) {
-    let carry = 0;
+    // Overflow travels up at most `gap` tiers; each tier serves its own demand first.
+    const gap = input.stealing ? (input.stealMaxGap ?? 1) : 0;
+    const pending: Array<{ amount: number; hops: number }> = [];
     for (const t of perTier) {
-      const want = (t.demand ?? 0) + carry;
-      const served = Math.min(t.capacity, want);
-      t.overflow = want - served;
-      carry = input.stealing ? t.overflow : 0;
-      if (!input.stealing) unplaced += t.overflow;
+      let room = t.capacity;
+      const own = Math.min(room, t.demand ?? 0);
+      room -= own;
+      t.overflow = (t.demand ?? 0) - own;
+      for (const p of pending) {
+        const take = Math.min(room, p.amount);
+        p.amount -= take;
+        room -= take;
+      }
+      for (const p of pending) p.hops++;
+      for (let i = pending.length - 1; i >= 0; i--) if (pending[i]!.amount <= 0 || pending[i]!.hops >= gap) {
+        unplaced += Math.max(0, pending[i]!.amount);
+        pending.splice(i, 1);
+      }
+      if (t.overflow > 0) {
+        if (gap > 0) pending.push({ amount: t.overflow, hops: 0 });
+        else unplaced += t.overflow;
+      }
     }
-    if (input.stealing) unplaced += carry;
+    unplaced += pending.reduce((s, p) => s + p.amount, 0);
   } else {
     unplaced = Math.max(0, batch - capacity);
   }
