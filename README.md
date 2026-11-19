@@ -1,11 +1,74 @@
 # decomp-orchestrator
 
 Bulk LLM orchestration for function matching in
-[`awarebayes/skyrim_decomp`](https://github.com/awarebayes/skyrim_decomp): a multi-account provider
-pool with a rate-limit-aware scheduler, a durable job queue, a Gate Keeper that runs the repository's
-own comparator behind anti-abuse guardrails, and a React Flow canvas for building agent topologies.
+[`awarebayes/skyrim_decomp`](https://github.com/awarebayes/skyrim_decomp).
 
-> Work in progress — see `docs/ARCHITECTURE.md` (landing with the next milestones).
+* **Multi-provider, multi-account pool.** Claude (API keys, OAuth tokens, Claude Code CLI profiles),
+  OpenAI, and any OpenAI-compatible endpoint, with several accounts or workspaces per provider. A
+  rate-limit-aware scheduler adds token buckets, adaptive concurrency (AIMD), cooldowns, a circuit
+  breaker and quota/budget states. One throttled account fails over without stalling the run.
+* **Durable bulk engine.** Built for 500+ functions per run: an SQLite job queue with leases and
+  heartbeats, pause/resume/cancel, budgets, dead-letter and quarantine queues, an escalation ladder
+  across worker tiers, and crash recovery on restart.
+* **Gate Keeper.** The repo's own `./sr compare` and `preflight` run behind anti-abuse guardrails:
+  * Scope allowlist.
+  * A port of the repo's leakgrep rules.
+  * Cheat detection: byte arrays, absolute-address binding, pragma/macro tricks, stubs, edits to
+    matched bodies, verifier tampering.
+  * Integrity and tamper digests.
+  * Bounded, env-scrubbed processes in per-slot git worktrees, with optional Docker.
+  * Structured verdicts with exact `file:line` reasons that route back to workers.
+* **Visual flow builder.** A React Flow canvas for Orchestrator, Worker-tier and Gate Keeper
+  topologies (fan-out, fan-in, retry loops, escalation), saved as named presets.
+* **Live telemetry.** Queue depth, slots, pass/retry/escalate/dead/quarantine, per-account health
+  and throughput, tokens and cost, and per-packet attempts, verdicts and diffs.
+
+See **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** for the design, data model, sandboxing and
+trade-offs.
+
+## Quickstart (simulation, no API keys)
+
+```sh
+npm install
+npm run build:web
+npm run dev            # server on http://127.0.0.1:8787 (sim mode, demo account pool)
+```
+
+Open http://127.0.0.1:8787, start a run on the **Runs** tab, and edit the topology on the **Flow
+builder** tab. Headless end-to-end simulation (500 functions, injected 429s, outage, quota, a hard
+crash at 40% and resume):
+
+```sh
+npm run sim -- --count 500 --crash-at 0.4 --speed 4
+npm test               # scheduler, gate-rule corpus (0 FP / 0 FN), gate pipeline, engine + crash recovery
+```
+
+## Against a real skyrim_decomp checkout
+
+1. Set up the target repo once on this machine following its own guide (`./sr go`, which needs
+   your own copy of the game and your acceptance of Microsoft's licence).
+2. `cp config/orchestrator.example.json config/orchestrator.json`, then set `repo.path`,
+   `repo.localDir` (the absolute `SR_LOCAL_DIR`) and `slots`.
+3. `cp config/accounts.example.json config/accounts.json` and point each `secretRef` at an
+   environment variable (`env:ANTHROPIC_KEY_WS_A`) or file. Keys are never stored in the DB.
+   Accounts can also be managed from the **Accounts** tab.
+4. `npm run dev`, then start a run with source **sr next**. Leave *exposure consent* off unless you,
+   as the owner of the game copy, agree to send locally made listings to your AI providers.
+5. Accepted units are staged on local branches (`decomp/<run>-b<n>`), re-verified as a whole.
+   Review them and submit with the repo's own `./sr submit`; nothing is pushed automatically.
+
+Set `ORCH_API_TOKEN` to require a bearer token on the API (the UI asks for it). The server binds
+to `127.0.0.1` by default.
+
+## Layout
+
+```
+packages/core     Zod schemas (accounts, flows, tasks, attempts, verdicts) + flow validation/compilation
+apps/server       engine, queue, account pool, providers, Gate Keeper, repo adapters, API, simulator
+apps/web          React + React Flow UI
+docs/             architecture
+config/           example configs
+```
 
 ## License
 
