@@ -23,7 +23,7 @@ import { NoEligibleAccountError, type AccountPool } from '../pool/scheduler.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { ProviderError, costUsd, type PromptBlock } from '../providers/types.js';
 import { TaskQueue, type StealSource } from '../queue/taskQueue.js';
-import type { RepoAdapter, PreparedTask } from '../repo/types.js';
+import type { DiscoveredFunction, RepoAdapter, PreparedTask } from '../repo/types.js';
 import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
 import { ContextBuilder } from './context.js';
@@ -33,6 +33,8 @@ import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
 import { stageRun } from './staging.js';
 import { SkillRegistry } from '../skills/registry.js';
+import { FunctionGatherer } from '../intel/gatherer.js';
+import { planCapacity } from './capacity.js';
 import { hasRetryOnlySkills, type RunSkills } from './contextBuilder.js';
 
 export interface EngineOptions {
@@ -82,10 +84,16 @@ class ActiveRun {
   budgetPaused = false;
   /** Frozen skill view for the whole run (null: skills off or legacy context). */
   skills: RunSkills | null = null;
+  /** Worker instance identity per slot: `<node id>#<instance>` (stable across restarts). */
+  workerBySlot = new Map<number, string>();
+  /** Workers with no function left under the per-worker cap (they only finish their own packets). */
+  capped = new Set<number>();
+  capacityStalled = false;
   constructor(readonly row: RunRow, readonly plan: FlowPlan, readonly gate: GateKeeper) {}
 
+  /** Idle slots that could still take new work (capped workers cannot absorb a backlog). */
   idleSlots(tier: number): number {
-    return (this.slotsByTier.get(tier) ?? []).filter((s) => !this.busySlots.has(s)).length;
+    return (this.slotsByTier.get(tier) ?? []).filter((s) => !this.busySlots.has(s) && !this.capped.has(s)).length;
   }
 }
 
@@ -99,6 +107,7 @@ export class RunEngine {
   private context: ContextBuilder;
   readonly contextV2: TaskContextBuilder;
   readonly classifier: ComplexityClassifier;
+  readonly gatherer: FunctionGatherer;
   readonly skills: SkillRegistry;
   /** Called after a run completes (the app wires the skill curator here when autoCurate is on). */
   afterRun: ((runId: string) => void) | null = null;
@@ -113,6 +122,7 @@ export class RunEngine {
     this.contextV2 = new TaskContextBuilder(deps.repo, deps.store);
     this.classifier = new ComplexityClassifier({ store: deps.store, repo: deps.repo, pool: deps.pool, providers: deps.providers, events: deps.events });
     this.skills = deps.skills ?? new SkillRegistry(deps.store, null);
+    this.gatherer = new FunctionGatherer(deps.repo, deps.store);
     // Periodic reaper: reclaims leases of slots that stalled without crashing the process.
     this.reaper = setInterval(() => {
       for (const id of this.active.keys()) {
@@ -147,7 +157,17 @@ export class RunEngine {
       store.setRunStatus(runId, 'discovering');
       events.emit('run.discovering', `discovering backlog (${row.config.selection.source})`, { runId });
       try {
-        const found = await this.deps.repo.discover(row.config.selection);
+        let found: DiscoveredFunction[];
+        if (row.config.selection.source === 'gather') {
+          const report = await this.gatherer.gather(row.config.selection.filter, { runId });
+          store.putGathered(runId, report.functions);
+          store.setRunJson(runId, 'gather_json', { ...report, functions: undefined });
+          const ex = Object.entries(report.excluded).filter(([k, n]) => n && k !== 'matched').map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ');
+          events.emit('run.gathered', `gathered ${report.selected} function(s) in ${report.units} unit(s) from ${report.inventory.mapped} unmatched of ${report.inventory.total} (${report.source})${ex ? `; excluded: ${ex}` : ''}`, {
+            runId, data: { selected: report.selected, excluded: report.excluded, withPack: report.withPackFeatures, withTable: report.withTableFacts },
+          });
+          found = report.functions;
+        } else found = await this.deps.repo.discover(row.config.selection);
         const routing = row.config.routing;
         if (routing.enabled) {
           const packets = await this.classifier.plan(runId, found, row.config, plan);
@@ -178,6 +198,30 @@ export class RunEngine {
 
     const usable = allocateSlots(plan, this.deps.repo.slotCount);
     for (const s of usable) run.slotsByTier.set(s.tier, [...(run.slotsByTier.get(s.tier) ?? []), s.slot]);
+    // Worker identities + the per-worker function cap (counts persist across restarts and resumes).
+    const perTier = new Map<number, number>();
+    const workers = usable.map((s) => {
+      const k = perTier.get(s.tier) ?? 0;
+      perTier.set(s.tier, k + 1);
+      const node = plan.tiers[s.tier]!.node;
+      const workerId = `${node.id}#${k + 1}`;
+      run.workerBySlot.set(s.slot, workerId);
+      return { workerId, nodeId: node.id, tier: s.tier, capability: plan.tiers[s.tier]!.capability };
+    });
+    store.registerWorkers(runId, workers, run.row.config.maxFunctionsPerWorker);
+    for (const s of usable) if (this.queue.workerRemaining(runId, run.workerBySlot.get(s.slot)!) <= 0) run.capped.add(s.slot);
+    if (!store.runJson(runId, 'capacity_json')) {
+      const demand = store.db.prepare(`SELECT tier, SUM(json_array_length(functions_json)) n FROM tasks WHERE run_id = ? GROUP BY tier`).all(runId) as Array<{ tier: number; n: number }>;
+      const demandByTier = plan.tiers.map((_, i) => demand.find((d) => d.tier === i)?.n ?? 0);
+      const cap = planCapacity({
+        plan, usable, repoSlots: this.deps.repo.slotCount, maxPerWorker: run.row.config.maxFunctionsPerWorker, batch: demandByTier.reduce((a, b) => a + b, 0),
+        demandByTier, stealing: run.row.config.routing.enabled && run.row.config.routing.workStealing,
+      });
+      store.setRunJson(runId, 'capacity_json', cap);
+      events.emit('run.capacity', `${cap.workers} worker(s) × ${cap.maxPerWorker} functions = ${cap.capacity} for ${cap.batch} function(s)${cap.warnings.length ? `: ${cap.warnings.join(' ')}` : ' (ok)'}`, {
+        runId, level: cap.warnings.length ? 'warn' : 'info', data: { capacity: cap.capacity, batch: cap.batch, unplaced: cap.unplaced },
+      });
+    }
     if (run.row.config.context.mode === 'budgeted') {
       run.skills = this.runSkills(run.row);
       const snap = run.skills?.snapshot;
@@ -215,6 +259,8 @@ export class RunEngine {
     }
     run.paused = false;
     run.budgetPaused = false;
+    run.capacityStalled = false;
+    for (const [slot, w] of run.workerBySlot) if (this.queue.workerRemaining(runId, w) > 0) run.capped.delete(slot);
     run.inflight = new AbortController();
     this.deps.store.setRunStatus(runId, 'running', ['paused']);
     run.resumed.notify();
@@ -362,6 +408,15 @@ export class RunEngine {
     return run ? { active: true, paused: run.paused, activeSlots: run.activeSlots, busySlots: run.busySlots.size } : { active: false, paused: false, activeSlots: 0, busySlots: 0 };
   }
 
+  /** Live slot state per worker instance of an active run (busy / capped). */
+  workerActivity(runId: string): Map<string, { busy: boolean; capped: boolean }> {
+    const run = this.active.get(runId);
+    const out = new Map<string, { busy: boolean; capped: boolean }>();
+    if (!run) return out;
+    for (const [slot, w] of run.workerBySlot) out.set(w, { busy: run.busySlots.has(slot), capped: run.capped.has(slot) });
+    return out;
+  }
+
   waitFor(runId: string): Promise<void> {
     return this.active.get(runId)?.finished ?? Promise.resolve();
   }
@@ -389,9 +444,27 @@ export class RunEngine {
         }
         const routing = run.row.config.routing;
         const steal: StealSource[] = routing.enabled && routing.workStealing ? stealSources(run.plan, tier).map((t) => ({ tier: t, minBacklog: run.idleSlots(t) })) : [];
-        const [leased] = this.queue.lease(runId, tier, 1, this.opts.leaseMs, { stealFrom: steal });
+        const worker = run.workerBySlot.get(slot);
+        const [leased] = this.queue.lease(runId, tier, 1, this.opts.leaseMs, { stealFrom: steal, worker });
         if (!leased) {
           if (!this.queue.hasOpenWork(runId)) return;
+          if (worker && this.queue.workerRemaining(runId, worker) <= 0 && !run.capped.has(slot)) {
+            run.capped.add(slot);
+            events.emit('worker.capped', `${worker} reached its ${run.row.config.maxFunctionsPerWorker}-function cap for this run; it only finishes its own packets now`, { runId, data: { worker } });
+          }
+          if (run.busySlots.size === 0 && !run.capacityStalled) {
+            const b = this.queue.capacityBlocked(runId, routing.enabled && routing.workStealing);
+            if (b.pending > 0 && b.blocked === b.pending && b.inFlight === 0) {
+              run.capacityStalled = true;
+              const cap = store.runJson<Record<string, unknown>>(runId, 'capacity_json') ?? {};
+              store.setRunJson(runId, 'capacity_json', { ...cap, stalled: { at: Date.now(), packets: b.blocked, functions: b.blockedFunctions } });
+              this.pause(runId);
+              events.emit('run.capacity_exhausted', `${b.blockedFunctions} function(s) in ${b.blocked} packet(s) left, but every eligible worker reached its ${run.row.config.maxFunctionsPerWorker}-function cap. Raise the cap for this run (or add worker instances in a new run) and resume.`, {
+                runId, level: 'error', data: { packets: b.blocked, functions: b.blockedFunctions },
+              });
+              continue;
+            }
+          }
           const next = this.queue.nextReadyAt(runId, [tier, ...steal.map((s) => s.tier)]);
           const wait = next ? Math.min(Math.max(10, next - Date.now()), this.opts.idlePollMs) : this.opts.idlePollMs;
           await run.wake.wait(wait, run.cancel.signal);
@@ -455,6 +528,8 @@ export class RunEngine {
             const to = tierFor(run.plan, refined.difficulty, tierIdx);
             if (task.attemptsTotal === 0 && to > tierIdx) {
               this.queue.transition(task.id, leaseId, ['leased'], 'pending', { tier: to, difficulty: refined.difficulty, attemptsAtDifficulty: 0, attemptsAtTier: 0, notBefore: 0 });
+              const w = run.workerBySlot.get(slot);
+              if (w) this.queue.unassign(runId, w, task.id); // never attempted here: refund the cap
               ev('task.rerouted', `pack analysis: ${task.difficulty} → ${refined.difficulty} (score ${refined.score}); moved to ${run.plan.tiers[to]!.node.data.label || run.plan.tiers[to]!.node.id} before any attempt`, 'info', { from: tierIdx, to, score: refined.score });
               run.wake.notify();
               return;
@@ -505,6 +580,7 @@ export class RunEngine {
         difficulty: task.difficulty, contextTokens, contextRawTokens,
       };
       store.insertAttempt(attempt);
+      if (run.workerBySlot.has(slot)) store.db.prepare('UPDATE attempts SET worker_id = ? WHERE id = ?').run(run.workerBySlot.get(slot), attempt.id);
       this.skills.recordSelections({ attemptId: attempt.id, runId, taskId: task.id, difficulty: task.difficulty, functions: task.functions.length }, selections);
 
       // 3. account lease + model call
@@ -781,11 +857,16 @@ export function allocateSlots(plan: FlowPlan, capacity: number): Array<{ tier: n
   const total = want.reduce((a, b) => a + b, 0);
   let counts = want;
   if (total > capacity) {
-    counts = want.map((w) => Math.max(1, Math.floor((w / total) * capacity)));
+    // Largest remainder: proportional, ≥1 per tier, and every worktree slot gets a worker (each
+    // worker instance adds `maxFunctionsPerWorker` of run capacity, so leaving slots idle costs).
+    const exact = want.map((w) => (w / total) * capacity);
+    counts = exact.map((x) => Math.max(1, Math.floor(x)));
     while (counts.reduce((a, b) => a + b, 0) > capacity && counts.some((c) => c > 1)) {
       const i = counts.indexOf(Math.max(...counts));
       counts[i]!--;
     }
+    const order = exact.map((x, i) => ({ i, r: x - Math.floor(x) })).sort((a, b) => b.r - a.r || a.i - b.i);
+    for (let k = 0; counts.reduce((a, b) => a + b, 0) < capacity && k < order.length * 4; k++) counts[order[k % order.length]!.i]!++;
   }
   const out: Array<{ tier: number; slot: number }> = [];
   counts.forEach((c, tier) => {

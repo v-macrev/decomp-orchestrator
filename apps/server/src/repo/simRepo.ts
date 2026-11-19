@@ -9,8 +9,8 @@ import type { TaskRow } from '../db/store.js';
 import { simIdent, type SimOracle } from '../providers/mock.js';
 import { sleep } from '../util/async.js';
 import { clipMiddle } from './srRepo.js';
-import { simDocs, simFeatures, simPack, simSharedHeader, simTrap, simTrapRecipes, type SimTrapInfo } from './simContent.js';
-import type { CompareOutcome, DiscoveredFunction, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
+import { hashUnit as hashUnitSim, simDocs, simFeatures, simPack, simSharedHeader, simTrap, simTrapRecipes, type SimTrapInfo } from './simContent.js';
+import type { Backlog, CompareOutcome, DiscoveredFunction, InventoryEntry, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
 
 export interface SimRepoOptions {
   slots: number;
@@ -24,6 +24,8 @@ export interface SimRepoOptions {
   realisticContext?: boolean;
   /** Matching traps (Phase 3): listing signatures + documented/undocumented fixes. Default false. */
   traps?: boolean;
+  /** Mapped functions in the simulated inventory (FunctionGatherer). Default 1500. */
+  backlogSize?: number;
 }
 
 function mulberry32(seed: number) {
@@ -70,6 +72,37 @@ export class SimRepo implements RepoAdapter, SimOracle {
   solution(rva: string): string {
     const h = createHash('sha256').update(rva).digest('hex').slice(0, 6);
     return `return 0x${h};`;
+  }
+
+  private backlogCache: Backlog | null = null;
+
+  /**
+   * Simulated repository inventory for the FunctionGatherer: `backlogSize` mapped functions (the
+   * synthetic backlog) plus twice as many already matched, ~3% claimed locally, a few template
+   * instantiations, and a function table with xrefs/blocks for every mapped function.
+   */
+  async backlog(opts: { maxSize: number }): Promise<Backlog> {
+    if (!this.backlogCache) {
+      const mapped = await this.discover({ source: 'synthetic', count: this.opts.backlogSize ?? 1_500, seed: 4_242 });
+      const rnd = mulberry32(99);
+      const matched: InventoryEntry[] = Array.from({ length: mapped.length * 2 }, (_, i) => ({ rva: `0x${(0x4000000 + i * 0x40).toString(16)}`, name: `Done${i}::Run`, size: 8 + Math.floor(rnd() * 90), nameOrigin: 'GUESS', status: 'matched' }));
+      const table = new Map<string, Record<string, unknown>>();
+      for (const f of mapped) {
+        const ft = f.features ?? simFeatures(f.rva, f.size);
+        table.set(f.rva, { rva: f.rva, xrefs_in: ft.xrefsIn, callees: ft.calls, basic_blocks: ft.basicBlocks, instructions: ft.instructions });
+        if (hashUnitSim(`${f.rva}:tpl`) < 0.04) f.name = `${f.name!.split('::')[0]}::Visit<Form${f.name!.split('::')[1]!.replace('Method', '')}>`;
+        f.nameOrigin = hashUnitSim(`${f.rva}:origin`) < 0.25 ? 'GUESS' : 'COMMUNITY';
+      }
+      this.backlogCache = {
+        source: 'simulated inventory + function table',
+        inventory: [...mapped.map((f) => ({ rva: f.rva, name: f.name, size: f.size, nameOrigin: f.nameOrigin ?? null, status: 'mapped' })), ...matched],
+        candidates: mapped,
+        claimed: mapped.filter((f) => hashUnitSim(`${f.rva}:claim`) < 0.03).map((f) => f.rva),
+        claimsChecked: true,
+        functionTable: table,
+      };
+    }
+    return { ...this.backlogCache, candidates: this.backlogCache.candidates.filter((c) => c.size <= opts.maxSize) };
   }
 
   async discover(sel: SelectionSpec): Promise<DiscoveredFunction[]> {

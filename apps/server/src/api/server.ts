@@ -5,7 +5,9 @@ import { existsSync } from 'node:fs';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
-import { Account, Flow, RunConfig, compileFlowPlan, validateFlow, type TelemetryEvent } from '@decomp/core';
+import { Account, ComplexityThresholds, Flow, GatherFilter, RunConfig, classify, compileFlowPlan, scoreFeatures, sizeOnlyFeatures, validateFlow, type TelemetryEvent } from '@decomp/core';
+import { planCapacity } from '../orchestrator/capacity.js';
+import { allocateSlots } from '../orchestrator/engine.js';
 import { z } from 'zod';
 import type { App } from '../app.js';
 import { fromRoot } from '../config.js';
@@ -84,7 +86,42 @@ export async function buildServer(app: App) {
       .filter((n) => n.type !== 'gatekeeper' || n.data.gate.llmReview)
       .filter((n) => pool.resolve(n.data.pool, n.type === 'worker' ? 'worker' : n.type).length === 0)
       .map((n) => ({ level: 'warn' as const, nodeId: n.id, message: `no account/model in the pool serves "${n.data.label || n.id}" with its binding` }));
-    return { issues: [...issues, ...unresolved], plan, repoSlots: app.repo.slotCount };
+    // Pre-run capacity check for the per-worker function cap: ?batch=500&cap=60&stealing=1
+    const q = req.query as { batch?: string; cap?: string; stealing?: string };
+    let capacity = null;
+    if (plan && q.batch) {
+      const p = compileFlowPlan(flow);
+      capacity = planCapacity({
+        plan: p, usable: allocateSlots(p, app.repo.slotCount), repoSlots: app.repo.slotCount,
+        maxPerWorker: Math.max(1, Number(q.cap ?? 60)), batch: Math.max(1, Number(q.batch)), stealing: q.stealing !== '0',
+      });
+    }
+    return { issues: [...issues, ...unresolved], plan, repoSlots: app.repo.slotCount, capacity };
+  });
+
+  // ---------------- function gathering (preview what a `gather` run would select; no run is created)
+  f.post('/api/gather/preview', async (req) => {
+    const filter = GatherFilter.parse(req.body ?? {});
+    const report = await engine.gatherer.gather(filter);
+    const T = ComplexityThresholds.parse({});
+    const functions = report.functions.map((fn) => {
+      const s = scoreFeatures(fn.features ?? sizeOnlyFeatures(fn.size));
+      return { ...fn, features: undefined, complexityScore: s.score, complexityTier: classify(s.score, T).difficulty, reasons: s.reasons.slice(0, 3) };
+    });
+    const tiers = { easy: 0, medium: 0, hard: 0 } as Record<string, number>;
+    for (const fn of functions) tiers[fn.complexityTier]!++;
+    return { ...report, functions: functions.slice(0, 300), byTier: tiers };
+  });
+  f.get('/api/runs/:id/gathered', async (req: FastifyRequest<{ Params: { id: string } }>) => ({ report: store.runJson(req.params.id, 'gather_json'), functions: store.gathered(req.params.id, 2000) }));
+  f.post('/api/runs/:id/capacity', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const { maxFunctionsPerWorker, resume } = z.object({ maxFunctionsPerWorker: z.number().int().min(1).max(5_000), resume: z.boolean().default(true) }).parse(req.body);
+    const run = store.getRun(req.params.id);
+    if (!run) return notFound(reply, 'run');
+    if (!['paused', 'running'].includes(run.status)) return reply.code(409).send({ error: `run is ${run.status}` });
+    if (!store.raiseWorkerCap(run.id, maxFunctionsPerWorker)) return reply.code(409).send({ error: `the cap can only be raised (currently ${run.config.maxFunctionsPerWorker})` });
+    events.emit('run.capacity', `per-worker cap raised to ${maxFunctionsPerWorker} functions by the operator`, { runId: run.id, level: 'warn' });
+    if (resume && store.getRun(run.id)!.status === 'paused') await engine.resume(run.id);
+    return { ok: true };
   });
 
   // ---------------- runs

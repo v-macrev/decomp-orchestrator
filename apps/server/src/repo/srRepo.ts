@@ -25,7 +25,7 @@ import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
-import type { CompareOutcome, DiscoveredFunction, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
+import type { Backlog, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
 
 export interface SrRepoConfig {
   /** Paths are on the repository host: Windows/POSIX paths for `local`, Linux paths for `wsl`. */
@@ -40,6 +40,12 @@ export interface SrRepoConfig {
   sandbox: { mode: 'local' } | { mode: 'docker'; image: string; cpus?: number; memory?: string };
   /** Exit codes of contrib.py that mean "infrastructure", not "candidate". */
   infraExitCodes?: number[];
+  /**
+   * Optional private function table derived locally from the operator's own pinned image (the same
+   * opt-in input as `sr next --function-table`): a directory with table-meta.json + functions.jsonl,
+   * or a JSON file with `functions`. Read for counts only (xrefs, blocks); never sent anywhere.
+   */
+  functionTable?: string;
 }
 
 const PROTECTED_PATHS = ['tools', 'builds', '.github', 'tests', 'sr', 'sr.cmd', 'reconstruction/recipes', 'data/target-hashes'];
@@ -349,6 +355,61 @@ export class SrRepo implements RepoAdapter {
       if (text === null) continue;
       const shown = (await this.baseFile(rel)) ?? text; // prefer the pinned base revision's copy
       out.push({ id, title: rel, source: `${rel}@${this.sha.slice(0, 12)}`, content: shown.length > cap ? `${shown.slice(0, cap)}\n[truncated: ${shown.length - cap} more chars in ${rel}]` : shown });
+    }
+    return out;
+  }
+
+  /**
+   * Gatherer input: data/progress.json at the base revision (the public inventory), `sr next` over
+   * the whole backlog (the repo's own unit mapping, readiness order and claim exclusion), local
+   * claims, and the optional function table.
+   */
+  async backlog(opts: { maxSize: number }): Promise<Backlog> {
+    const text = (await this.baseFile('data/progress.json')) ?? (await this.readHostFile(this.p.join(this.cfg.repoPath, 'data/progress.json')));
+    if (!text) throw new InfraError('data/progress.json not found in the checkout');
+    const prog = JSON.parse(text) as { functions: Array<{ rva: number; size: number; name?: string | null; name_origin?: string | null; status: string }> };
+    const inventory: InventoryEntry[] = prog.functions.map((f) => ({ rva: `0x${f.rva.toString(16)}`, name: f.name ?? null, size: f.size, nameOrigin: f.name_origin ?? null, status: f.status }));
+    const cwd = this.host.exists(this.p.join(this.wt(0), '.git')) ? this.wt(0) : this.cfg.repoPath;
+    const { run, json } = await this.sr(cwd, ['next', '--count', '100000', '--max-size', String(opts.maxSize)], { timeoutMs: 600_000 });
+    if (!json?.candidates) throw new InfraError(`sr next failed (exit ${run.code}): ${json?.error ?? (run.stderr || run.stdout).slice(0, 500)}`);
+    const candidates: DiscoveredFunction[] = (json.candidates as any[])
+      .filter((c) => c.startable && c.unit)
+      .map((c) => ({
+        rva: c.rva, name: c.name ?? null, size: c.size, nameOrigin: c.name_origin ?? null, unit: String(c.unit).replace(/\\/g, '/'),
+        readiness: c.readiness_rank, cautions: Array.isArray(c.cautions) ? c.cautions.length : 0,
+      }));
+    let claimed: string[] = [];
+    const claims = await this.readHostFile(this.p.join(this.cfg.localDir, 'contrib', 'claims.json'));
+    if (claims) {
+      try {
+        const obj = JSON.parse(claims) as Record<string, unknown>;
+        const keys = Array.isArray(obj) ? (obj as Array<{ rva?: string }>).map((x) => x.rva ?? '') : Object.keys((obj.claims as object | undefined) ?? obj);
+        claimed = keys.filter((k) => /^(0x)?[0-9a-f]+$/i.test(k)).map((k) => `0x${parseInt(k, 16).toString(16)}`);
+      } catch {
+        /* unreadable claims file: sr next has already excluded what it knows */
+      }
+    }
+    return {
+      source: `data/progress.json@${this.sha.slice(0, 12)} + sr next${this.cfg.functionTable ? ' + function table' : ''}`,
+      inventory, candidates, claimed, claimsChecked: json.claims_checked !== false, functionTable: await this.functionTable(),
+    };
+  }
+
+  private async functionTable(): Promise<Map<string, Record<string, unknown>> | null> {
+    const path = this.cfg.functionTable;
+    if (!path) return null;
+    const rows: Array<Record<string, unknown>> = [];
+    const jsonl = await this.readHostFile(this.p.join(path, 'functions.jsonl'));
+    if (jsonl !== null) {
+      for (const line of jsonl.split('\n')) if (line.trim()) rows.push(JSON.parse(line) as Record<string, unknown>);
+    } else {
+      const file = await this.readHostFile(path);
+      if (file) rows.push(...((JSON.parse(file) as { functions?: Array<Record<string, unknown>> }).functions ?? []));
+    }
+    const out = new Map<string, Record<string, unknown>>();
+    for (const r of rows) {
+      const rva = typeof r.rva === 'number' ? r.rva : typeof r.rva === 'string' ? parseInt(r.rva, 16) : NaN;
+      if (Number.isFinite(rva)) out.set(`0x${rva.toString(16)}`, r);
     }
     return out;
   }

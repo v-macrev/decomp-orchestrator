@@ -112,7 +112,7 @@ describe('RunEngine', () => {
   it('survives a hard crash mid-run and resumes from the database without double-processing', async () => {
     const db = tmpDb();
     const a = setup(db);
-    const run = a.engine.createRun('crash', { flowId: 'default', selection: { source: 'synthetic', count: 300, seed: 11 } }, flow());
+    const run = a.engine.createRun('crash', { flowId: 'default', selection: { source: 'synthetic', count: 300, seed: 11 }, maxFunctionsPerWorker: 1000 }, flow());
     await a.engine.start(run.id);
     // let it make progress, then kill it like kill -9 (no cleanup of task state)
     for (let i = 0; i < 200; i++) {

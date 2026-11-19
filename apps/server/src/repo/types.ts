@@ -13,6 +13,28 @@ export interface DiscoveredFunction extends FunctionTarget {
   features?: FunctionFeatures;
 }
 
+export interface InventoryEntry {
+  rva: string;
+  name: string | null;
+  size: number;
+  nameOrigin: string | null;
+  /** matched | mapped | ... as the repository records it. */
+  status: string;
+}
+
+export interface Backlog {
+  /** Human-readable provenance, e.g. "data/progress.json@1a2b3c + sr next". */
+  source: string;
+  inventory: InventoryEntry[];
+  /** Mapped, startable functions with units, in the repository's readiness order. */
+  candidates: DiscoveredFunction[];
+  /** RVAs claimed locally (and by others when the claim index was reachable). */
+  claimed: string[];
+  claimsChecked: boolean;
+  /** Optional function table rows by RVA (operator opt-in; xrefs, basic blocks, ...). */
+  functionTable: Map<string, Record<string, unknown>> | null;
+}
+
 export interface PreparedTask {
   srTaskId: string | null;
   /** The only paths a Worker may write: the packet's unit header and source. */
@@ -81,6 +103,12 @@ export interface RepoAdapter {
   analyze?(fns: FunctionTarget[], opts?: { packs?: string[] }): Promise<Map<string, FunctionFeatures>>;
   /** Budgeted listing for one pack: compact listing form, at most `maxChars` (exposure consent only). */
   readPackSlice?(pack: string, maxChars: number, opts?: { withDecompiler?: boolean }): Promise<{ text: string; rawChars: number } | null>;
+  /**
+   * Everything the FunctionGatherer starts from: the repository's function inventory, the startable
+   * candidates with their units (the repo's own mapping and readiness order), claimed RVAs and an
+   * optional operator-provided function table (xrefs, blocks). Counts and names only.
+   */
+  backlog?(opts: { maxSize: number }): Promise<Backlog>;
   /** A repository document in full (docs() caps each doc for prompts; skill bootstrap needs all of it). */
   docFile?(rel: string): Promise<string | null>;
   /** Local pack directory of a function, if one exists (skill matching for shadow-evaluation cases). */

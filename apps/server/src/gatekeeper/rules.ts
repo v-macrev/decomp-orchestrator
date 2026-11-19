@@ -103,7 +103,7 @@ const HEADER_LIMIT = 6;
 const FULL_LICENCE = /Permission is hereby granted|THE SOFTWARE IS PROVIDED|^\/\/[ \t]*MIT License[ \t]*$|GNU GENERAL PUBLIC LICENSE|Apache License/m;
 const LABEL_WORD = /(?<![A-Za-z0-9_])(?:COMMUNITY|SIBLING|GUESS|EXE_RTTI|STANDIN|OBSERVED)[A-Za-z0-9_]*/;
 const COMPARED_LINE = /^\/\/[ \t]*0x[0-9a-fA-F]+(?:[ \t]|$)/;
-const TRIVIAL_BODIES = new Set(['', 'return;', 'return 0;', 'return false;', 'return true;', 'return nullptr;', 'return {};', 'return NULL;', 'return 0u;', 'return 0.0f;', 'return 0.0;']);
+export const TRIVIAL_BODIES = new Set(['', 'return;', 'return 0;', 'return false;', 'return true;', 'return nullptr;', 'return {};', 'return NULL;', 'return 0u;', 'return 0.0f;', 'return 0.0;']);
 /** x64 MSVC: `xor eax,eax; ret` is 3 bytes; anything this large cannot be a trivial return. */
 const STUB_MIN_TARGET_BYTES = 24;
 

@@ -85,6 +85,9 @@ export function runMetrics(store: Store, engine: RunEngine, pool: AccountPool, r
       : null,
     knowledge: { byKind: store.knowledgeStats(runId), recent: store.listKnowledge(runId, 8).map((k) => ({ kind: k.kind, symbol: k.symbol, sourceUnit: k.sourceUnit, uses: k.uses })) },
     skills: skillMetrics(store, runId, run.config.skills.enabled),
+    workers: workerMetrics(store, engine, runId, run.config.maxFunctionsPerWorker),
+    capacity: store.runJson(runId, 'capacity_json'),
+    gather: store.runJson(runId, 'gather_json'),
     engine: engine.status(runId),
     tasks,
     functions,
@@ -139,6 +142,19 @@ function skillMetrics(store: Store, runId: string, enabled: boolean) {
       skillId: r.skill_id as string, name: (r.name as string) ?? (r.skill_id as string), tasks: r.tasks as number, injected: r.injected as number, heldOut: r.held as number, tokens: r.tokens as number,
       passRate: (r.injected_done as number) ? Math.round(((r.injected_pass as number) / (r.injected_done as number)) * 1000) / 1000 : null,
       heldOutPassRate: (r.held_done as number) ? Math.round(((r.held_pass as number) / (r.held_done as number)) * 1000) / 1000 : null,
+    })),
+  };
+}
+
+/** Per-worker quota progress: assigned distinct functions vs the cap, matched, attempts, live state. */
+function workerMetrics(store: Store, engine: RunEngine, runId: string, cap: number) {
+  const live = engine.workerActivity(runId);
+  return {
+    maxPerWorker: cap,
+    list: store.workerStats(runId).map((w) => ({
+      workerId: w.worker_id, nodeId: w.node_id, tier: w.tier, capability: w.capability, max: w.max_functions,
+      assigned: w.assigned_function_count, packets: w.assigned_tasks, matched: w.passed_functions, attempts: w.attempts,
+      busy: live.get(w.worker_id)?.busy ?? false, capped: w.assigned_function_count >= w.max_functions || (live.get(w.worker_id)?.capped ?? false),
     })),
   };
 }

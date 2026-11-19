@@ -22,7 +22,7 @@ const count = Number(values.count);
 const crashAt = Number(values['crash-at']);
 const speed = Number(values.speed);
 const dbPath = `data/sim/sim-${Date.now()}.db`;
-const cfg = ServerConfig.parse({ mode: 'sim', dbPath, sim: { slots: 16, compareLatencyMs: [150 / speed, 600 / speed], infraRate: 0.01 }, engine: { infraBackoffMs: Math.round(15_000 / speed) } });
+const cfg = ServerConfig.parse({ mode: 'sim', dbPath, sim: { slots: 20, compareLatencyMs: [150 / speed, 600 / speed], infraRate: 0.01 }, engine: { infraBackoffMs: Math.round(15_000 / speed) } });
 
 function scaledAccounts() {
   return demoAccounts().map((a) => {

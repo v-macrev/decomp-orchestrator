@@ -57,7 +57,7 @@ const flow = defaultFlow();
 const count = Number(a.count);
 
 async function run(label: string, seed: number, skills: boolean) {
-  const r0 = engine.createRun(label, { flowId: flow.id, selection: { source: 'synthetic', count, seed }, exposureConsent: true, skills: { enabled: skills } }, flow);
+  const r0 = engine.createRun(label, { flowId: flow.id, selection: { source: 'synthetic', count, seed }, exposureConsent: true, maxFunctionsPerWorker: 5000, skills: { enabled: skills } }, flow);
   await engine.start(r0.id);
   await engine.waitFor(r0.id);
   const r = store.getRun(r0.id)!;

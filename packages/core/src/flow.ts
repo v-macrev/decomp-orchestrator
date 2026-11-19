@@ -242,7 +242,7 @@ export function defaultFlow(): Flow {
       node('orchestrator', 'orchestrator', 0, 220, { label: 'Orchestrator', pool: { strategy: 'pool', accountIds: [], tags: ['orchestrator'] } }),
       worker('worker-fast', 20, 'Workers · fast', 'fast', 10, 4, 2, 1),
       worker('worker-balanced', 220, 'Workers · balanced', 'balanced', 6, 6, 3, 4),
-      worker('worker-frontier', 420, 'Workers · frontier', 'frontier', 3, 10, 4, 10),
+      worker('worker-frontier', 420, 'Workers · frontier', 'frontier', 4, 10, 4, 10),
       node('gate', 'gatekeeper', 720, 220, { label: 'Gate Keepers', instances: 2 }),
     ],
     edges: [

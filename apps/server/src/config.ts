@@ -22,6 +22,8 @@ export const ServerConfig = z.object({
       localDir: z.string(),
       python: z.string().default(process.platform === 'win32' ? 'python' : 'python3'),
       slots: z.number().int().min(1).max(128).default(8),
+      /** Optional local function table (same opt-in input as `sr next --function-table`): xrefs/blocks for the gatherer. */
+      functionTable: z.string().optional(),
       /** Where the checkout lives. With `wsl`, path/worktreeRoot/localDir are Linux paths. */
       host: z
         .discriminatedUnion('kind', [z.object({ kind: z.literal('local') }), z.object({ kind: z.literal('wsl'), distro: z.string().default('Ubuntu') })])
@@ -36,13 +38,13 @@ export const ServerConfig = z.object({
     .optional(),
   sim: z
     .object({
-      slots: z.number().int().min(1).max(256).default(16),
+      slots: z.number().int().min(1).max(256).default(20),
       compareLatencyMs: z.tuple([z.number(), z.number()]).default([150, 600]),
       infraRate: z.number().min(0).max(1).default(0.01),
       /** Matching traps the skill loop can learn (see repo/simContent.ts). */
       traps: z.boolean().default(true),
     })
-    .default({ slots: 16, compareLatencyMs: [150, 600], infraRate: 0.01, traps: true }),
+    .default({ slots: 20, compareLatencyMs: [150, 600], infraRate: 0.01, traps: true }),
   engine: z
     .object({
       leaseMs: z.number().int().optional(),

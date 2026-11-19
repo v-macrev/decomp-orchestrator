@@ -39,6 +39,8 @@ export interface LessonRow {
 export interface TaskRow extends Task {
   infraFailures: number;
   providerFailures: number;
+  /** Worker instance that last leased the packet (per-worker function cap). */
+  assignedWorker?: string | null;
 }
 
 type Raw = Record<string, any>;
@@ -55,6 +57,7 @@ function toTask(r: Raw): TaskRow {
     lastVerdictId: r.last_verdict_id, srTaskId: r.sr_task_id, updatedAt: r.updated_at,
     difficulty: (r.difficulty ?? 'medium') as Difficulty, complexity: r.complexity ?? 0,
     attemptsAtDifficulty: r.attempts_at_difficulty ?? 0, assessment: p<ComplexityAssessment | null>(r.assessment_json, null),
+    assignedWorker: r.assigned_worker ?? null,
   };
 }
 
@@ -84,6 +87,8 @@ function toRun(r: Raw): RunRow {
   if (!('context' in raw)) raw.context = { mode: 'legacy' };
   // Runs created before Phase 3 keep their behaviour: no core skills, no dynamic skills.
   if (!('skills' in raw)) raw.skills = { enabled: false };
+  // Runs created before Phase 4 had no per-worker function cap.
+  if (!('maxFunctionsPerWorker' in raw)) raw.maxFunctionsPerWorker = 5_000;
   return {
     id: r.id, name: r.name, status: r.status, config: RunConfig.parse(raw),
     flow: Flow.parse(JSON.parse(r.flow_json)), costUsd: r.cost_usd, error: r.error,
@@ -396,6 +401,62 @@ export class Store {
       createdAt: r.created_at as number,
     }));
   }
+  // ---------------- function gathering (Phase 4)
+  /** RVAs this tool is still working on (open in any run) or matched but not yet submitted. */
+  rvasInFlight(excludeRunId: string | null): Set<string> {
+    const rows = this.db.prepare(`SELECT DISTINCT json_extract(f.value, '$.rva') rva FROM tasks t, json_each(t.functions_json) f
+      WHERE t.state IN ('pending','leased','gating','passed','staged') AND t.run_id != COALESCE(?, '')`).all(excludeRunId) as Array<{ rva: string }>;
+    return new Set(rows.map((r) => r.rva));
+  }
+  putGathered(runId: string, fns: Array<{ rva: string; name: string | null; nameOrigin?: string | null; size: number; unit: string; header: string | null; signature: string | null; draft: string; readiness?: number; xrefsIn: number | null; xrefsOut: number | null; basicBlocks: number | null; instructions: number | null; branches: number | null; sources: string[] }>) {
+    const stmt = this.db.prepare(`INSERT OR REPLACE INTO gathered_functions (run_id, rva, name, name_origin, size, unit, header, signature, draft, readiness, xrefs_in, xrefs_out, basic_blocks, instructions, branches, sources_json)
+      VALUES (@runId, @rva, @name, @nameOrigin, @size, @unit, @header, @signature, @draft, @readiness, @xrefsIn, @xrefsOut, @basicBlocks, @instructions, @branches, @sources)`);
+    this.tx(() => fns.forEach((f) => stmt.run({ ...f, runId, nameOrigin: f.nameOrigin ?? null, readiness: f.readiness ?? null, sources: j(f.sources) })));
+  }
+  gathered(runId: string, limit = 1000) {
+    return (this.db.prepare('SELECT * FROM gathered_functions WHERE run_id = ? ORDER BY readiness, size LIMIT ?').all(runId, limit) as Raw[]).map((r) => ({
+      rva: r.rva as string, name: r.name as string | null, nameOrigin: r.name_origin as string | null, size: r.size as number, unit: r.unit as string, header: r.header as string | null,
+      signature: r.signature as string | null, draft: r.draft as string, readiness: r.readiness as number | null, xrefsIn: r.xrefs_in as number | null, xrefsOut: r.xrefs_out as number | null,
+      basicBlocks: r.basic_blocks as number | null, instructions: r.instructions as number | null, branches: r.branches as number | null, sources: p<string[]>(r.sources_json, []),
+    }));
+  }
+  setRunJson(runId: string, col: 'gather_json' | 'capacity_json', value: unknown) {
+    this.db.prepare(`UPDATE runs SET ${col} = ? WHERE id = ?`).run(value == null ? null : j(value), runId);
+  }
+  runJson<T>(runId: string, col: 'gather_json' | 'capacity_json'): T | null {
+    const r = this.db.prepare(`SELECT ${col} v FROM runs WHERE id = ?`).get(runId) as { v: string | null } | undefined;
+    return r?.v ? (JSON.parse(r.v) as T) : null;
+  }
+
+  // ---------------- per-worker function caps (Phase 4)
+  /** Register a run's worker instances (idempotent: counts survive restarts and resumes). */
+  registerWorkers(runId: string, workers: Array<{ workerId: string; nodeId: string; tier: number; capability: string | null }>, maxFunctions: number) {
+    const stmt = this.db.prepare(`INSERT INTO run_workers (run_id, worker_id, node_id, tier, capability, max_functions, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(run_id, worker_id) DO UPDATE SET tier = excluded.tier, capability = excluded.capability`);
+    const now = Date.now();
+    this.tx(() => workers.forEach((w) => stmt.run(runId, w.workerId, w.nodeId, w.tier, w.capability, maxFunctions, now)));
+  }
+  workerStats(runId: string) {
+    return this.db.prepare(`SELECT w.worker_id, w.node_id, w.tier, w.capability, w.max_functions, w.assigned_function_count, w.assigned_tasks,
+        (SELECT COALESCE(SUM(json_array_length(t.functions_json)), 0) FROM tasks t WHERE t.run_id = w.run_id AND t.assigned_worker = w.worker_id AND t.state IN ('passed','staged')) passed_functions,
+        (SELECT COUNT(*) FROM attempts a WHERE a.run_id = w.run_id AND a.worker_id = w.worker_id) attempts
+      FROM run_workers w WHERE w.run_id = ? ORDER BY w.tier, w.worker_id`).all(runId) as Array<{
+        worker_id: string; node_id: string; tier: number; capability: string | null; max_functions: number; assigned_function_count: number; assigned_tasks: number; passed_functions: number; attempts: number;
+      }>;
+  }
+  /** Raise (never lower) the per-worker cap of a run: the operator's way out of a capacity stall. */
+  raiseWorkerCap(runId: string, max: number): boolean {
+    const run = this.getRun(runId);
+    if (!run) return false;
+    const cur = (this.db.prepare('SELECT MAX(max_functions) m FROM run_workers WHERE run_id = ?').get(runId) as { m: number | null }).m ?? run.config.maxFunctionsPerWorker;
+    if (max <= cur) return false;
+    this.tx(() => {
+      this.db.prepare('UPDATE runs SET config_json = json_set(config_json, \'$.maxFunctionsPerWorker\', ?), updated_at = ? WHERE id = ?').run(max, Date.now(), runId);
+      this.db.prepare('UPDATE run_workers SET max_functions = ? WHERE run_id = ? AND max_functions < ?').run(max, runId, max);
+    });
+    return true;
+  }
+
   maxBatchSeq(runId: string): number {
     return ((this.db.prepare('SELECT MAX(seq) m FROM pr_batches WHERE run_id = ?').get(runId) as Raw).m as number | null) ?? 0;
   }

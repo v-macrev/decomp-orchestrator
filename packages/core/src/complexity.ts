@@ -37,6 +37,9 @@ export function scoreFeatures(f: FunctionFeatures): Score {
     add(0.12 * Math.min(10, f.dataRefs ?? 0), `${f.dataRefs} global/constant reference(s)`);
   }
   if ((f.unwindEntries ?? 0) > 1) add(1.5, `${f.unwindEntries} unwind entries (EH funclets)`);
+  if (f.templated) add(1, 'template instantiation');
+  // Many callers pin the signature and calling convention: less freedom to shape the source.
+  if ((f.xrefsIn ?? 0) > 1) add(Math.min(0.6, 0.15 * Math.log2(f.xrefsIn!)), `${f.xrefsIn} incoming xref(s)`);
   add(0.9 * Math.min(3, f.priorFailures), `${f.priorFailures} failed attempt(s) in earlier runs`);
   add(f.nameConfidence === 'unnamed' ? 0.8 : f.nameConfidence === 'guess' ? 0.4 : 0, `name is ${f.nameConfidence}`);
   add(0.25 * Math.min(4, f.cautions), `${f.cautions} backlog caution(s)`);

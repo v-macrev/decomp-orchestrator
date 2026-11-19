@@ -51,27 +51,43 @@ export class TaskQueue {
    * in order) whose ready backlog exceeds what their own idle slots will absorb. A stolen task moves
    * to the stealer's tier, so its attempts and escalation continue from there.
    */
-  lease(runId: string, tier: number, n: number, leaseMs: number, opts: { stealFrom?: StealSource[] } = {}): LeaseResult[] {
+  lease(runId: string, tier: number, n: number, leaseMs: number, opts: { stealFrom?: StealSource[]; worker?: string } = {}): LeaseResult[] {
     const db = this.store.db;
     return this.store.tx(() => {
       const now = this.now();
       const out: LeaseResult[] = [];
       const units = new Set<string>();
-      const upd = db.prepare(`UPDATE tasks SET state = 'leased', tier = @tier, lease_id = @leaseId, lease_expires_at = @exp, updated_at = @now
+      const worker = opts.worker ?? null;
+      const upd = db.prepare(`UPDATE tasks SET state = 'leased', tier = @tier, lease_id = @leaseId, lease_expires_at = @exp, updated_at = @now,
+          assigned_worker = COALESCE(@worker, assigned_worker)
         WHERE id = @id AND state = 'pending'`);
+      const undo = db.prepare(`UPDATE tasks SET state = 'pending', tier = @fromTier, lease_id = NULL, lease_expires_at = NULL WHERE id = @id`);
+      // Hard per-worker cap, charged in the same transaction as the lease: a function counts once per
+      // worker (retries of its own packets are free) and the count can never pass max_functions.
+      const charge = db.prepare(`UPDATE run_workers SET assigned_function_count = assigned_function_count + @fn, assigned_tasks = assigned_tasks + 1, updated_at = @now
+        WHERE run_id = @runId AND worker_id = @worker AND assigned_function_count + @fn <= max_functions`);
+      const assign = db.prepare(`INSERT INTO worker_assignments (run_id, worker_id, task_id, functions, assigned_at) VALUES (@runId, @worker, @id, @fn, @now)`);
       const take = (fromTier: number, limit: number) => {
         const rows = db
-          .prepare(`SELECT id FROM tasks t WHERE ${READY} ORDER BY t.priority DESC, t.rowid LIMIT @n`)
-          .all({ runId, tier: fromTier, now, n: limit * 4 }) as Array<{ id: string }>;
-        for (const { id } of rows) {
+          .prepare(`SELECT t.id, json_array_length(t.functions_json) fn,
+              EXISTS (SELECT 1 FROM worker_assignments a WHERE a.run_id = t.run_id AND a.worker_id = @worker AND a.task_id = t.id) own
+            FROM tasks t WHERE ${READY} ORDER BY own DESC, t.priority DESC, t.rowid LIMIT @n`)
+          .all({ runId, tier: fromTier, now, n: limit * 4 + 8, worker }) as Array<{ id: string; fn: number; own: number }>;
+        for (const { id, fn, own } of rows) {
           if (out.length >= n) break;
           const task = this.store.getTask(id)!;
           if (units.has(task.unit)) continue; // same-unit packets within one lease batch
           const leaseId = newId('lease');
-          if (upd.run({ id, tier, leaseId, exp: now + leaseMs, now }).changes === 1) {
-            units.add(task.unit);
-            out.push({ task: { ...task, tier, state: 'leased', leaseId, leaseExpiresAt: now + leaseMs }, leaseId, ...(fromTier !== tier ? { stolenFrom: fromTier } : {}) });
+          if (upd.run({ id, tier, leaseId, exp: now + leaseMs, now, worker }).changes !== 1) continue;
+          if (worker && !own) {
+            if (charge.run({ runId, worker, fn, now }).changes !== 1) {
+              undo.run({ id, fromTier }); // over this worker's cap: a smaller packet may still fit
+              continue;
+            }
+            assign.run({ runId, worker, id, fn, now });
           }
+          units.add(task.unit);
+          out.push({ task: { ...task, tier, state: 'leased', leaseId, leaseExpiresAt: now + leaseMs }, leaseId, ...(fromTier !== tier ? { stolenFrom: fromTier } : {}) });
         }
       };
       take(tier, n);
@@ -163,6 +179,37 @@ export class TaskQueue {
       .prepare(`SELECT MIN(not_before) t FROM tasks WHERE run_id = ? AND state = 'pending' AND tier IN (${tiers.map(() => '?').join(',')})`)
       .get(runId, ...tiers) as { t: number | null };
     return r.t;
+  }
+
+  /**
+   * Pending packets no worker can ever take: every worker of the packet's tier (or, with stealing,
+   * of a higher tier) is too close to its cap and has never been assigned the packet. When all
+   * pending packets are blocked and nothing is in flight, the run cannot progress.
+   */
+  capacityBlocked(runId: string, stealing: boolean): { pending: number; blocked: number; blockedFunctions: number; inFlight: number } {
+    const r = this.store.db.prepare(`SELECT
+        (SELECT COUNT(*) FROM tasks WHERE run_id = @runId AND state = 'pending') pending,
+        (SELECT COUNT(*) FROM tasks WHERE run_id = @runId AND state IN ('leased','gating')) inFlight,
+        COUNT(*) blocked, COALESCE(SUM(json_array_length(t.functions_json)), 0) blockedFunctions
+      FROM tasks t WHERE t.run_id = @runId AND t.state = 'pending' AND EXISTS (SELECT 1 FROM run_workers WHERE run_id = @runId)
+        AND NOT EXISTS (SELECT 1 FROM run_workers w WHERE w.run_id = t.run_id AND (w.tier = t.tier OR (@steal = 1 AND w.tier > t.tier))
+          AND (EXISTS (SELECT 1 FROM worker_assignments a WHERE a.run_id = w.run_id AND a.worker_id = w.worker_id AND a.task_id = t.id)
+               OR w.assigned_function_count + json_array_length(t.functions_json) <= w.max_functions))`).get({ runId, steal: stealing ? 1 : 0 }) as { pending: number; blocked: number; blockedFunctions: number; inFlight: number };
+    return r;
+  }
+
+  /** Refund a worker's charge for a packet it never attempted (re-routed before the first attempt). */
+  unassign(runId: string, workerId: string, taskId: string) {
+    this.store.tx(() => {
+      const a = this.store.db.prepare('DELETE FROM worker_assignments WHERE run_id = ? AND worker_id = ? AND task_id = ? RETURNING functions').get(runId, workerId, taskId) as { functions: number } | undefined;
+      if (a) this.store.db.prepare('UPDATE run_workers SET assigned_function_count = assigned_function_count - ?, assigned_tasks = assigned_tasks - 1 WHERE run_id = ? AND worker_id = ?').run(a.functions, runId, workerId);
+    });
+  }
+
+  /** Functions a worker may still claim in this run (Infinity when it has no cap row). */
+  workerRemaining(runId: string, workerId: string): number {
+    const r = this.store.db.prepare('SELECT max_functions - assigned_function_count n FROM run_workers WHERE run_id = ? AND worker_id = ?').get(runId, workerId) as { n: number } | undefined;
+    return r ? r.n : Infinity;
   }
 
   hasOpenWork(runId: string): boolean {

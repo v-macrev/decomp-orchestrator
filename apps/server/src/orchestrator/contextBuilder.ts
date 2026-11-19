@@ -365,7 +365,7 @@ function lexedCode(src: string): string {
   return code;
 }
 
-function findSignature(qualified: string, sources: string[]): string | null {
+export function findSignature(qualified: string, sources: string[]): string | null {
   const method = qualified.split('::').pop()!.replace(/[^~\w]/g, '');
   if (!method) return null;
   const re = new RegExp(`^\\s*([^;{}\\n]*\\b${method.replace('~', '~?')}\\s*\\([^;{}]*\\)[^;{}\\n]*);`, 'm');

@@ -89,7 +89,7 @@ export function srRepoConfig(cfg: ServerConfig): SrRepoConfig {
   const at = (p: string) => (wsl ? p : fromRoot(p));
   return {
     repoPath: at(r.path), baseRef: r.baseRef, worktreeRoot: at(r.worktreeRoot), localDir: at(r.localDir),
-    python: wsl && r.python === 'python' ? 'python3' : r.python, slots: r.slots, host: r.host, sandbox: r.sandbox,
+    python: wsl && r.python === 'python' ? 'python3' : r.python, slots: r.slots, host: r.host, sandbox: r.sandbox, ...(r.functionTable ? { functionTable: at(r.functionTable) } : {}),
   };
 }
 

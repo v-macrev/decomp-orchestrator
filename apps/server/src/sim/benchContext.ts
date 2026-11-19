@@ -90,7 +90,7 @@ async function simRun(label: string, flow: Flow, context: 'legacy' | 'budgeted',
   const t0 = Date.now();
   const run = engine.createRun(label, {
     flowId: flow.id, selection: { source: 'synthetic', count: Number(a.count), seed: Number(a.seed) }, exposureConsent: a.consent,
-    context: { mode: context }, routing: { enabled: routing },
+    context: { mode: context }, routing: { enabled: routing }, maxFunctionsPerWorker: 5000,
   }, flow);
   await engine.start(run.id);
   await engine.waitFor(run.id);

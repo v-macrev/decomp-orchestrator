@@ -284,6 +284,59 @@ const MIGRATIONS: string[] = [
   );
   ALTER TABLE runs ADD COLUMN skills_json TEXT;   -- frozen RunSkillSnapshot (core prefix + dynamic set)
   `,
+  // v4 — Phase 4: function gathering, per-worker function caps, capacity plans.
+  `
+  CREATE TABLE run_workers (
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    worker_id TEXT NOT NULL,              -- <flow node id>#<instance>, stable across restarts
+    node_id TEXT NOT NULL,
+    tier INTEGER NOT NULL,
+    capability TEXT,
+    max_functions INTEGER NOT NULL,       -- RunConfig.maxFunctionsPerWorker (default 60)
+    assigned_function_count INTEGER NOT NULL DEFAULT 0,   -- distinct functions claimed in this run
+    assigned_tasks INTEGER NOT NULL DEFAULT 0,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, worker_id),
+    CHECK (assigned_function_count <= max_functions)
+  );
+  CREATE TABLE worker_assignments (
+    run_id TEXT NOT NULL,
+    worker_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    functions INTEGER NOT NULL,
+    assigned_at INTEGER NOT NULL,
+    PRIMARY KEY (run_id, worker_id, task_id)
+  );
+  CREATE INDEX worker_assign_task ON worker_assignments (run_id, task_id);
+  ALTER TABLE tasks ADD COLUMN assigned_worker TEXT;
+  ALTER TABLE attempts ADD COLUMN worker_id TEXT;
+
+  CREATE TABLE gathered_functions (
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    rva TEXT NOT NULL,
+    name TEXT,
+    name_origin TEXT,
+    size INTEGER NOT NULL,
+    unit TEXT NOT NULL,
+    header TEXT,
+    signature TEXT,
+    draft TEXT NOT NULL,                  -- none | stub | present
+    readiness INTEGER,
+    xrefs_in INTEGER,
+    xrefs_out INTEGER,
+    basic_blocks INTEGER,
+    instructions INTEGER,
+    branches INTEGER,
+    sources_json TEXT NOT NULL,
+    PRIMARY KEY (run_id, rva)
+  );
+  ALTER TABLE runs ADD COLUMN gather_json TEXT;     -- GatherReport without the function list
+  ALTER TABLE runs ADD COLUMN capacity_json TEXT;   -- per-tier demand vs worker capacity
+
+  -- Names used by the Phase 4 spec, over the Phase 2 columns/tables that already hold the data.
+  CREATE VIEW task_complexity AS SELECT id AS task_id, run_id, difficulty AS complexity_tier, complexity AS complexity_score, assigned_worker FROM tasks;
+  CREATE VIEW shared_run_discoveries AS SELECT * FROM run_knowledge_cache;
+  `,
 ];
 
 export function openDatabase(path: string): DB {

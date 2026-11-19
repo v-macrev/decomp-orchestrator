@@ -234,8 +234,39 @@ export const SelectionSpec = z.discriminatedUnion('source', [
   z.object({ source: z.literal('rva_list'), rvas: z.array(z.string().regex(/^0x[0-9a-fA-F]+$/)).min(1) }),
   /** Synthetic backlog for the simulator. */
   z.object({ source: z.literal('synthetic'), count: z.number().int().positive().max(100_000), seed: z.number().int().default(1) }),
+  /** Orchestrator FunctionGatherer: inventory scan + source/pack/table enrichment + filters. */
+  z.object({ source: z.literal('gather'), filter: z.lazy(() => GatherFilter).default(() => GatherFilter.parse({})) }),
 ]);
 export type SelectionSpec = z.infer<typeof SelectionSpec>;
+
+const RvaHex = z.string().regex(/^0x[0-9a-fA-F]+$/);
+
+/** What the FunctionGatherer selects from the repository's backlog. */
+export const GatherFilter = z.object({
+  /** Functions in this batch (after every other filter); the per-run cap. */
+  maxFunctions: z.number().int().positive().max(5_000).default(500),
+  minSize: z.number().int().nonnegative().optional(),
+  maxSize: z.number().int().positive().default(256),
+  /** Half-open RVA ranges [start, end). */
+  rvaRanges: z.array(z.object({ start: RvaHex, end: RvaHex })).max(64).default([]),
+  /** Qualified-name prefixes on `::` boundaries ("RE", "BSTArray", "RE::TESForm"). */
+  namespaces: z.array(z.string().min(1).max(200)).max(64).default([]),
+  /** Reconstruction areas (`reconstruction/<area>/...`). */
+  modules: z.array(z.string().min(1).max(120)).max(64).default([]),
+  /** Explicit units (`reconstruction/<area>/<Class>.cpp`). */
+  units: z.array(z.string().min(1).max(300)).max(256).default([]),
+  /** Drop functions whose name origin is in this list (e.g. GUESS). */
+  excludeNameOrigins: z.array(z.string().min(1).max(40)).max(16).default([]),
+  /** Skip functions claimed locally or (when reachable) by others. */
+  excludeLocked: z.boolean().default(true),
+  /** Skip functions open in another run or matched by this tool but not yet submitted. */
+  excludeInFlight: z.boolean().default(true),
+  /** Skip functions whose unit already holds a non-trivial draft of them. */
+  excludeDrafted: z.boolean().default(false),
+  /** Order of the selection before the cap. */
+  order: z.enum(['readiness', 'size', 'rva']).default('readiness'),
+});
+export type GatherFilter = z.infer<typeof GatherFilter>;
 
 export const RunConfig = z.object({
   flowId: z.string(),
@@ -244,6 +275,11 @@ export const RunConfig = z.object({
   packetMaxFunctions: z.number().int().min(1).max(60).default(4),
   /** Concurrent repo compares (CPU bound, independent of LLM concurrency). */
   gateConcurrency: z.number().int().min(1).max(64).default(4),
+  /**
+   * Hard ceiling of distinct functions one worker instance may take in this run (claimed atomically
+   * with the lease). Balances load across the topology and bounds each worker's session/quota exposure.
+   */
+  maxFunctionsPerWorker: z.number().int().min(1).max(5_000).default(60),
   /** Passing functions per staged PR batch (repo cap is 60). */
   prBatchSize: z.number().int().min(1).max(60).default(40),
   /**
@@ -465,6 +501,8 @@ export const FunctionFeatures = z.object({
   /** RIP-relative references (globals, constants, imports). */
   dataRefs: z.number().int().nonnegative().nullable().default(null),
   xrefsIn: z.number().int().nonnegative().nullable().default(null),
+  /** Template instantiation (name carries template arguments): COMDAT/inlining shape is harder to hit. */
+  templated: z.boolean().optional(),
   /** .pdata entries in the function: >1 means funclets (C++ EH / SEH). */
   unwindEntries: z.number().int().nonnegative().nullable().default(null),
   tailCall: z.boolean().nullable().default(null),
