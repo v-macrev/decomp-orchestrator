@@ -19,7 +19,7 @@ import type { CompareFunctionResult, Finding, SelectionSpec } from '@decomp/core
 import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
 import { runBounded, type RunResult } from '../util/proc.js';
-import type { CompareOutcome, DiscoveredFunction, DocSection, PreflightOutcome, PreparedTask, RepoAdapter } from './types.js';
+import type { CompareOutcome, DiscoveredFunction, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
 
 export interface SrRepoConfig {
   repoPath: string;
@@ -269,6 +269,35 @@ export class SrRepo implements RepoAdapter {
       .map((l) => /^(.+):(\d+) (\S+)$/.exec(l.trim()))
       .filter((m): m is RegExpExecArray => !!m)
       .map((m) => ({ stage: 'leak', code: `LEAK_REPO_${m[3]!.toUpperCase().replace(/-/g, '_')}`, severity: 'block' as const, file: m[1]!, line: Number(m[2]), message: `repository leakgrep rule ${m[3]}` }));
+  }
+
+  // ---------------------------------------------------------------- staging
+
+  async stageBatch(input: StageBatchInput): Promise<StageBatchResult> {
+    const slot = this.slotCount; // dedicated staging worktree after the worker slots
+    const p = this.wt(slot);
+    if (!existsSync(join(p, '.git'))) {
+      const r = await this.git(this.cfg.repoPath, ['worktree', 'add', '--detach', p, this.sha], 600_000);
+      if (r.code !== 0) return { branch: null, verified: false, problems: [`staging worktree: ${r.stderr.slice(0, 200)}`] };
+    }
+    await this.reset(slot);
+    await this.writeFiles(slot, input.files);
+    const problems: string[] = [];
+    const ac = new AbortController();
+    for (const t of input.tasks) {
+      if (!t.srTaskId) {
+        problems.push(`${t.id}: no sr task id`);
+        continue;
+      }
+      const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: ac.signal, timeoutMs: 600_000 });
+      if (!r.allPass) problems.push(`${t.id}: ${r.infraError ?? r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') ?? 'compile error'}`);
+    }
+    const branch = `decomp/${input.runId}-b${input.seq}`;
+    const co = await this.git(p, ['checkout', '-q', '-B', branch]);
+    const add = await this.git(p, ['add', '--', ...input.files.map((f) => f.path)]);
+    const commit = await this.git(p, ['commit', '-q', '-m', input.message]);
+    if (co.code !== 0 || add.code !== 0 || commit.code !== 0) problems.push(`git: ${(co.stderr + add.stderr + commit.stderr).slice(0, 300)}`);
+    return { branch: commit.code === 0 ? branch : null, verified: problems.length === 0, problems };
   }
 
   // ---------------------------------------------------------------- context

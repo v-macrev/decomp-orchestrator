@@ -35,6 +35,8 @@ export interface GateInput {
   checks: GateChecks;
   compareTimeoutMs: number;
   signal: AbortSignal;
+  /** Unit files accepted earlier in this run: their functions are protected like base-matched ones. */
+  carried?: Map<string, string>;
 }
 
 export interface GateResult {
@@ -116,7 +118,7 @@ export class GateKeeper {
       accepted.flatMap((f) => leakScan(f.path, current.get(f.path) ?? bases.get(f.path) ?? null, f.content)),
     );
     const cheatOk = await stage('cheat', checks.cheat, async () =>
-      accepted.flatMap((f) => cheatScan({ path: f.path, before: bases.get(f.path) ?? null, after: f.content, targets: task.functions as FunctionTarget[] })),
+      accepted.flatMap((f) => cheatScan({ path: f.path, before: input.carried?.get(f.path) ?? bases.get(f.path) ?? null, after: f.content, targets: task.functions as FunctionTarget[] })),
     );
     if (!leakOk || !cheatOk) return rejectOrQuarantine();
 

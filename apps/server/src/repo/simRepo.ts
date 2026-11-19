@@ -8,7 +8,7 @@ import type { CompareFunctionResult, SelectionSpec } from '@decomp/core';
 import type { TaskRow } from '../db/store.js';
 import { simIdent, type SimOracle } from '../providers/mock.js';
 import { sleep } from '../util/async.js';
-import type { CompareOutcome, DiscoveredFunction, DocSection, PreflightOutcome, PreparedTask, RepoAdapter } from './types.js';
+import type { CompareOutcome, DiscoveredFunction, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
 
 export interface SimRepoOptions {
   slots: number;
@@ -119,9 +119,12 @@ export class SimRepo implements RepoAdapter, SimOracle {
     if (this.rand() < (this.opts.infraRate ?? 0)) {
       return { completed: false, allPass: false, compileError: false, functions: [], infraError: 'simulated toolchain crash', durationMs: Date.now() - t };
     }
-    const src = this.overlays[slot]!.get(task.unit) ?? '';
+    return { ...this.evaluate(this.overlays[slot]!.get(task.unit) ?? '', task), durationMs: Date.now() - t };
+  }
+
+  private evaluate(src: string, task: TaskRow): Omit<CompareOutcome, 'durationMs'> {
     if ((src.match(/\{/g) ?? []).length !== (src.match(/\}/g) ?? []).length || src.includes('#error')) {
-      return { completed: true, allPass: false, compileError: true, functions: [], infraError: null, durationMs: Date.now() - t };
+      return { completed: true, allPass: false, compileError: true, functions: [], infraError: null };
     }
     const functions: CompareFunctionResult[] = task.functions.map((f) => {
       const ident = simIdent(f);
@@ -137,7 +140,18 @@ export class SimRepo implements RepoAdapter, SimOracle {
         targetSize: f.size, exactBytes: exact, totalBytes: f.size,
       };
     });
-    return { completed: true, allPass: functions.every((f) => f.result === 'pass'), compileError: false, functions, infraError: null, durationMs: Date.now() - t };
+    return { completed: true, allPass: functions.every((f) => f.result === 'pass'), compileError: false, functions, infraError: null };
+  }
+
+  /** Re-verify every packet against the combined final unit files (what a PR would contain). */
+  async stageBatch(input: StageBatchInput): Promise<StageBatchResult> {
+    const files = new Map(input.files.map((f) => [f.path, f.content]));
+    const problems: string[] = [];
+    for (const t of input.tasks) {
+      const r = this.evaluate(files.get(t.task.unit) ?? '', t.task);
+      if (!r.allPass) problems.push(`${t.id}: ${r.functions.filter((f) => f.result !== 'pass').map((f) => f.rva).join(',') || 'compile error'}`);
+    }
+    return { branch: `sim/${input.runId}-b${input.seq}`, verified: problems.length === 0, problems };
   }
 
   async preflight(slot: number, task: TaskRow): Promise<PreflightOutcome> {

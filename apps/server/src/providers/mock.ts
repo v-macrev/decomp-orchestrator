@@ -86,14 +86,18 @@ export class MockAdapter implements ProviderAdapter {
     const spec = JSON.parse(m[1]!) as { allowedPaths: string[]; functions: SpecFn[]; attempt: number };
     const cpp = spec.allowedPaths.find((p) => p.endsWith('.cpp')) ?? spec.allowedPaths[0]!;
     const skill = Math.min(0.97, (o.skill ?? 0.6) + 0.08 * Math.max(0, spec.attempt - 1));
+    // Like a well-behaved model: start from the current unit shown in the prompt and keep everything
+    // that is not one of this packet's functions (previously accepted bodies must survive).
+    const esc = cpp.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const current = new RegExp(`<unit title="Current ${esc}"[^>]*>\\n([\\s\\S]*?)\\n</unit>`).exec(req.prompt)?.[1] ?? null;
     const files: Array<{ path: string; content: string }> = [];
     if (this.rand() < (o.cheatRate ?? 0)) {
       const c = CHEATS[Math.floor(this.rand() * CHEATS.length)]!(spec.functions[0]!, spec.allowedPaths);
       if (c.path) files.push({ path: c.path, content: c.body });
-      else files.push({ path: cpp, content: unit(spec.functions.map((f, i) => (i === 0 ? { f, body: c.body } : { f, body: this.body(f, skill) }))) });
+      else files.push({ path: cpp, content: unit(current, spec.functions.map((f, i) => (i === 0 ? { f, body: c.body } : { f, body: this.body(f, skill) }))) });
       return JSON.stringify({ files, notes: 'sim cheat' });
     }
-    files.push({ path: cpp, content: unit(spec.functions.map((f) => ({ f, body: this.body(f, skill) }))) });
+    files.push({ path: cpp, content: unit(current, spec.functions.map((f) => ({ f, body: this.body(f, skill) }))) });
     return JSON.stringify({ files, notes: `sim attempt ${spec.attempt}` });
   }
 
@@ -105,7 +109,13 @@ export class MockAdapter implements ProviderAdapter {
   }
 }
 
-function unit(parts: Array<{ f: SpecFn; body: string }>): string {
+function unit(current: string | null, parts: Array<{ f: SpecFn; body: string }>): string {
+  const fns = parts.map(({ f, body }) => `int ${simIdent(f)}()\n{\n${body}\n}\n`);
+  if (current && current.trim()) {
+    let kept = current;
+    for (const { f } of parts) kept = kept.replace(new RegExp(`int ${simIdent(f)}\\(\\)\\n\\{[\\s\\S]*?\\n\\}\\n?`, 'g'), '');
+    return `${kept.replace(/\n*$/, '\n')}\n${fns.join('\n')}`;
+  }
   const head = [
     '// Source exposure: public (community headers).',
     '// Code origin: original; simulated draft',
@@ -113,7 +123,6 @@ function unit(parts: Array<{ f: SpecFn; body: string }>): string {
     '#include "Sim.h"',
     '',
   ];
-  const fns = parts.map(({ f, body }) => `int ${simIdent(f)}()\n{\n${body}\n}\n`);
   return [...head, ...fns].join('\n');
 }
 

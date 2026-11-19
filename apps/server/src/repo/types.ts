@@ -70,4 +70,23 @@ export interface RepoAdapter {
   /** Headers included by the unit (one level), for the context bundle. */
   includedHeaders(slot: number, unitFiles: string[]): Promise<DocSection[]>;
   readPack(pack: string): Promise<string | null>;
+  /**
+   * Assemble a PR batch: write the final unit files on a fresh branch from the base revision,
+   * re-verify every packet against the combined result, and commit. Never pushes or opens a PR.
+   */
+  stageBatch?(input: StageBatchInput): Promise<StageBatchResult>;
+}
+
+export interface StageBatchInput {
+  runId: string;
+  seq: number;
+  files: Array<{ path: string; content: string }>;
+  tasks: Array<{ id: string; srTaskId: string | null; functions: TaskRow['functions']; task: TaskRow }>;
+  message: string;
+}
+
+export interface StageBatchResult {
+  branch: string | null;
+  verified: boolean;
+  problems: string[];
 }
