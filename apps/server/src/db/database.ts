@@ -136,6 +136,55 @@ const MIGRATIONS: string[] = [
     UNIQUE (run_id, seq)
   );
   `,
+  // v2 — Phase 2: complexity routing, token/caching telemetry, run knowledge cache, tagged lessons.
+  // Additive only: pre-existing rows get neutral defaults and usage columns are backfilled.
+  `
+  ALTER TABLE tasks ADD COLUMN difficulty TEXT NOT NULL DEFAULT 'medium';
+  ALTER TABLE tasks ADD COLUMN complexity REAL NOT NULL DEFAULT 0;
+  ALTER TABLE tasks ADD COLUMN attempts_at_difficulty INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE tasks ADD COLUMN assessment_json TEXT;
+  CREATE INDEX tasks_difficulty ON tasks (run_id, difficulty, state);
+
+  ALTER TABLE attempts ADD COLUMN difficulty TEXT;
+  ALTER TABLE attempts ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;         -- all input, cached or not
+  ALTER TABLE attempts ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0;  -- served from the prompt cache
+  ALTER TABLE attempts ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE attempts ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE attempts ADD COLUMN context_tokens INTEGER;                          -- bundle as sent (estimate)
+  ALTER TABLE attempts ADD COLUMN context_raw_tokens INTEGER;                      -- unsliced sources (estimate)
+  UPDATE attempts SET
+    input_tokens = COALESCE(json_extract(usage_json, '$.inputTokens'), 0),
+    cached_input_tokens = COALESCE(json_extract(usage_json, '$.cacheReadTokens'), 0),
+    cache_write_tokens = COALESCE(json_extract(usage_json, '$.cacheWriteTokens'), 0),
+    output_tokens = COALESCE(json_extract(usage_json, '$.outputTokens'), 0);
+  CREATE INDEX attempts_account ON attempts (run_id, account_id, model);
+
+  ALTER TABLE runs ADD COLUMN input_tokens INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0;
+  ALTER TABLE runs ADD COLUMN output_tokens INTEGER NOT NULL DEFAULT 0;
+  UPDATE runs SET
+    input_tokens = (SELECT COALESCE(SUM(input_tokens), 0) FROM attempts a WHERE a.run_id = runs.id),
+    cached_input_tokens = (SELECT COALESCE(SUM(cached_input_tokens), 0) FROM attempts a WHERE a.run_id = runs.id),
+    cache_write_tokens = (SELECT COALESCE(SUM(cache_write_tokens), 0) FROM attempts a WHERE a.run_id = runs.id),
+    output_tokens = (SELECT COALESCE(SUM(output_tokens), 0) FROM attempts a WHERE a.run_id = runs.id);
+
+  ALTER TABLE lessons ADD COLUMN tags_json TEXT NOT NULL DEFAULT '["general"]';
+
+  CREATE TABLE run_knowledge_cache (
+    run_id TEXT NOT NULL REFERENCES runs(id),
+    kind TEXT NOT NULL,               -- function_signature | struct_layout | global | type_decl
+    symbol TEXT NOT NULL,             -- key: struct / function / global name
+    content TEXT NOT NULL,            -- the verified declaration as accepted (public source)
+    symbols_json TEXT NOT NULL,       -- identifiers it mentions, for matching
+    source_task_id TEXT NOT NULL,
+    source_unit TEXT NOT NULL,
+    verified_at INTEGER NOT NULL,
+    uses INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (run_id, kind, symbol)
+  );
+  CREATE INDEX knowledge_symbol ON run_knowledge_cache (run_id, symbol);
+  `,
 ];
 
 export function openDatabase(path: string): DB {

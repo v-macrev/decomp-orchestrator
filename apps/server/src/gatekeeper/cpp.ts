@@ -78,6 +78,13 @@ export interface FunctionDef {
   line: number;
   /** Body without the outer braces, whitespace-normalised. */
   body: string;
+  /** Offset of the start of the line the definition begins on (lexing preserves offsets). */
+  start: number;
+  /** Offsets of the opening and closing braces of the body. */
+  open: number;
+  close: number;
+  /** Signature text from `start` up to the opening brace, whitespace-normalised. */
+  signature: string;
 }
 
 const KEYWORDS = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'sizeof', 'alignof', 'decltype', 'static_assert', 'noexcept', 'requires']);
@@ -107,7 +114,9 @@ export function extractFunctions(code: string): FunctionDef[] {
     }
     const body = code.slice(open + 1, k - 1);
     const line = code.slice(0, m.index).split('\n').length;
-    defs.push({ name, line, body: normalise(body) });
+    // The regex may start mid-line (leading whitespace / qualifiers); definitions start at a line start.
+    const start = code.lastIndexOf('\n', m.index) + 1;
+    defs.push({ name, line, body: normalise(body), start, open, close: k - 1, signature: normalise(code.slice(start, open)) });
     re.lastIndex = k; // skip nested content
   }
   return defs;

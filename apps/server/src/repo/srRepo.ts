@@ -17,9 +17,10 @@
 //     --read-only ...` with only the worktree and SR_LOCAL_DIR mounted;
 //   * writes are realpath-checked so a symlink in the worktree cannot redirect them.
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname as fsDirname } from 'node:path';
-import type { CompareFunctionResult, Finding, SelectionSpec } from '@decomp/core';
+import type { CompareFunctionResult, Finding, FunctionFeatures, FunctionTarget, SelectionSpec } from '@decomp/core';
+import { featuresFromPack, type PackJson } from '../intel/x64features.js';
 import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
@@ -159,7 +160,10 @@ export class SrRepo implements RepoAdapter {
     const want = sel.source === 'rva_list' ? new Set(sel.rvas.map((r) => `0x${parseInt(r, 16).toString(16)}`)) : null;
     return (json.candidates as any[])
       .filter((c) => c.startable && c.unit && (!want || want.has(c.rva)))
-      .map((c) => ({ rva: c.rva, name: c.name ?? null, size: c.size, nameOrigin: c.name_origin ?? null, unit: String(c.unit).replace(/\\/g, '/'), readiness: c.readiness_rank }));
+      .map((c) => ({
+        rva: c.rva, name: c.name ?? null, size: c.size, nameOrigin: c.name_origin ?? null, unit: String(c.unit).replace(/\\/g, '/'),
+        readiness: c.readiness_rank, cautions: Array.isArray(c.cautions) ? c.cautions.length : 0,
+      }));
   }
 
   // ---------------------------------------------------------------- per-task
@@ -357,7 +361,9 @@ export class SrRepo implements RepoAdapter {
     }
   }
 
-  async includedHeaders(slot: number, unitFiles: string[]): Promise<DocSection[]> {
+  async includedHeaders(slot: number, unitFiles: string[], opts: { maxChars?: number; maxHeaders?: number } = {}): Promise<DocSection[]> {
+    const cap = opts.maxChars ?? 8_000;
+    const maxHeaders = opts.maxHeaders ?? 8;
     const seen = new Set<string>(unitFiles);
     const out: DocSection[] = [];
     for (const uf of unitFiles) {
@@ -366,16 +372,61 @@ export class SrRepo implements RepoAdapter {
         const inc = m[1]!;
         const candidates = [`reconstruction/${inc}`, this.p.join(this.p.dirname(uf), inc)].map((x) => this.p.normalize(x));
         for (const c of candidates) {
-          if (seen.has(c) || out.length >= 8) continue;
+          if (seen.has(c) || out.length >= maxHeaders) continue;
           const text = await this.readFile(slot, c);
           if (text === null) continue;
           seen.add(c);
-          out.push({ id: `hdr:${c}`, title: c, source: c, content: text.length > 8_000 ? `${text.slice(0, 8_000)}\n[truncated header]` : text });
+          out.push({ id: `hdr:${c}`, title: c, source: c, content: text.length > cap ? `${text.slice(0, cap)}\n[truncated header]` : text });
           break;
         }
       }
     }
     return out;
+  }
+
+  /**
+   * Complexity counts from local packs (SR_LOCAL_DIR/contrib/packs/<build>/0x<rva>/pack.json): the
+   * ones prepare() just wrote, else any earlier local pack for the same RVA. Counts only.
+   */
+  async analyze(fns: FunctionTarget[], opts: { packs?: string[] } = {}): Promise<Map<string, FunctionFeatures>> {
+    const out = new Map<string, FunctionFeatures>();
+    const root = this.p.join(this.cfg.localDir, 'contrib', 'packs');
+    let builds: string[] = [];
+    try {
+      builds = readdirSync(this.host.fsPath(root));
+    } catch {
+      /* no packs yet */
+    }
+    for (const f of fns) {
+      const leaf = `0x${parseInt(f.rva, 16).toString(16)}`;
+      const dirs = [...(opts.packs ?? []).filter((d) => this.p.basename(d) === leaf), ...builds.map((b) => this.p.join(root, b, leaf))];
+      for (const d of dirs) {
+        const text = await this.readHostFile(this.p.join(d, 'pack.json'));
+        if (!text) continue;
+        try {
+          out.set(f.rva, featuresFromPack(JSON.parse(text) as PackJson));
+          break;
+        } catch {
+          /* malformed pack: try the next location */
+        }
+      }
+    }
+    return out;
+  }
+
+  /**
+   * Budgeted listing for the prompt (exposure consent only): the mnemonic listing when the repo
+   * produced one (far denser than the byte listing), else the byte listing; head + tail kept when
+   * over budget; decompiler output only if asked and room remains.
+   */
+  async readPackSlice(pack: string, maxChars: number, opts: { withDecompiler?: boolean } = {}): Promise<{ text: string; rawChars: number } | null> {
+    const listing = (await this.readHostFile(this.p.join(pack, 'listing.txt'))) ?? (await this.readHostFile(this.p.join(pack, 'bytes.txt')));
+    const decomp = await this.readHostFile(this.p.join(pack, 'decomp.c'));
+    if (listing === null && decomp === null) return null;
+    const rawChars = (listing?.length ?? 0) + (decomp?.length ?? 0);
+    let text = listing ? clipMiddle(listing.replace(/[ \t]+$/gm, ''), maxChars) : '';
+    if (opts.withDecompiler && decomp && maxChars - text.length > 400) text += `\n--- decompiler ---\n${clipMiddle(decomp, maxChars - text.length - 24)}`;
+    return { text, rawChars };
   }
 
   async readPack(pack: string): Promise<string | null> {
@@ -386,6 +437,32 @@ export class SrRepo implements RepoAdapter {
     }
     return parts.length ? parts.join('\n') : null;
   }
+}
+
+/** Keep the head and tail of an over-long listing, marking how many lines were elided. */
+export function clipMiddle(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const lines = text.split('\n');
+  const head: string[] = [];
+  const tail: string[] = [];
+  let used = 40;
+  let i = 0;
+  let j = lines.length - 1;
+  while (i <= j) {
+    const h = lines[i]!;
+    if (used + h.length + 1 > maxChars * 0.65) break;
+    head.push(h);
+    used += h.length + 1;
+    i++;
+  }
+  while (j >= i) {
+    const t = lines[j]!;
+    if (used + t.length + 1 > maxChars) break;
+    tail.unshift(t);
+    used += t.length + 1;
+    j--;
+  }
+  return [...head, `[… ${j - i + 1} line(s) elided to fit the context budget …]`, ...tail].join('\n');
 }
 
 function parseJsonOutput(stdout: string): any {

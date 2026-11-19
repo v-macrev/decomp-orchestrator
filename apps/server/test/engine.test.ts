@@ -26,11 +26,31 @@ afterEach(() => {
   }
 });
 
+/**
+ * The pre-Phase-2 preset (cheap → strong, tag-bound, one dispatch edge, no capabilities). These
+ * tests keep exercising it so existing flows and account configs stay supported.
+ */
 function flow(cheap = 6, strong = 2): Flow {
   const f = defaultFlow();
-  f.nodes.find((n) => n.id === 'worker-cheap')!.data.instances = cheap;
-  f.nodes.find((n) => n.id === 'worker-strong')!.data.instances = strong;
-  return f;
+  const gate = f.nodes.find((n) => n.type === 'gatekeeper')!;
+  const orch = f.nodes.find((n) => n.type === 'orchestrator')!;
+  const fast = f.nodes.find((n) => n.id === 'worker-fast')!;
+  const mk = (id: string, label: string, instances: number, tags: string[], maxAttempts: number, stuckAfter: number) => ({
+    ...fast, id, data: { ...fast.data, label, instances, maxAttempts, stuckAfter, capability: undefined, costWeight: undefined, pool: { strategy: 'pool' as const, accountIds: [], tags } },
+  });
+  return {
+    id: 'legacy', name: 'Cheap → strong ladder',
+    nodes: [orch, mk('worker-cheap', 'Workers (cheap)', cheap, ['cheap'], 6, 3), mk('worker-strong', 'Workers (strong)', strong, ['strong'], 10, 4), gate],
+    edges: [
+      { id: 'e-dispatch', source: orch.id, target: 'worker-cheap', kind: 'dispatch' },
+      { id: 'e-submit-cheap', source: 'worker-cheap', target: gate.id, kind: 'submit' },
+      { id: 'e-submit-strong', source: 'worker-strong', target: gate.id, kind: 'submit' },
+      { id: 'e-retry-cheap', source: gate.id, target: 'worker-cheap', kind: 'reject_retry' },
+      { id: 'e-retry-strong', source: gate.id, target: 'worker-strong', kind: 'reject_retry' },
+      { id: 'e-escalate', source: 'worker-cheap', target: 'worker-strong', kind: 'escalate' },
+      { id: 'e-report', source: gate.id, target: orch.id, kind: 'report' },
+    ],
+  };
 }
 
 function accounts(over: Record<string, Record<string, unknown>> = {}): Account[] {

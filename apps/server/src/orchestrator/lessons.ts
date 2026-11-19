@@ -8,6 +8,7 @@ import { createHash } from 'node:crypto';
 import type { Store } from '../db/store.js';
 import type { RepoAdapter } from '../repo/types.js';
 import { runBounded } from '../util/proc.js';
+import { tagText } from '../intel/ruleDistiller.js';
 
 /** Guidance for Gate Keeper / comparator finding codes (also used to explain repo reason codes). */
 export const FINDING_GUIDANCE: Record<string, string> = {
@@ -38,7 +39,7 @@ export async function seedRepoLessons(store: Store, repo: RepoAdapter) {
     if (!m) continue;
     const text = m[1]!.replace(/\s*\(docs\/[^)]*\)\s*$/, '').trim();
     if (text.length < 12) continue;
-    store.upsertLesson({ id: `repo:${hash(text)}`, source: 'repo-docs', topic: 'contributor-lessons', text, weight: 10 });
+    store.upsertLesson({ id: `repo:${hash(text)}`, source: 'repo-docs', topic: 'contributor-lessons', text, weight: 10, tags: tagText(text) });
     n++;
   }
   return n;
@@ -70,7 +71,7 @@ export async function ingestGithubReviews(store: Store, opts: { repoSlug: string
   for (const [code, n] of counts) {
     const key = `COMPARE_${code.toUpperCase().replace(/-/g, '_')}`;
     const text = FINDING_GUIDANCE[key] ?? `Past PRs were sent back with reason "${code}" (${n}×); check for it before returning.`;
-    store.upsertLesson({ id: `gh:${code}`, source: 'github-reviews', topic: code, text, weight: Math.min(9, 1 + Math.log2(n + 1)) });
+    store.upsertLesson({ id: `gh:${code}`, source: 'github-reviews', topic: code, text, weight: Math.min(9, 1 + Math.log2(n + 1)), tags: tagText(`${code.replace(/-/g, ' ')} ${text}`) });
   }
   return { codes: counts.size, comments };
 }

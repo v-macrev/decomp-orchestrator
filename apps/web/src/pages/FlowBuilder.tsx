@@ -124,7 +124,7 @@ function newNode(role: Role, position: { x: number; y: number }): RFNode {
     data: {
       role, label: ROLE_LABEL[role], instances: role === 'worker' ? 4 : 1,
       pool: { strategy: 'pool', accountIds: [], tags: [] }, maxAttempts: 6, stuckAfter: 3,
-      gate: { scope: true, leak: true, cheat: true, integrity: true, repoCompare: true, repoPreflight: true, llmReview: false },
+      gate: { scope: true, leak: true, cheat: true, integrity: true, repoCompare: true, repoPreflight: true, llmReview: false }, stealDown: true,
     },
   };
 }

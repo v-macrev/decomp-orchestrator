@@ -62,6 +62,9 @@ export class OpenAIAdapter implements ProviderAdapter {
             max_completion_tokens: req.maxOutputTokens,
             ...(response_format ? { response_format } : {}),
             ...(reasoning_effort ? { reasoning_effort } : {}),
+            // OpenAI caches prompt prefixes automatically (≥1024 tokens). The system prompt is the
+            // byte-identical static prefix; the key keeps same-prefix requests on the same cache shard.
+            ...(req.cacheKey && this.kind === 'openai' && account.options.promptCacheKey !== false ? { prompt_cache_key: req.cacheKey } : {}),
           },
           { signal: req.signal, timeout: req.timeoutMs },
         )

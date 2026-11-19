@@ -166,18 +166,33 @@ export class AccountPool {
 
   // ---------------------------------------------------------------- selection
 
-  /** Accounts + model a binding resolves to for a role (ignores health). */
+  /**
+   * Accounts + model a binding resolves to for a role (ignores health).
+   * With a capability (tiered routing): models declaring that capability win; if no account in the
+   * binding declares it, fall back to plain role matching so pools without capability metadata keep
+   * working (pre-Phase-2 configs).
+   */
   resolve(binding: PoolBinding, role: Role): Array<{ slot: AccountSlot; model: ModelSpec }> {
     const out: Array<{ slot: AccountSlot; model: ModelSpec }> = [];
+    const byCapability: Array<{ slot: AccountSlot; model: ModelSpec }> = [];
     for (const slot of this.slots.values()) {
       const a = slot.account;
       if (binding.strategy === 'bound') {
         if (!binding.accountIds.includes(a.id)) continue;
       } else if (binding.tags.length && !binding.tags.every((t) => a.tags.includes(t))) continue;
-      const model = binding.model ? a.models.find((m) => m.id === binding.model) : a.models.find((m) => m.roles.includes(role));
+      if (binding.model) {
+        const model = a.models.find((m) => m.id === binding.model);
+        if (model) out.push({ slot, model });
+        continue;
+      }
+      const model = a.models.find((m) => m.roles.includes(role));
       if (model) out.push({ slot, model });
+      if (binding.capability) {
+        const cap = a.models.find((m) => m.roles.includes(role) && m.capability === binding.capability);
+        if (cap) byCapability.push({ slot, model: cap });
+      }
     }
-    return out;
+    return binding.capability && byCapability.length ? byCapability : out;
   }
 
   private refresh(slot: AccountSlot) {
@@ -211,11 +226,13 @@ export class AccountPool {
     return w > 0 ? { ok: false, waitMs: w } : { ok: true };
   }
 
-  private score(slot: AccountSlot): number {
+  private score(slot: AccountSlot, model?: ModelSpec): number {
     const head = Math.min(slot.rpm.headroom, slot.itpm.headroom, slot.otpm.headroom);
     const free = 1 - slot.inFlight / Math.max(1, slot.limit);
     const lat = (slot.rt.ewmaLatencyMs ?? 20_000) / 10_000;
-    return slot.account.priority * 1000 + 60 * head + 30 * free - 40 * slot.errorRate - lat + Math.random() * 3;
+    // Cost weight breaks ties between equally healthy accounts (priority still dominates).
+    const cost = model?.costWeight ?? 0;
+    return slot.account.priority * 1000 + 60 * head + 30 * free - 40 * slot.errorRate - lat - 4 * cost + Math.random() * 3;
   }
 
   tryAcquire(req: AcquireRequest): { lease: Lease } | { waitMs: number; reason: string } {
@@ -230,7 +247,7 @@ export class AccountPool {
       this.refresh(slot);
       const a = this.admits(slot, req);
       if (a.ok) {
-        const s = this.score(slot);
+        const s = this.score(slot, model);
         if (!best || s > best.s) best = { slot, model, s };
       } else {
         minWait = Math.min(minWait, a.waitMs);

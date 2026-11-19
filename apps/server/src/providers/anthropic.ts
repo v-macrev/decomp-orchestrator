@@ -54,9 +54,9 @@ export class AnthropicAdapter implements ProviderAdapter {
     const params = {
       model: req.model.id,
       max_tokens: req.maxOutputTokens,
-      // The system prompt is identical across every packet of a run → cached prefix.
+      // Breakpoint 1: the static prefix is identical across every packet of a run → cached for the run.
       system: [{ type: 'text' as const, text: req.system, cache_control: { type: 'ephemeral' as const } }],
-      messages: [{ role: 'user' as const, content: req.prompt }],
+      messages: [{ role: 'user' as const, content: userContent(req) }],
       ...(Object.keys(output_config).length ? { output_config } : {}),
       ...(useFallback ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' as const } : {}),
     };
@@ -79,6 +79,22 @@ export class AnthropicAdapter implements ProviderAdapter {
       throw mapAnthropicError(err);
     }
   }
+}
+
+/**
+ * User turn as text blocks; `cache: true` blocks end with a breakpoint (breakpoint 2 = this packet's
+ * stable context, re-read at cache price by its retries). Max 4 breakpoints per request: system
+ * uses one, so at most 3 are honoured here; empty blocks are dropped (the API rejects them).
+ */
+export function userContent(req: CompletionRequest): string | Array<{ type: 'text'; text: string; cache_control?: { type: 'ephemeral' } }> {
+  if (!req.blocks?.length) return req.prompt;
+  let budget = 3;
+  return req.blocks
+    .filter((b) => b.text.trim())
+    .map((b) => {
+      const mark = b.cache && budget-- > 0;
+      return mark ? { type: 'text' as const, text: b.text, cache_control: { type: 'ephemeral' as const } } : { type: 'text' as const, text: b.text };
+    });
 }
 
 export function mapAnthropicError(err: unknown): ProviderError {

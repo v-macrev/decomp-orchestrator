@@ -9,20 +9,27 @@
 // the next tier / dead-letter / quarantine). Leases are heartbeated; a lost lease aborts the slot's
 // work immediately. All state lives in SQLite, so a crash at any point resumes on restart with at
 // most the in-flight attempts abandoned (and not counted against any task's budget).
-import { Flow, RunConfig, WorkerOutput, compileFlowPlan, validateFlow, type Attempt, type FlowPlan, type Verdict } from '@decomp/core';
+import {
+  CAPABILITY_RANK, DIFFICULTIES, DIFFICULTY_RANK, Flow, RunConfig, WorkerOutput, compileFlowPlan, harder, promote, stealSources, tierFor, validateFlow,
+  type Attempt, type CapabilityTier, type Difficulty, type FlowPlan, type PoolBinding, type Verdict,
+} from '@decomp/core';
 import type { RunRow, Store, TaskRow } from '../db/store.js';
 import { GateKeeper, type Reviewer } from '../gatekeeper/gatekeeper.js';
 import { LlmReviewer, extractJson } from '../gatekeeper/review.js';
+import { ComplexityClassifier } from '../intel/complexity.js';
+import { extractKnowledge } from '../intel/knowledge.js';
 import { NoEligibleAccountError, type AccountPool } from '../pool/scheduler.js';
 import type { ProviderRegistry } from '../providers/registry.js';
-import { ProviderError, costUsd } from '../providers/types.js';
-import { TaskQueue } from '../queue/taskQueue.js';
+import { ProviderError, costUsd, type PromptBlock } from '../providers/types.js';
+import { TaskQueue, type StealSource } from '../queue/taskQueue.js';
 import type { RepoAdapter, PreparedTask } from '../repo/types.js';
 import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
 import { ContextBuilder } from './context.js';
+import { TaskContextBuilder, shouldCacheTaskPrefix } from './contextBuilder.js';
+import { materialise } from './edits.js';
 import { runPitfalls } from './lessons.js';
-import { WORKER_OUTPUT_SCHEMA, WORKER_SYSTEM, buildWorkerPrompt, type Feedback } from './prompts.js';
+import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
 import { stageRun } from './staging.js';
 
 export interface EngineOptions {
@@ -65,22 +72,35 @@ class ActiveRun {
   readonly wake = new Notifier();
   activeSlots = 0;
   busySlots = new Set<number>();
+  /** Worker slots per tier (for work-stealing backlog thresholds). */
+  slotsByTier = new Map<number, number[]>();
   finished: Promise<void> = Promise.resolve();
   budgetPaused = false;
   constructor(readonly row: RunRow, readonly plan: FlowPlan, readonly gate: GateKeeper) {}
+
+  idleSlots(tier: number): number {
+    return (this.slotsByTier.get(tier) ?? []).filter((s) => !this.busySlots.has(s)).length;
+  }
 }
+
+/** The difficulty a capability tier is meant for (used when a task escalates up the ladder). */
+const CAPABILITY_DIFFICULTY: Record<CapabilityTier, Difficulty> = { fast: 'easy', balanced: 'medium', frontier: 'hard' };
 
 export class RunEngine {
   readonly queue: TaskQueue;
   private opts: EngineOptions;
   private active = new Map<string, ActiveRun>();
   private context: ContextBuilder;
+  readonly contextV2: TaskContextBuilder;
+  readonly classifier: ComplexityClassifier;
   private reaper: NodeJS.Timeout;
 
   constructor(private deps: EngineDeps, opts: Partial<EngineOptions> = {}) {
     this.opts = { ...DEFAULTS, ...opts };
     this.queue = new TaskQueue(deps.store);
     this.context = new ContextBuilder(deps.repo, deps.store);
+    this.contextV2 = new TaskContextBuilder(deps.repo, deps.store);
+    this.classifier = new ComplexityClassifier({ store: deps.store, repo: deps.repo, pool: deps.pool, providers: deps.providers, events: deps.events });
     // Periodic reaper: reclaims leases of slots that stalled without crashing the process.
     this.reaper = setInterval(() => {
       for (const id of this.active.keys()) {
@@ -115,9 +135,20 @@ export class RunEngine {
       events.emit('run.discovering', `discovering backlog (${row.config.selection.source})`, { runId });
       try {
         const found = await this.deps.repo.discover(row.config.selection);
-        const packets = partition(found, row.config.packetMaxFunctions);
-        const inserted = store.insertTasks(runId, packets.map((p) => ({ ...p, id: newId('task') })));
-        events.emit('run.enqueued', `${found.length} functions → ${packets.length} packets (${inserted} new)`, { runId, data: { functions: found.length, packets: packets.length } });
+        const routing = row.config.routing;
+        if (routing.enabled) {
+          const packets = await this.classifier.plan(runId, found, row.config, plan);
+          const inserted = store.insertTasks(runId, packets.map((p) => ({ ...p, id: newId('task'), tier: tierFor(plan, p.difficulty) })));
+          const by = (d: Difficulty) => packets.filter((p) => p.difficulty === d);
+          const summary = DIFFICULTIES.map((d) => `${d} ${by(d).reduce((s, p) => s + p.functions.length, 0)} fn/${by(d).length} pk → ${plan.tiers[plan.route[d]]!.node.data.label || plan.tiers[plan.route[d]]!.node.id}`).join(' · ');
+          events.emit('run.enqueued', `${found.length} functions → ${packets.length} packets (${inserted} new); routing: ${summary}`, {
+            runId, data: { functions: found.length, packets: packets.length, byDifficulty: Object.fromEntries(DIFFICULTIES.map((d) => [d, by(d).length])) },
+          });
+        } else {
+          const packets = partition(found, row.config.packetMaxFunctions);
+          const inserted = store.insertTasks(runId, packets.map((p) => ({ ...p, id: newId('task') })));
+          events.emit('run.enqueued', `${found.length} functions → ${packets.length} packets (${inserted} new)`, { runId, data: { functions: found.length, packets: packets.length } });
+        }
       } catch (e) {
         store.setRunStatus(runId, 'failed', undefined, { error: (e as Error).message });
         events.emit('run.failed', `discovery failed: ${(e as Error).message}`, { runId, level: 'error' });
@@ -133,6 +164,8 @@ export class RunEngine {
     this.queue.recoverExpired(runId);
 
     const usable = allocateSlots(plan, this.deps.repo.slotCount);
+    for (const s of usable) run.slotsByTier.set(s.tier, [...(run.slotsByTier.get(s.tier) ?? []), s.slot]);
+    if (run.row.config.context.mode === 'budgeted') await this.contextV2.staticPrefix(run.row.config.context.budgets).catch(() => undefined);
     if (usable.length < plan.workerSlots) {
       events.emit('run.slots', `flow wants ${plan.workerSlots} worker slots; repo has ${this.deps.repo.slotCount} worktrees — scaled down proportionally`, { runId, level: 'warn' });
     }
@@ -257,13 +290,21 @@ export class RunEngine {
           }
           continue;
         }
-        const [leased] = this.queue.lease(runId, tier, 1, this.opts.leaseMs);
+        const routing = run.row.config.routing;
+        const steal: StealSource[] = routing.enabled && routing.workStealing ? stealSources(run.plan, tier).map((t) => ({ tier: t, minBacklog: run.idleSlots(t) })) : [];
+        const [leased] = this.queue.lease(runId, tier, 1, this.opts.leaseMs, { stealFrom: steal });
         if (!leased) {
           if (!this.queue.hasOpenWork(runId)) return;
-          const next = this.queue.nextReadyAt(runId, tier);
+          const next = this.queue.nextReadyAt(runId, [tier, ...steal.map((s) => s.tier)]);
           const wait = next ? Math.min(Math.max(10, next - Date.now()), this.opts.idlePollMs) : this.opts.idlePollMs;
           await run.wake.wait(wait, run.cancel.signal);
           continue;
+        }
+        if (leased.stolenFrom !== undefined) {
+          const from = run.plan.tiers[leased.stolenFrom]!;
+          events.emit('task.stolen', `${run.plan.tiers[tier]!.node.data.label || run.plan.tiers[tier]!.node.id} stole a ${leased.task.difficulty} packet from ${from.node.data.label || from.node.id} backlog`, {
+            runId, taskId: leased.task.id, data: { from: leased.stolenFrom, to: tier },
+          });
         }
         run.busySlots.add(slot);
         try {
@@ -306,23 +347,73 @@ export class RunEngine {
         return this.infraFailure(run, task, leaseId, `prepare failed: ${(e as Error).message}`);
       }
 
+      // 1b. late classification: prepare just produced the local packs — refine size-only estimates
+      const routing = cfg.routing;
+      if (routing.enabled) {
+        const refined = await this.classifier.refine(task, prepared.packs, routing).catch(() => null);
+        if (refined) {
+          store.setAssessment(task.id, refined);
+          task = { ...task, assessment: refined, complexity: refined.score };
+          if (DIFFICULTY_RANK[refined.difficulty] > DIFFICULTY_RANK[task.difficulty]) {
+            const to = tierFor(run.plan, refined.difficulty, tierIdx);
+            if (task.attemptsTotal === 0 && to > tierIdx) {
+              this.queue.transition(task.id, leaseId, ['leased'], 'pending', { tier: to, difficulty: refined.difficulty, attemptsAtDifficulty: 0, attemptsAtTier: 0, notBefore: 0 });
+              ev('task.rerouted', `pack analysis: ${task.difficulty} → ${refined.difficulty} (score ${refined.score}); moved to ${run.plan.tiers[to]!.node.data.label || run.plan.tiers[to]!.node.id} before any attempt`, 'info', { from: tierIdx, to, score: refined.score });
+              run.wake.notify();
+              return;
+            }
+            this.queue.transition(task.id, leaseId, ['leased'], 'leased', { difficulty: refined.difficulty, attemptsAtDifficulty: 0 });
+            task = { ...task, difficulty: refined.difficulty, attemptsAtDifficulty: 0 };
+          }
+        }
+      }
+
       // 2. bundle + feedback
-      const bundle = await this.context.build(task, prepared, slot, { runId, exposureConsent: cfg.exposureConsent, carried });
       const feedback = this.lastFeedback(task);
       const n = task.attemptsTotal + 1;
-      const prompt = buildWorkerPrompt(task, bundle, n, feedback, runPitfalls(store, runId));
+      let system: string;
+      let prompt: string;
+      let blocks: PromptBlock[] | undefined;
+      let cacheKey: string | undefined;
+      let jsonSchema = WORKER_OUTPUT_SCHEMA;
+      let bundleHash: string;
+      let contextTokens: number;
+      let contextRawTokens: number;
+      let outputMode: 'files' | 'edits' | 'either' = 'files';
+      let elided: string[] = [];
+      if (cfg.context.mode === 'legacy') {
+        const bundle = await this.context.build(task, prepared, slot, { runId, exposureConsent: cfg.exposureConsent, carried });
+        system = WORKER_SYSTEM;
+        prompt = buildWorkerPrompt(task, bundle, n, feedback, runPitfalls(store, runId));
+        bundleHash = bundle.hash;
+        contextTokens = contextRawTokens = Math.ceil((system.length + prompt.length) / 3.3);
+      } else {
+        const bundle = await this.contextV2.build(task, prepared, slot, { runId, exposureConsent: cfg.exposureConsent, carried, attemptNo: n, feedback, pitfalls: runPitfalls(store, runId), context: cfg.context });
+        const r = renderBundle(bundle, n, shouldCacheTaskPrefix(cfg.context.cacheTaskPrefix, task.difficulty, n, bundle.tokens.taskPrefix));
+        ({ system, prompt, blocks } = r);
+        cacheKey = `decomp:${bundle.staticPrefixHash.slice(0, 32)}`;
+        jsonSchema = WORKER_OUTPUT_SCHEMA_V2;
+        bundleHash = bundle.hash;
+        contextTokens = bundle.tokens.sent;
+        contextRawTokens = bundle.tokens.raw;
+        outputMode = bundle.outputMode;
+        elided = bundle.elidedFunctions;
+      }
       attempt = {
         id: newId('att'), taskId: task.id, runId, n, tier: tierIdx, nodeId: node.id, accountId: null, model: null, status: 'running',
-        bundleHash: bundle.hash, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, costUsd: 0,
+        bundleHash, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, costUsd: 0,
         latencyMs: null, error: null, files: null, startedAt: Date.now(), finishedAt: null,
+        difficulty: task.difficulty, contextTokens, contextRawTokens,
       };
       store.insertAttempt(attempt);
 
       // 3. account lease + model call
-      const estIn = Math.ceil((WORKER_SYSTEM.length + prompt.length) / 3.5);
+      const tier = run.plan.tiers[tierIdx]!;
+      const binding: PoolBinding = { ...node.data.pool, capability: node.data.pool.capability ?? (routing.enabled ? tier.capability : undefined) };
+      const estIn = contextTokens;
       let waitedEmitted = false;
       const lease = await pool.acquire(
-        { binding: node.data.pool, role: 'worker', estInputTokens: estIn, estOutputTokens: Math.min(this.opts.maxOutputTokens, 8_000) },
+        { binding, role: 'worker', estInputTokens: estIn, estOutputTokens: Math.min(this.opts.maxOutputTokens, outputMode === 'edits' ? 3_000 : 8_000) },
         signal,
         (ms, reason) => {
           if (!waitedEmitted && ms > 3_000) {
@@ -336,13 +427,13 @@ export class RunEngine {
       let text: string;
       try {
         const resp = await providers.complete(lease.account, {
-          system: WORKER_SYSTEM, prompt, model: lease.model, effort: node.data.pool.effort, jsonSchema: WORKER_OUTPUT_SCHEMA,
+          system, prompt, blocks, cacheKey, model: lease.model, effort: node.data.pool.effort, jsonSchema,
           maxOutputTokens: Math.min(this.opts.maxOutputTokens, lease.model.maxOutputTokens), timeoutMs: this.opts.providerTimeoutMs, signal,
         });
         const latencyMs = Date.now() - t0;
         pool.release(lease, { kind: 'ok', usage: resp.usage, latencyMs, rateLimit: resp.rateLimit });
         const cost = costUsd(lease.model, resp.usage);
-        store.addRunCost(runId, cost);
+        store.addRunUsage(runId, cost, resp.usage);
         store.updateAttempt(attempt.id, { usage: resp.usage, costUsd: cost, latencyMs });
         text = resp.text;
       } catch (e) {
@@ -366,22 +457,35 @@ export class RunEngine {
         return;
       }
 
-      // 4. parse output
+      // 4. parse output; materialise function-level edits into complete files
       const parsed = WorkerOutput.safeParse(extractJson(text));
       if (!parsed.success) {
         store.updateAttempt(attempt.id, { status: 'parse_error', error: 'output did not match the contract', finishedAt: Date.now() });
-        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_PARSE', 'reply was not a JSON object matching {"files":[{"path","content"}]}'), { infra: false, strike: false }, tierIdx);
+        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_PARSE', 'reply was not a JSON object with "edits" or "files" as described in the output contract'), { infra: false, strike: false }, tierIdx);
       }
-      store.updateAttempt(attempt.id, { files: parsed.data.files });
+      if (outputMode === 'edits' && elided.length && parsed.data.files?.some((f) => f.path.endsWith('.cpp'))) {
+        // Complete files cannot contain bodies the worker never saw: reject as a contract error, not a cheat strike.
+        store.updateAttempt(attempt.id, { status: 'parse_error', error: 'returned complete files in edits mode', finishedAt: Date.now() });
+        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_MODE', `accepted bodies were elided (${elided.length} function(s)); return "edits" with only the functions you add or change, never complete files`), { infra: false, strike: false }, tierIdx);
+      }
+      const mat = await materialise(parsed.data, (p) => repo.readFile(slot, p));
+      if (mat.problems.length) {
+        store.updateAttempt(attempt.id, { status: 'parse_error', error: mat.problems.join('; ').slice(0, 500), files: mat.files, finishedAt: Date.now() });
+        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_EDIT', mat.problems.join('; ').slice(0, 1_000)), { infra: false, strike: false }, tierIdx);
+      }
+      store.updateAttempt(attempt.id, { files: mat.files });
 
-      // 5. Gate Keeper
+      // 5. Gate Keeper (always on the complete materialised files)
       if (!this.queue.transition(task.id, leaseId, ['leased'], 'gating')) throw new AbortedError('lease lost before gating');
+      const carriedMap = new Map(carried.map((c) => [c.path, c.content]));
       const gate = await run.gate.evaluate({
-        task, attemptId: attempt.id, slot, prepared, files: parsed.data.files, checks: mergeGateChecks(run.plan),
-        compareTimeoutMs: cfg.compareTimeoutMs, signal, carried: new Map(carried.map((c) => [c.path, c.content])),
+        task, attemptId: attempt.id, slot, prepared, files: mat.files, checks: mergeGateChecks(run.plan),
+        compareTimeoutMs: cfg.compareTimeoutMs, signal, carried: carriedMap,
       });
       if (signal.aborted) throw new AbortedError();
-      store.updateAttempt(attempt.id, { status: 'completed', files: gate.written.length ? gate.written : parsed.data.files, finishedAt: Date.now() });
+      const written = gate.written.length ? gate.written : mat.files;
+      store.updateAttempt(attempt.id, { status: 'completed', files: written, finishedAt: Date.now() });
+      if (gate.verdict.decision === 'pass') await this.learn(run, task, written, carriedMap).catch((e) => ev('knowledge.failed', `knowledge extraction failed: ${(e as Error).message}`, 'warn'));
       return this.route(run, task, leaseId, attempt, gate.verdict, { infra: gate.infra, strike: gate.strike }, tierIdx, prepared.srTaskId);
     } catch (e) {
       if (e instanceof AbortedError || signal.aborted) {
@@ -402,6 +506,19 @@ export class RunEngine {
       clearInterval(hb);
       await repo.reset(slot).catch((err) => ev('slot.reset_failed', `slot ${slot} reset failed: ${(err as Error).message}`, 'error'));
     }
+  }
+
+  /** Mine a passing packet's accepted files for verified facts the rest of the run can reuse. */
+  private async learn(run: ActiveRun, task: TaskRow, files: Array<{ path: string; content: string }>, carried: Map<string, string>) {
+    const base = new Map<string, string | null>();
+    for (const f of files) base.set(f.path, carried.get(f.path) ?? (await this.deps.repo.baseFile(f.path)));
+    const entries = extractKnowledge({ runId: run.row.id, taskId: task.id, unit: task.unit, files, base });
+    if (!entries.length) return;
+    this.deps.store.upsertKnowledge(entries);
+    const kinds = entries.reduce<Record<string, number>>((m, e) => ({ ...m, [e.kind]: (m[e.kind] ?? 0) + 1 }), {});
+    this.deps.events.emit('knowledge.added', `+${entries.length} verified fact(s) shared with the run (${Object.entries(kinds).map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ')})`, {
+      runId: run.row.id, taskId: task.id, level: 'debug', data: kinds,
+    });
   }
 
   private infraFailure(run: ActiveRun, task: TaskRow, leaseId: string, msg: string) {
@@ -449,17 +566,45 @@ export class RunEngine {
       return;
     }
     const limit = tierNode.node.data;
+    const routing = run.row.config.routing;
+    const attemptsAtDifficulty = task.attemptsAtDifficulty + 1;
+    const label = (i: number) => run.plan.tiers[i]!.node.data.label || run.plan.tiers[i]!.node.id;
+
+    // Retry escalation by difficulty: after N failed attempts at a difficulty, promote it
+    // (easy → medium → hard) and move to the tier that serves the new difficulty (never down).
+    if (routing.enabled && attemptsAtDifficulty >= routing.promoteAfterFailures && task.difficulty !== 'hard') {
+      const difficulty = promote(task.difficulty);
+      const to = tierFor(run.plan, difficulty, tierIdx);
+      const moved = to > tierIdx;
+      const stillHere = !moved && attemptsAtTier < limit.maxAttempts && tierNode.retryLoop;
+      if (moved || stillHere) {
+        store.insertVerdict({ ...verdict, route: moved ? 'escalate' : 'retry' });
+        this.queue.transition(task.id, leaseId, from, 'pending', {
+          ...common, difficulty, attemptsAtDifficulty: 0, attemptsTotal, bestExactBytes, cheatStrikes, notBefore: 0,
+          ...(moved ? { tier: to, attemptsAtTier: 0, noImprovementStreak: 0 } : { attemptsAtTier, noImprovementStreak }),
+        });
+        events.emit('task.promoted', `promote ${fnLabel}: ${task.difficulty} → ${difficulty} after ${attemptsAtDifficulty} failed attempt(s)${moved ? `; → ${label(to)}` : ` (stays on ${label(tierIdx)})`}: ${summarise(verdict)}`, {
+          runId, taskId: task.id, level: 'info', data: { from: task.difficulty, to: difficulty, tierFrom: tierIdx, tierTo: to },
+        });
+        run.wake.notify();
+        return;
+      }
+    }
+
     const exhausted = attemptsAtTier >= limit.maxAttempts || noImprovementStreak >= limit.stuckAfter || !tierNode.retryLoop;
     if (!exhausted) {
       store.insertVerdict({ ...verdict, route: 'retry' });
-      this.queue.transition(task.id, leaseId, from, 'pending', { ...common, attemptsTotal, attemptsAtTier, bestExactBytes, noImprovementStreak, cheatStrikes, notBefore: 0 });
+      this.queue.transition(task.id, leaseId, from, 'pending', { ...common, attemptsTotal, attemptsAtTier, attemptsAtDifficulty, bestExactBytes, noImprovementStreak, cheatStrikes, notBefore: 0 });
       events.emit('task.retry', `retry ${fnLabel}: ${summarise(verdict)}`, { runId, taskId: task.id, level: 'debug' });
       return;
     }
     if (tierIdx + 1 < run.plan.tiers.length) {
+      const next = run.plan.tiers[tierIdx + 1]!;
+      // Climbing the ladder proves the packet is at least as hard as the next tier is meant for.
+      const difficulty = routing.enabled ? harder(task.difficulty, CAPABILITY_DIFFICULTY[next.capability]) : task.difficulty;
       store.insertVerdict({ ...verdict, route: 'escalate' });
-      this.queue.transition(task.id, leaseId, from, 'pending', { ...common, tier: tierIdx + 1, attemptsTotal, attemptsAtTier: 0, bestExactBytes, noImprovementStreak: 0, cheatStrikes, notBefore: 0 });
-      events.emit('task.escalated', `escalate ${fnLabel} → tier ${tierIdx + 1} (${run.plan.tiers[tierIdx + 1]!.node.data.label})`, { runId, taskId: task.id, level: 'info' });
+      this.queue.transition(task.id, leaseId, from, 'pending', { ...common, tier: tierIdx + 1, difficulty, attemptsAtDifficulty: difficulty === task.difficulty ? attemptsAtDifficulty : 0, attemptsTotal, attemptsAtTier: 0, bestExactBytes, noImprovementStreak: 0, cheatStrikes, notBefore: 0 });
+      events.emit('task.escalated', `escalate ${fnLabel} → tier ${tierIdx + 1} (${label(tierIdx + 1)})`, { runId, taskId: task.id, level: 'info' });
       run.wake.notify();
       return;
     }

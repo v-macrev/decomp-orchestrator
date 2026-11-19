@@ -24,9 +24,21 @@ export interface RateLimitInfo {
   resetMs?: number;
 }
 
+/** A user-turn block; `cache` marks a prompt-cache breakpoint at its end (Anthropic cache_control). */
+export interface PromptBlock {
+  text: string;
+  cache: boolean;
+}
+
 export interface CompletionRequest {
+  /** Static prefix: providers put a cache breakpoint at its end. */
   system: string;
+  /** Whole user turn as one string (used by providers without block support). */
   prompt: string;
+  /** Same user turn split by stability; when present, adapters that support blocks use these. */
+  blocks?: PromptBlock[];
+  /** Stable key for prefix-cache routing (OpenAI prompt_cache_key): hash of the static prefix. */
+  cacheKey?: string;
   model: ModelSpec;
   effort?: Effort;
   /** JSON Schema the response must satisfy (provider-native structured output where supported). */
@@ -86,9 +98,24 @@ export function parseRetryAfter(v: string | null | undefined): number | undefine
   return Number.isFinite(d) ? Math.max(0, d - Date.now()) : undefined;
 }
 
+/**
+ * Cost of one call. `inputTokens` counts all input (uncached + cache reads + cache writes); cache
+ * reads are billed at the cache-read price and, when the model declares one, cache writes at the
+ * write price (Anthropic: 1.25× input for the 5-minute TTL).
+ */
 export function costUsd(model: ModelSpec, u: Usage): number {
-  const uncachedIn = Math.max(0, u.inputTokens - u.cacheReadTokens);
+  const writes = model.priceCacheWritePerMTok !== undefined ? u.cacheWriteTokens : 0;
+  const uncachedIn = Math.max(0, u.inputTokens - u.cacheReadTokens - writes);
   return (
-    (uncachedIn * model.priceInPerMTok + u.cacheReadTokens * model.priceCacheReadPerMTok + u.outputTokens * model.priceOutPerMTok) / 1_000_000
+    (uncachedIn * model.priceInPerMTok +
+      u.cacheReadTokens * model.priceCacheReadPerMTok +
+      writes * (model.priceCacheWritePerMTok ?? 0) +
+      u.outputTokens * model.priceOutPerMTok) /
+    1_000_000
   );
+}
+
+/** What the same call would have cost with no prompt caching (for "saved by caching" metrics). */
+export function uncachedCostUsd(model: ModelSpec, u: Usage): number {
+  return (u.inputTokens * model.priceInPerMTok + u.outputTokens * model.priceOutPerMTok) / 1_000_000;
 }

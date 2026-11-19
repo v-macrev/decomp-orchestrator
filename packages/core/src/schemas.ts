@@ -10,6 +10,21 @@ import { z } from 'zod';
 export const Role = z.enum(['orchestrator', 'worker', 'gatekeeper']);
 export type Role = z.infer<typeof Role>;
 
+/** How hard a function is to match (the routing input). Spec name: ComplexityTier. */
+export const Difficulty = z.enum(['easy', 'medium', 'hard']);
+export type Difficulty = z.infer<typeof Difficulty>;
+export const ComplexityTier = Difficulty;
+export type ComplexityTier = Difficulty;
+
+/** What a worker tier / model is good for (the routing target). */
+export const CapabilityTier = z.enum(['fast', 'balanced', 'frontier']);
+export type CapabilityTier = z.infer<typeof CapabilityTier>;
+
+export const DIFFICULTY_RANK: Record<Difficulty, number> = { easy: 0, medium: 1, hard: 2 };
+export const CAPABILITY_RANK: Record<CapabilityTier, number> = { fast: 0, balanced: 1, frontier: 2 };
+export const DIFFICULTIES: Difficulty[] = ['easy', 'medium', 'hard'];
+export const CAPABILITIES: CapabilityTier[] = ['fast', 'balanced', 'frontier'];
+
 export const ProviderKind = z.enum([
   'anthropic', // Messages API via @anthropic-ai/sdk (API key or OAuth token)
   'openai', // OpenAI API via openai SDK
@@ -53,7 +68,13 @@ export const ModelSpec = z.object({
   priceInPerMTok: z.number().nonnegative().default(0),
   priceOutPerMTok: z.number().nonnegative().default(0),
   priceCacheReadPerMTok: z.number().nonnegative().default(0),
+  /** 5-minute cache writes (Anthropic bills 1.25x input). Unset: billed as plain input. */
+  priceCacheWritePerMTok: z.number().nonnegative().optional(),
   roles: z.array(Role).default(['worker']),
+  /** Capability tier this model serves in tiered routing (fast ≈ Haiku/mini, frontier ≈ Opus). */
+  capability: CapabilityTier.optional(),
+  /** Relative cost used to break ties between equally healthy accounts (lower wins). */
+  costWeight: z.number().positive().optional(),
 });
 export type ModelSpec = z.infer<typeof ModelSpec>;
 
@@ -127,6 +148,8 @@ export const PoolBinding = z.object({
   /** Optional model override; otherwise the first model on the account that serves the role. */
   model: z.string().optional(),
   effort: Effort.optional(),
+  /** Prefer models declaring this capability (falls back to role matching when none do). */
+  capability: CapabilityTier.optional(),
 });
 export type PoolBinding = z.infer<typeof PoolBinding>;
 
@@ -152,6 +175,12 @@ export const FlowNodeData = z.object({
   stuckAfter: z.number().int().min(1).max(20).default(3),
   gate: GateChecks.default(GateChecks.parse({})),
   notes: z.string().optional(),
+  /** Worker: capability tier. Unset = inferred from the node's position on the escalation ladder. */
+  capability: CapabilityTier.optional(),
+  /** Worker: relative cost of this tier (display + tie-breaking). */
+  costWeight: z.number().positive().optional(),
+  /** Worker: when idle, pull backlog routed to lower-capability tiers (work stealing). */
+  stealDown: z.boolean().default(true),
 });
 export type FlowNodeData = z.infer<typeof FlowNodeData>;
 
@@ -180,6 +209,8 @@ export const FlowEdge = z.object({
   /** Canvas only: which connection point (l/t/r/b) the edge leaves from and arrives at. */
   sourceHandle: z.string().max(16).nullable().optional(),
   targetHandle: z.string().max(16).nullable().optional(),
+  /** Dispatch edges only: routing rule — which difficulties enter the ladder at this edge's target. */
+  difficulties: z.array(Difficulty).optional(),
 });
 export type FlowEdge = z.infer<typeof FlowEdge>;
 
@@ -225,6 +256,8 @@ export const RunConfig = z.object({
   /** Stop leasing new work when the run's spend reaches this, USD. */
   budgetUsd: z.number().positive().optional(),
   draftedBy: z.string().default('operator'),
+  routing: z.lazy(() => RoutingConfig).default(() => RoutingConfig.parse({})),
+  context: z.lazy(() => ContextConfig).default(() => ContextConfig.parse({})),
 });
 export type RunConfig = z.infer<typeof RunConfig>;
 
@@ -272,6 +305,13 @@ export const Task = z.object({
   lastVerdictId: z.string().nullable(),
   srTaskId: z.string().nullable(),
   updatedAt: z.number(),
+  /** Current routing difficulty (raised by retry promotion, never lowered). */
+  difficulty: Difficulty,
+  /** Static complexity score of the packet (max over its functions + packing penalty). */
+  complexity: z.number(),
+  /** Attempts since the difficulty last changed (drives retry promotion). */
+  attemptsAtDifficulty: z.number().int(),
+  assessment: z.lazy(() => ComplexityAssessment).nullable(),
 });
 export type Task = z.infer<typeof Task>;
 
@@ -303,6 +343,11 @@ export const Attempt = z.object({
   files: z.array(z.object({ path: z.string(), content: z.string() })).nullable(),
   startedAt: z.number(),
   finishedAt: z.number().nullable(),
+  /** Difficulty the attempt was routed at. */
+  difficulty: Difficulty.nullable().default(null),
+  /** Estimated tokens of the bundle as sent, and what the unsliced sources would have cost. */
+  contextTokens: z.number().int().nullable().default(null),
+  contextRawTokens: z.number().int().nullable().default(null),
 });
 export type Attempt = z.infer<typeof Attempt>;
 
@@ -347,14 +392,32 @@ export const Verdict = z.object({
 });
 export type Verdict = z.infer<typeof Verdict>;
 
-/** What a Worker model must return. Paths are validated against the packet's allowlist. */
-export const WorkerOutput = z.object({
-  files: z
-    .array(z.object({ path: z.string().min(1).max(260), content: z.string().max(400_000) }))
-    .min(1)
-    .max(4),
-  notes: z.string().max(4000).optional(),
+/** A function-level edit: the orchestrator splices it into the current unit (replace same name, else append). */
+export const FunctionEdit = z.object({ name: z.string().min(1).max(300), code: z.string().min(1).max(200_000) });
+export type FunctionEdit = z.infer<typeof FunctionEdit>;
+
+export const UnitEdit = z.object({
+  path: z.string().min(1).max(260),
+  /** Replacement for the file's leading `//` comment block. */
+  header: z.string().max(4_000).optional(),
+  /** Declarations (types, callees, globals) inserted after the includes if not already present. */
+  declarations: z.string().max(50_000).optional(),
+  functions: z.array(FunctionEdit).max(60).default([]),
 });
+export type UnitEdit = z.infer<typeof UnitEdit>;
+
+/**
+ * What a Worker model must return. Paths are validated against the packet's allowlist.
+ * `files` = complete files; `edits` = function-level patches (far fewer output tokens on large units).
+ * Either way the Gate Keeper only ever sees the materialised complete files.
+ */
+export const WorkerOutput = z
+  .object({
+    files: z.array(z.object({ path: z.string().min(1).max(260), content: z.string().max(400_000) })).max(4).optional(),
+    edits: z.array(UnitEdit).max(4).optional(),
+    notes: z.string().max(4000).optional(),
+  })
+  .refine((o) => (o.files?.length ?? 0) + (o.edits?.length ?? 0) > 0, { message: 'return at least one file or edit' });
 export type WorkerOutput = z.infer<typeof WorkerOutput>;
 
 export const BundleSection = z.object({
@@ -375,6 +438,174 @@ export const ContextBundle = z.object({
   containsPrivate: z.boolean(),
 });
 export type ContextBundle = z.infer<typeof ContextBundle>;
+
+// ---------------------------------------------------------------------------
+// Phase 2: complexity routing, budgeted context, run knowledge
+// ---------------------------------------------------------------------------
+
+/**
+ * Static features of one target function. `size_only` = only the backlog size was known (no local
+ * pack yet); `pack` = decoded from the repo's local pack.json (counts only — no bytes are kept).
+ */
+export const FunctionFeatures = z.object({
+  source: z.enum(['size_only', 'pack', 'synthetic']),
+  size: z.number().int().nonnegative(),
+  instructions: z.number().int().nonnegative().nullable().default(null),
+  basicBlocks: z.number().int().nonnegative().nullable().default(null),
+  condBranches: z.number().int().nonnegative().nullable().default(null),
+  /** Backward intra-function branches (loops). */
+  backEdges: z.number().int().nonnegative().nullable().default(null),
+  calls: z.number().int().nonnegative().nullable().default(null),
+  /** Calls through memory (vtable / function pointer). */
+  indirectCalls: z.number().int().nonnegative().nullable().default(null),
+  /** Jumps through registers/memory (switch tables, vtable tail calls). */
+  indirectJumps: z.number().int().nonnegative().nullable().default(null),
+  sseOps: z.number().int().nonnegative().nullable().default(null),
+  /** RIP-relative references (globals, constants, imports). */
+  dataRefs: z.number().int().nonnegative().nullable().default(null),
+  xrefsIn: z.number().int().nonnegative().nullable().default(null),
+  /** .pdata entries in the function: >1 means funclets (C++ EH / SEH). */
+  unwindEntries: z.number().int().nonnegative().nullable().default(null),
+  tailCall: z.boolean().nullable().default(null),
+  /** Failed attempts on this RVA in earlier runs. */
+  priorFailures: z.number().int().nonnegative().default(0),
+  nameConfidence: z.enum(['named', 'guess', 'unnamed']).default('named'),
+  cautions: z.number().int().nonnegative().default(0),
+});
+export type FunctionFeatures = z.infer<typeof FunctionFeatures>;
+
+export const ComplexityThresholds = z.object({
+  /** score ≥ medium → medium */
+  medium: z.number().default(2.5),
+  /** score ≥ hard → hard */
+  hard: z.number().default(5.5),
+  /** |score − threshold| < band → borderline (eligible for the LLM tie-breaker) */
+  borderlineBand: z.number().nonnegative().default(0.4),
+});
+export type ComplexityThresholds = z.infer<typeof ComplexityThresholds>;
+
+export const ComplexityAssessment = z.object({
+  difficulty: Difficulty,
+  score: z.number(),
+  reasons: z.array(z.string()),
+  borderline: z.boolean(),
+  decidedBy: z.enum(['static', 'llm', 'promotion', 'operator']),
+  /** Hardest function's features (the packet's driver). */
+  features: FunctionFeatures,
+  /** Features per RVA for every function in the packet (shape counts for the prompt spec). */
+  functions: z.record(z.string(), FunctionFeatures).optional(),
+  version: z.number().int(),
+});
+export type ComplexityAssessment = z.infer<typeof ComplexityAssessment>;
+
+export const RoutingConfig = z.object({
+  /** Off = every packet enters at the ladder's first tier (pre-Phase-2 behaviour). */
+  enabled: z.boolean().default(true),
+  thresholds: ComplexityThresholds.default(() => ComplexityThresholds.parse({})),
+  /** Ask the Orchestrator's model (features only, no listing) to settle borderline scores. */
+  llmTieBreak: z.boolean().default(false),
+  llmTieBreakMax: z.number().int().min(0).max(5000).default(200),
+  /** Promote difficulty (and the routing tier) after this many failed attempts at a difficulty. */
+  promoteAfterFailures: z.number().int().min(1).max(20).default(2),
+  /** Idle higher-capability slots pull lower-tier backlog. */
+  workStealing: z.boolean().default(true),
+});
+export type RoutingConfig = z.infer<typeof RoutingConfig>;
+
+export const ContextSectionKind = z.enum([
+  'static_system_prefix',
+  'function_spec',
+  'disassembly_slice',
+  'minimal_local_context',
+  'unit_files',
+  'matched_pr_lessons',
+  'shared_run_discoveries',
+  'retry_delta',
+]);
+export type ContextSectionKind = z.infer<typeof ContextSectionKind>;
+
+export const SectionBudget = z.object({ min: z.number().int().nonnegative(), max: z.number().int().positive() });
+export type SectionBudget = z.infer<typeof SectionBudget>;
+
+/** Token budgets per section (estimates; ~3.3 chars/token for code). */
+export const ContextBudgets = z.object({
+  static_system_prefix: SectionBudget.default({ min: 800, max: 1_200 }),
+  function_spec: SectionBudget.default({ min: 150, max: 300 }),
+  disassembly_slice: SectionBudget.default({ min: 500, max: 2_500 }),
+  minimal_local_context: SectionBudget.default({ min: 400, max: 2_000 }),
+  /** The packet's own files; above max, accepted bodies are elided and the worker must return edits. */
+  unit_files: SectionBudget.default({ min: 0, max: 5_000 }),
+  matched_pr_lessons: SectionBudget.default({ min: 200, max: 500 }),
+  shared_run_discoveries: SectionBudget.default({ min: 100, max: 400 }),
+  retry_delta: SectionBudget.default({ min: 200, max: 600 }),
+});
+export type ContextBudgets = z.infer<typeof ContextBudgets>;
+
+export const ContextConfig = z.object({
+  /** budgeted = TaskContextBundle v2; legacy = pre-Phase-2 bundles (raw docs/headers/previous file). */
+  mode: z.enum(['budgeted', 'legacy']).default('budgeted'),
+  budgets: ContextBudgets.default(() => ContextBudgets.parse({})),
+  /**
+   * Second cache breakpoint after the per-task block, so retries re-read it at cache price.
+   * auto = only when a retry is likely (medium/hard, or easy from attempt 2).
+   */
+  cacheTaskPrefix: z.enum(['auto', 'always', 'never']).default('auto'),
+  /** Function-level edits instead of complete files: auto = only when accepted bodies are elided. */
+  outputMode: z.enum(['auto', 'files', 'edits']).default('auto'),
+});
+export type ContextConfig = z.infer<typeof ContextConfig>;
+
+export const ContextSection = z.object({
+  kind: ContextSectionKind,
+  title: z.string(),
+  content: z.string(),
+  privacy: z.enum(['public', 'private']),
+  tokens: z.number().int(),
+  budgetTokens: z.number().int(),
+  /** What the unsliced sources would have cost (full docs/headers/listing/previous file). */
+  rawTokens: z.number().int(),
+  truncated: z.boolean(),
+  sources: z.array(z.string()),
+});
+export type ContextSection = z.infer<typeof ContextSection>;
+
+export const TaskContextBundle = z.object({
+  version: z.literal(2),
+  hash: z.string(),
+  taskId: z.string(),
+  difficulty: Difficulty,
+  allowedPaths: z.array(z.string()),
+  /** sha256 of the static system prefix — identical for every call of a run (cache key). */
+  staticPrefixHash: z.string(),
+  sections: z.array(ContextSection),
+  tokens: z.object({ sent: z.number().int(), raw: z.number().int(), staticPrefix: z.number().int(), taskPrefix: z.number().int() }),
+  containsPrivate: z.boolean(),
+  outputMode: z.enum(['files', 'edits', 'either']),
+  /** Accepted functions whose bodies were hidden from the prompt (must not be returned). */
+  elidedFunctions: z.array(z.string()),
+  /** Detected code patterns used to match lessons (sse, vtable, eh, loop, switch, ...). */
+  patterns: z.array(z.string()),
+});
+export type TaskContextBundle = z.infer<typeof TaskContextBundle>;
+
+export const KnowledgeKind = z.enum(['function_signature', 'struct_layout', 'global', 'type_decl']);
+export type KnowledgeKind = z.infer<typeof KnowledgeKind>;
+
+/** A verified fact from a packet that passed the Gate Keeper, shared with the rest of the run. */
+export const KnowledgeEntry = z.object({
+  runId: z.string(),
+  kind: KnowledgeKind,
+  /** Symbol / struct name the entry is keyed by (e.g. "TESForm", "TESForm::GetFormID"). */
+  symbol: z.string(),
+  content: z.string(),
+  /** Identifiers the entry mentions (for matching against a packet's references). */
+  symbols: z.array(z.string()),
+  sourceTaskId: z.string(),
+  sourceUnit: z.string(),
+  verifiedAt: z.number(),
+  uses: z.number().int(),
+});
+export type KnowledgeEntry = z.infer<typeof KnowledgeEntry>;
 
 export const TelemetryEvent = z.object({
   seq: z.number().int(),

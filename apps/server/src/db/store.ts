@@ -2,7 +2,7 @@
 // Typed repositories over the database. Row <-> domain mapping lives here and nowhere else.
 import {
   Account, AccountRuntime, Attempt, Flow, FunctionTarget, RunConfig, Task, Verdict,
-  type RunStatus, type TaskState, type Usage,
+  type ComplexityAssessment, type Difficulty, type KnowledgeEntry, type KnowledgeKind, type RunStatus, type TaskState, type Usage,
 } from '@decomp/core';
 import type { DB } from './database.js';
 
@@ -21,6 +21,19 @@ export interface RunRow {
   startedAt: number | null;
   finishedAt: number | null;
   updatedAt: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  cacheWriteTokens: number;
+  outputTokens: number;
+}
+
+export interface LessonRow {
+  id: string;
+  source: string;
+  topic: string;
+  text: string;
+  weight: number;
+  tags: string[];
 }
 
 export interface TaskRow extends Task {
@@ -40,6 +53,8 @@ function toTask(r: Raw): TaskRow {
     cheatStrikes: r.cheat_strikes, infraFailures: r.infra_failures, providerFailures: r.provider_failures,
     leaseId: r.lease_id, leaseExpiresAt: r.lease_expires_at, notBefore: r.not_before,
     lastVerdictId: r.last_verdict_id, srTaskId: r.sr_task_id, updatedAt: r.updated_at,
+    difficulty: (r.difficulty ?? 'medium') as Difficulty, complexity: r.complexity ?? 0,
+    attemptsAtDifficulty: r.attempts_at_difficulty ?? 0, assessment: p<ComplexityAssessment | null>(r.assessment_json, null),
   };
 }
 
@@ -50,6 +65,7 @@ function toAttempt(r: Raw): Attempt {
     usage: p<Usage>(r.usage_json, { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }),
     costUsd: r.cost_usd, latencyMs: r.latency_ms, error: r.error,
     files: p(r.files_json, null), startedAt: r.started_at, finishedAt: r.finished_at,
+    difficulty: r.difficulty ?? null, contextTokens: r.context_tokens ?? null, contextRawTokens: r.context_raw_tokens ?? null,
   };
 }
 
@@ -62,10 +78,23 @@ function toVerdict(r: Raw): Verdict {
 }
 
 function toRun(r: Raw): RunRow {
+  const raw = JSON.parse(r.config_json) as Record<string, unknown>;
+  // Runs created before Phase 2 keep their behaviour: no difficulty routing, legacy bundles.
+  if (!('routing' in raw)) raw.routing = { enabled: false };
+  if (!('context' in raw)) raw.context = { mode: 'legacy' };
   return {
-    id: r.id, name: r.name, status: r.status, config: RunConfig.parse(JSON.parse(r.config_json)),
+    id: r.id, name: r.name, status: r.status, config: RunConfig.parse(raw),
     flow: Flow.parse(JSON.parse(r.flow_json)), costUsd: r.cost_usd, error: r.error,
     createdAt: r.created_at, startedAt: r.started_at, finishedAt: r.finished_at, updatedAt: r.updated_at,
+    inputTokens: r.input_tokens ?? 0, cachedInputTokens: r.cached_input_tokens ?? 0,
+    cacheWriteTokens: r.cache_write_tokens ?? 0, outputTokens: r.output_tokens ?? 0,
+  };
+}
+
+function toKnowledge(r: Raw): KnowledgeEntry {
+  return {
+    runId: r.run_id, kind: r.kind, symbol: r.symbol, content: r.content, symbols: p<string[]>(r.symbols_json, []),
+    sourceTaskId: r.source_task_id, sourceUnit: r.source_unit, verifiedAt: r.verified_at, uses: r.uses,
   };
 }
 
@@ -149,23 +178,48 @@ export class Store {
   addRunCost(id: string, usd: number) {
     this.db.prepare('UPDATE runs SET cost_usd = cost_usd + ?, updated_at = ? WHERE id = ?').run(usd, Date.now(), id);
   }
+  /** Cost + token counters on the run row (one UPDATE per attempt; the dashboard reads these). */
+  addRunUsage(id: string, usd: number, u: Usage) {
+    this.db.prepare(`UPDATE runs SET cost_usd = cost_usd + @usd, input_tokens = input_tokens + @i, cached_input_tokens = cached_input_tokens + @c,
+        cache_write_tokens = cache_write_tokens + @w, output_tokens = output_tokens + @o, updated_at = @now WHERE id = @id`)
+      .run({ id, usd, i: u.inputTokens, c: u.cacheReadTokens, w: u.cacheWriteTokens, o: u.outputTokens, now: Date.now() });
+  }
   activeRuns(): RunRow[] {
     return this.db.prepare("SELECT * FROM runs WHERE status IN ('discovering','running','paused')").all().map((r) => toRun(r as Raw));
   }
 
   // ---------------- tasks ----------------
-  insertTasks(runId: string, packets: Array<{ id: string; unit: string; functions: FunctionTarget[]; priority: number }>) {
-    const stmt = this.db.prepare(`INSERT OR IGNORE INTO tasks (id, run_id, unit, functions_key, functions_json, state, priority, updated_at)
-      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)`);
+  insertTasks(
+    runId: string,
+    packets: Array<{ id: string; unit: string; functions: FunctionTarget[]; priority: number; tier?: number; difficulty?: Difficulty; complexity?: number; assessment?: ComplexityAssessment | null }>,
+  ) {
+    const stmt = this.db.prepare(`INSERT OR IGNORE INTO tasks (id, run_id, unit, functions_key, functions_json, state, priority, tier, difficulty, complexity, assessment_json, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?, ?)`);
     const now = Date.now();
     let inserted = 0;
     this.tx(() => {
       for (const t of packets) {
         const key = t.functions.map((f) => f.rva).sort().join(',');
-        inserted += stmt.run(t.id, runId, t.unit, key, j(t.functions), t.priority, now).changes;
+        inserted += stmt.run(t.id, runId, t.unit, key, j(t.functions), t.priority, t.tier ?? 0, t.difficulty ?? 'medium', t.complexity ?? 0, t.assessment ? j(t.assessment) : null, now).changes;
       }
     });
     return inserted;
+  }
+  /** Failed attempts per RVA in other runs (dead/quarantined/cancelled packets) — a complexity signal. */
+  priorFailures(runId: string, rvas: string[]): Map<string, number> {
+    if (!rvas.length) return new Map();
+    const want = new Set(rvas);
+    const rows = this.db.prepare(`SELECT json_extract(f.value, '$.rva') rva, SUM(t.attempts_total) n
+      FROM tasks t, json_each(t.functions_json) f
+      WHERE t.run_id != ? AND t.state IN ('dead','quarantined','cancelled') GROUP BY rva`).all(runId) as Array<{ rva: string; n: number }>;
+    return new Map(rows.filter((r) => want.has(r.rva)).map((r) => [r.rva, r.n]));
+  }
+  setAssessment(taskId: string, a: ComplexityAssessment) {
+    this.db.prepare('UPDATE tasks SET assessment_json = ?, complexity = ? WHERE id = ?').run(j(a), a.score, taskId);
+  }
+  difficultyCounts(runId: string) {
+    return this.db.prepare(`SELECT difficulty, tier, state, COUNT(*) n, SUM(json_array_length(functions_json)) functions
+      FROM tasks WHERE run_id = ? GROUP BY difficulty, tier, state`).all(runId) as Array<{ difficulty: Difficulty; tier: number; state: TaskState; n: number; functions: number }>;
   }
   getTask(id: string): TaskRow | null {
     const r = this.db.prepare('SELECT * FROM tasks WHERE id = ?').get(id) as Raw | undefined;
@@ -192,9 +246,14 @@ export class Store {
   // ---------------- attempts ----------------
   insertAttempt(a: Attempt) {
     this.db.prepare(`INSERT INTO attempts (id, task_id, run_id, n, tier, node_id, account_id, model, status, bundle_hash,
-      usage_json, cost_usd, latency_ms, error, files_json, started_at, finished_at)
+      usage_json, cost_usd, latency_ms, error, files_json, started_at, finished_at, difficulty, context_tokens, context_raw_tokens,
+      input_tokens, cached_input_tokens, cache_write_tokens, output_tokens)
       VALUES (@id, @taskId, @runId, @n, @tier, @nodeId, @accountId, @model, @status, @bundleHash, @usage, @costUsd,
-      @latencyMs, @error, @files, @startedAt, @finishedAt)`).run({ ...a, usage: j(a.usage), files: a.files ? j(a.files) : null });
+      @latencyMs, @error, @files, @startedAt, @finishedAt, @difficulty, @contextTokens, @contextRawTokens, @i, @c, @w, @o)`).run({
+      ...a, usage: j(a.usage), files: a.files ? j(a.files) : null, difficulty: a.difficulty ?? null,
+      contextTokens: a.contextTokens ?? null, contextRawTokens: a.contextRawTokens ?? null,
+      i: a.usage.inputTokens, c: a.usage.cacheReadTokens, w: a.usage.cacheWriteTokens, o: a.usage.outputTokens,
+    });
   }
   updateAttempt(id: string, patch: Partial<Pick<Attempt, 'status' | 'accountId' | 'model' | 'bundleHash' | 'usage' | 'costUsd' | 'latencyMs' | 'error' | 'files' | 'finishedAt'>>) {
     const map: Record<string, string> = {
@@ -206,6 +265,10 @@ export class Store {
     for (const [k, v] of Object.entries(patch)) {
       sets.push(`${map[k]} = @${k}`);
       params[k] = k === 'usage' || k === 'files' ? (v == null ? null : j(v)) : v;
+    }
+    if (patch.usage) {
+      sets.push('input_tokens = @ui', 'cached_input_tokens = @uc', 'cache_write_tokens = @uw', 'output_tokens = @uo');
+      Object.assign(params, { ui: patch.usage.inputTokens, uc: patch.usage.cacheReadTokens, uw: patch.usage.cacheWriteTokens, uo: patch.usage.outputTokens });
     }
     if (sets.length) this.db.prepare(`UPDATE attempts SET ${sets.join(', ')} WHERE id = @id`).run(params);
   }
@@ -220,9 +283,9 @@ export class Store {
     return this.db.prepare(`SELECT COUNT(*) attempts,
         SUM(CASE WHEN status = 'provider_error' THEN 1 ELSE 0 END) provider_errors,
         SUM(CASE WHEN status = 'parse_error' THEN 1 ELSE 0 END) parse_errors,
-        SUM(json_extract(usage_json, '$.inputTokens')) input_tokens,
-        SUM(json_extract(usage_json, '$.outputTokens')) output_tokens,
-        SUM(json_extract(usage_json, '$.cacheReadTokens')) cache_read_tokens,
+        SUM(input_tokens) input_tokens, SUM(output_tokens) output_tokens,
+        SUM(cached_input_tokens) cache_read_tokens, SUM(cache_write_tokens) cache_write_tokens,
+        SUM(context_tokens) context_tokens, SUM(context_raw_tokens) context_raw_tokens,
         SUM(cost_usd) cost_usd
       FROM attempts WHERE run_id = ?`).get(runId) as Raw;
   }
@@ -230,10 +293,18 @@ export class Store {
     return this.db.prepare(`SELECT account_id, model, COUNT(*) attempts,
         SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) completed,
         SUM(CASE WHEN status = 'provider_error' THEN 1 ELSE 0 END) provider_errors,
-        SUM(json_extract(usage_json, '$.inputTokens')) input_tokens,
-        SUM(json_extract(usage_json, '$.outputTokens')) output_tokens,
+        SUM(input_tokens) input_tokens, SUM(cached_input_tokens) cached_input_tokens,
+        SUM(cache_write_tokens) cache_write_tokens, SUM(output_tokens) output_tokens,
+        CASE WHEN SUM(input_tokens) > 0 THEN 1.0 * SUM(cached_input_tokens) / SUM(input_tokens) ELSE 0 END cache_hit_rate,
         SUM(cost_usd) cost_usd, AVG(latency_ms) avg_latency_ms
       FROM attempts WHERE run_id = ? GROUP BY account_id, model ORDER BY attempts DESC`).all(runId) as Raw[];
+  }
+  /** Attempts and outcomes per (difficulty, tier) — the routing matrix on the dashboard. */
+  routingMatrix(runId: string) {
+    return this.db.prepare(`SELECT a.difficulty, a.tier, COUNT(*) attempts, SUM(CASE WHEN v.decision = 'pass' THEN 1 ELSE 0 END) passed,
+        SUM(a.input_tokens) input_tokens, SUM(a.output_tokens) output_tokens, SUM(a.cost_usd) cost_usd
+      FROM attempts a LEFT JOIN verdicts v ON v.attempt_id = a.id
+      WHERE a.run_id = ? AND a.status IN ('completed','parse_error') GROUP BY a.difficulty, a.tier`).all(runId) as Raw[];
   }
 
   // ---------------- verdicts ----------------
@@ -265,12 +336,48 @@ export class Store {
   putBundle(hash: string, bundle: unknown) {
     this.db.prepare('INSERT OR IGNORE INTO bundles (hash, json, created_at) VALUES (?, ?, ?)').run(hash, j(bundle), Date.now());
   }
-  upsertLesson(l: { id: string; source: string; topic: string; text: string; weight: number }) {
-    this.db.prepare(`INSERT INTO lessons (id, source, topic, text, weight, created_at) VALUES (@id, @source, @topic, @text, @weight, @now)
-      ON CONFLICT(id) DO UPDATE SET text = excluded.text, weight = excluded.weight`).run({ ...l, now: Date.now() });
+  upsertLesson(l: { id: string; source: string; topic: string; text: string; weight: number; tags?: string[] }) {
+    this.db.prepare(`INSERT INTO lessons (id, source, topic, text, weight, tags_json, created_at) VALUES (@id, @source, @topic, @text, @weight, @tags, @now)
+      ON CONFLICT(id) DO UPDATE SET text = excluded.text, weight = excluded.weight, tags_json = excluded.tags_json`)
+      .run({ ...l, tags: j(l.tags?.length ? [...l.tags].sort() : ['general']), now: Date.now() });
   }
-  lessons(limit = 40): Array<{ id: string; source: string; topic: string; text: string; weight: number }> {
-    return this.db.prepare('SELECT id, source, topic, text, weight FROM lessons ORDER BY weight DESC, id LIMIT ?').all(limit) as any;
+  lessons(limit = 40): LessonRow[] {
+    return (this.db.prepare('SELECT id, source, topic, text, weight, tags_json FROM lessons ORDER BY weight DESC, id LIMIT ?').all(limit) as Raw[])
+      .map((r) => ({ id: r.id, source: r.source, topic: r.topic, text: r.text, weight: r.weight, tags: p<string[]>(r.tags_json, ['general']) }));
+  }
+
+  // ---------------- run knowledge cache ----------------
+  upsertKnowledge(entries: KnowledgeEntry[]) {
+    const stmt = this.db.prepare(`INSERT INTO run_knowledge_cache (run_id, kind, symbol, content, symbols_json, source_task_id, source_unit, verified_at, uses)
+      VALUES (@runId, @kind, @symbol, @content, @symbols, @sourceTaskId, @sourceUnit, @verifiedAt, 0)
+      ON CONFLICT(run_id, kind, symbol) DO UPDATE SET content = excluded.content, symbols_json = excluded.symbols_json,
+        source_task_id = excluded.source_task_id, source_unit = excluded.source_unit, verified_at = excluded.verified_at`);
+    this.tx(() => entries.forEach((e) => stmt.run({ ...e, symbols: j(e.symbols) })));
+    return entries.length;
+  }
+  /**
+   * Candidate entries for a packet: keyed by one of `symbols`, or mentioning one of `mentions`
+   * (e.g. the packet's class). The context builder ranks and budgets them.
+   */
+  knowledgeFor(runId: string, symbols: string[], limit = 64, mentions: string[] = []): KnowledgeEntry[] {
+    const keys = [...new Set(symbols)].slice(0, 400);
+    const ment = [...new Set(mentions)].slice(0, 50);
+    if (!keys.length && !ment.length) return [];
+    const q = (n: number) => (n ? Array(n).fill('?').join(',') : `''`);
+    const rows = this.db.prepare(`SELECT * FROM run_knowledge_cache k WHERE k.run_id = ? AND (k.symbol IN (${q(keys.length)})
+        OR EXISTS (SELECT 1 FROM json_each(k.symbols_json) s WHERE s.value IN (${q(ment.length)})))
+      ORDER BY k.verified_at DESC LIMIT ?`).all(runId, ...keys, ...ment, limit) as Raw[];
+    return rows.map(toKnowledge);
+  }
+  listKnowledge(runId: string, limit = 200): KnowledgeEntry[] {
+    return (this.db.prepare('SELECT * FROM run_knowledge_cache WHERE run_id = ? ORDER BY uses DESC, verified_at DESC LIMIT ?').all(runId, limit) as Raw[]).map(toKnowledge);
+  }
+  knowledgeStats(runId: string) {
+    return this.db.prepare('SELECT kind, COUNT(*) n, SUM(uses) uses FROM run_knowledge_cache WHERE run_id = ? GROUP BY kind').all(runId) as Array<{ kind: KnowledgeKind; n: number; uses: number }>;
+  }
+  bumpKnowledgeUses(runId: string, keys: Array<{ kind: KnowledgeKind; symbol: string }>) {
+    const stmt = this.db.prepare('UPDATE run_knowledge_cache SET uses = uses + 1 WHERE run_id = ? AND kind = ? AND symbol = ?');
+    this.tx(() => keys.forEach((k) => stmt.run(runId, k.kind, k.symbol)));
   }
   createBatch(b: { id: string; runId: string; seq: number; taskIds: string[] }) {
     this.db.prepare(`INSERT OR IGNORE INTO pr_batches (id, run_id, seq, status, task_ids_json, created_at) VALUES (?, ?, ?, 'draft', ?, ?)`)

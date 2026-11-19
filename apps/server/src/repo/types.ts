@@ -1,12 +1,16 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // The seam between the engine and a target repository. `SrRepo` drives skyrim_decomp's `./sr`
 // tooling in git worktrees; `SimRepo` is an in-memory stand-in for simulation and tests.
-import type { CompareFunctionResult, Finding, FunctionTarget, SelectionSpec } from '@decomp/core';
+import type { CompareFunctionResult, Finding, FunctionFeatures, FunctionTarget, SelectionSpec } from '@decomp/core';
 import type { TaskRow } from '../db/store.js';
 
 export interface DiscoveredFunction extends FunctionTarget {
   unit: string; // reconstruction/<area>/<Class>.cpp
   readiness?: number;
+  /** Backlog cautions reported by the repo (count only). */
+  cautions?: number;
+  /** Features known at discovery (simulator); real repos answer through analyze(). */
+  features?: FunctionFeatures;
 }
 
 export interface PreparedTask {
@@ -68,8 +72,15 @@ export interface RepoAdapter {
   reset(slot: number): Promise<void>;
   docs(): Promise<DocSection[]>;
   /** Headers included by the unit (one level), for the context bundle. */
-  includedHeaders(slot: number, unitFiles: string[]): Promise<DocSection[]>;
+  includedHeaders(slot: number, unitFiles: string[], opts?: { maxChars?: number; maxHeaders?: number }): Promise<DocSection[]>;
   readPack(pack: string): Promise<string | null>;
+  /**
+   * Complexity features from local packs (counts only — nothing game-derived is returned). Functions
+   * without a local pack are simply absent from the map. `packs` = directories from prepare().
+   */
+  analyze?(fns: FunctionTarget[], opts?: { packs?: string[] }): Promise<Map<string, FunctionFeatures>>;
+  /** Budgeted listing for one pack: compact listing form, at most `maxChars` (exposure consent only). */
+  readPackSlice?(pack: string, maxChars: number, opts?: { withDecompiler?: boolean }): Promise<{ text: string; rawChars: number } | null>;
   /** Give back local claims taken by `prepare` for packets that will not be submitted. */
   releaseClaims?(rvas: string[], reason: string): Promise<Array<{ rva: string; ok: boolean; error: string | null }>>;
   /**

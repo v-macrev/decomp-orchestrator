@@ -15,7 +15,7 @@ function task(over: Partial<TaskRow> = {}): TaskRow {
     functions: [{ rva: '0x100010', name: 'Class0::Method0', size: 40 }],
     state: 'leased', priority: 0, tier: 0, attemptsTotal: 0, attemptsAtTier: 0, noImprovementStreak: 0, bestExactBytes: 0,
     cheatStrikes: 0, infraFailures: 0, providerFailures: 0, leaseId: 'l', leaseExpiresAt: null, notBefore: 0, lastVerdictId: null,
-    srTaskId: null, updatedAt: 0, ...over,
+    srTaskId: null, updatedAt: 0, difficulty: 'medium', complexity: 0, attemptsAtDifficulty: 0, assessment: null, ...over,
   };
 }
 

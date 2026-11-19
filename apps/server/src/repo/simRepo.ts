@@ -4,10 +4,12 @@
 // `prepare`, a comparator with per-function results and partial byte credit, compile errors,
 // flaky infrastructure, and protected inputs whose digest can be tampered with.
 import { createHash } from 'node:crypto';
-import type { CompareFunctionResult, SelectionSpec } from '@decomp/core';
+import type { CompareFunctionResult, FunctionFeatures, FunctionTarget, SelectionSpec } from '@decomp/core';
 import type { TaskRow } from '../db/store.js';
 import { simIdent, type SimOracle } from '../providers/mock.js';
 import { sleep } from '../util/async.js';
+import { clipMiddle } from './srRepo.js';
+import { simDocs, simFeatures, simPack, simSharedHeader } from './simContent.js';
 import type { CompareOutcome, DiscoveredFunction, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
 
 export interface SimRepoOptions {
@@ -18,6 +20,8 @@ export interface SimRepoOptions {
   /** Test hook: runs inside compare (e.g. to simulate tooling that tampers with protected files). */
   onCompare?: (slot: number, repo: SimRepo) => void;
   rand?: () => number;
+  /** Realistic context volumes (docs, shared header, big units, listings). Default true. */
+  realisticContext?: boolean;
 }
 
 function mulberry32(seed: number) {
@@ -38,9 +42,12 @@ export class SimRepo implements RepoAdapter, SimOracle {
   private protectedFiles: Array<Map<string, string>>;
   private functions = new Map<string, DiscoveredFunction>();
   private rand: () => number;
+  private realistic: boolean;
+  private sharedHeader: string | null = null;
   compares = 0;
 
   constructor(private opts: SimRepoOptions) {
+    this.realistic = opts.realisticContext ?? true;
     this.slotCount = opts.slots;
     this.overlays = Array.from({ length: opts.slots }, () => new Map());
     this.protectedFiles = Array.from({ length: opts.slots }, () => new Map([['tools/compare.py', 'def compare(): ...'], ['builds/target.json', '{"build_id":"sim"}']]));
@@ -65,12 +72,20 @@ export class SimRepo implements RepoAdapter, SimOracle {
       const unit = `reconstruction/sim/Class${cls}.cpp`;
       for (let j = 0; j < methods && out.length < sel.count; j++) {
         rva += 0x10 + Math.floor(rnd() * 0x400);
-        const f: DiscoveredFunction = { rva: `0x${rva.toString(16)}`, name: `Class${cls}::Method${j}`, size: 8 + Math.floor(rnd() * 200), unit, readiness: Math.floor(rnd() * 4) };
+        const hex = `0x${rva.toString(16)}`;
+        // Real backlogs skew small (most ready functions are accessors and short helpers): median ≈ 50 B.
+        const size = 6 + Math.floor(200 * rnd() ** 2.2);
+        const f: DiscoveredFunction = { rva: hex, name: `Class${cls}::Method${j}`, size, unit, readiness: Math.floor(rnd() * 4), features: simFeatures(hex, size) };
         out.push(f);
         this.functions.set(f.rva, f);
       }
-      // Some units already contain an accepted function: it must survive every candidate unchanged.
-      if (rnd() < 0.3) this.base.set(unit, `${HEADER}int Class${cls}_Accepted()\n{\n    return 7;\n}\n`);
+      // Some units already contain accepted functions: they must survive every candidate unchanged.
+      // About a third of those are big units, whose bodies the budgeted builder elides (edits mode).
+      if (rnd() < 0.3) {
+        const many = this.realistic && rnd() < 0.35 ? 12 + Math.floor(rnd() * 20) : 0;
+        const extra = Array.from({ length: many }, (_, k) => `int Class${cls}_Done${k}()\n{\n    int total = ${k};\n    for (int i = 0; i < ${k + 3}; ++i)\n        total += i * ${k + 1};\n    return total;\n}\n`);
+        this.base.set(unit, `${HEADER}int Class${cls}_Accepted()\n{\n    return 7;\n}\n${extra.length ? `\n${extra.join('\n')}` : ''}`);
+      }
       cls++;
     }
     return out;
@@ -81,7 +96,7 @@ export class SimRepo implements RepoAdapter, SimOracle {
     const h = cpp.replace(/\.cpp$/, '.h');
     const ov = this.overlays[slot]!;
     if (!ov.has(cpp)) ov.set(cpp, this.base.get(cpp) ?? `${HEADER}`);
-    return { srTaskId: `sim-${task.id}`, allowedPaths: [h, cpp], packs: [`sim-pack/${task.id}`], toolingChanges: await this.changedPaths(slot) };
+    return { srTaskId: `sim-${task.id}`, allowedPaths: [h, cpp], packs: task.functions.map((f) => `sim-pack/${f.size}/${f.rva}`), toolingChanges: await this.changedPaths(slot) };
   }
 
   async baseFile(path: string) {
@@ -165,13 +180,33 @@ export class SimRepo implements RepoAdapter, SimOracle {
   }
 
   async docs(): Promise<DocSection[]> {
+    if (this.realistic) return simDocs();
     return [{ id: 'rules', title: 'Simulated contributor rules', source: 'sim', content: 'Write plausible C++. Never use asm, byte arrays or #pragma.' }];
   }
-  async includedHeaders(): Promise<DocSection[]> {
-    return [];
+  async includedHeaders(_slot: number, _unitFiles: string[], opts: { maxChars?: number } = {}): Promise<DocSection[]> {
+    if (!this.realistic) return [];
+    this.sharedHeader ??= simSharedHeader(60);
+    const cap = opts.maxChars ?? 8_000;
+    const text = this.sharedHeader.length > cap ? `${this.sharedHeader.slice(0, cap)}\n[truncated header]` : this.sharedHeader;
+    return [{ id: 'hdr:reconstruction/sim/Sim.h', title: 'reconstruction/sim/Sim.h', source: 'reconstruction/sim/Sim.h', content: text }];
+  }
+  private pack(path: string) {
+    const [, size, rva] = path.split('/');
+    return simPack(rva ?? '0x0', Number(size) || 16);
   }
   async readPack(pack: string) {
-    return `SIMULATED PRIVATE LISTING for ${pack}`;
+    if (!this.realistic) return `SIMULATED PRIVATE LISTING for ${pack}`;
+    const p = this.pack(pack);
+    return `--- bytes.txt ---\n${p.bytes}\n--- decomp.c ---\n${p.decomp}`;
+  }
+  async readPackSlice(pack: string, maxChars: number, opts: { withDecompiler?: boolean } = {}) {
+    const p = this.pack(pack);
+    let text = clipMiddle(p.listing, maxChars);
+    if (opts.withDecompiler && maxChars - text.length > 400) text += `\n--- decompiler ---\n${clipMiddle(p.decomp, maxChars - text.length - 24)}`;
+    return { text, rawChars: p.bytes.length + p.decomp.length };
+  }
+  async analyze(fns: FunctionTarget[]): Promise<Map<string, FunctionFeatures>> {
+    return new Map(fns.map((f) => [f.rva, simFeatures(f.rva, f.size)]));
   }
 }
 
