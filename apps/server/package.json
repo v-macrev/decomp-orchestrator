@@ -1,0 +1,29 @@
+{
+  "name": "@decomp/server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "test": "vitest run",
+    "sim": "tsx src/sim/simulate.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "latest",
+    "@decomp/core": "*",
+    "@fastify/cors": "^11.4.3",
+    "@fastify/static": "^10.1.11",
+    "better-sqlite3": "^12.0.0",
+    "fastify": "^5.0.0",
+    "openai": "^7.60.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.0",
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
+  }
+}

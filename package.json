@@ -1,0 +1,15 @@
+{
+  "name": "decomp-orchestrator",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*", "apps/*"],
+  "scripts": {
+    "dev": "npm run dev -w @decomp/server",
+    "dev:web": "npm run dev -w @decomp/web",
+    "build:web": "npm run build -w @decomp/web",
+    "typecheck": "tsc -p packages/core && tsc -p apps/server && tsc -p apps/web --noEmit",
+    "test": "npm test -w @decomp/server",
+    "sim": "npm run sim -w @decomp/server"
+  },
+  "engines": { "node": ">=22" }
+}
