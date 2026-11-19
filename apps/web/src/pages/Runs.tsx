@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { Flow, Task, TelemetryEvent } from '@decomp/core';
 import { api, stream, type AccountView, type Batch, type Metrics, type RunSummary } from '../api';
+import { ConfirmButton } from '../components/ConfirmButton';
 import { TaskDrawer } from '../components/TaskDrawer';
 
 const STATE_COLORS: Record<string, string> = {
@@ -156,7 +157,6 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
   const matched = (f.staged ?? 0) + (f.passed ?? 0);
   const done = matched + (f.dead ?? 0) + (f.quarantined ?? 0);
   const act = async (a: 'pause' | 'resume' | 'cancel', body?: unknown) => {
-    if (a === 'cancel' && !confirm('Cancel this run? Open tasks will be cancelled.')) return;
     await api.runAction(runId, a, body);
     onChange();
   };
@@ -169,7 +169,7 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
           <button onClick={() => act('pause')} disabled={status !== 'running'}>Pause</button>
           <button onClick={() => act('pause', { immediate: true })} disabled={status !== 'running'} title="Abort in-flight attempts (not counted against tasks)">Pause now</button>
           <button onClick={() => act('resume')} disabled={status !== 'paused'}>Resume</button>
-          <button className="danger" onClick={() => act('cancel')} disabled={['completed', 'cancelled', 'failed'].includes(status)}>Cancel</button>
+          <ConfirmButton onConfirm={() => act('cancel')} disabled={['completed', 'cancelled', 'failed'].includes(status)} confirmLabel="Cancel run? Open tasks stop">Cancel</ConfirmButton>
         </div>
         {m.run.error && <div className="lvl-error">{m.run.error}</div>}
         <StackBar counts={f} total={m.totalFunctions} />

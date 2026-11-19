@@ -44,12 +44,23 @@ function App() {
         {err && (
           <span className="lvl-error" style={{ fontSize: 12 }}>
             API unreachable{err.includes('unauthorized') ? ' (token)' : ''}{' '}
-            <button onClick={() => { const t = prompt('API token (ORCH_API_TOKEN)', getToken()); if (t !== null) { setToken(t); location.reload(); } }}>Set token</button>
+            <TokenInput />
           </span>
         )}
       </header>
       {tab === 'flow' ? <FlowBuilder /> : tab === 'accounts' ? <Accounts /> : <Runs mode={health?.mode ?? 'sim'} />}
     </div>
+  );
+}
+
+/** Inline token entry (window.prompt is unavailable in embedded browsers). */
+function TokenInput() {
+  const [v, setV] = useState(getToken());
+  return (
+    <form className="row" style={{ display: 'inline-flex' }} onSubmit={(e) => { e.preventDefault(); setToken(v.trim()); location.reload(); }}>
+      <input type="password" value={v} onChange={(e) => setV(e.target.value)} placeholder="ORCH_API_TOKEN" aria-label="API token" style={{ width: 160 }} />
+      <button type="submit">Set token</button>
+    </form>
   );
 }
 

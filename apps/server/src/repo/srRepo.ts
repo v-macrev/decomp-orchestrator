@@ -4,24 +4,30 @@
 // toolchains/packs/claims, SR_CONTRIB_OFFLINE=1 + `claim --offline-ok` for unpublished local
 // claims, `start --no-branch`, and `compare <task-id>` as the authoritative check.
 //
+// The checkout can live on this machine (`host: local`) or inside WSL (`host: wsl`), where Wine and
+// the pinned MSVC usually are; all commands then run inside the distribution.
+//
 // Isolation per slot:
 //   * worktree pinned to one base SHA for the whole process; reset --hard + clean -ffdx between
 //     attempts and verified clean before reuse;
-//   * all repo tooling runs through runBounded: wall-clock timeout with process-tree kill, output
-//     cap, cwd = the slot's worktree, allowlisted env (no provider keys ever reach repo tooling);
+//   * all repo tooling runs bounded: wall-clock timeout with process-tree kill (plus `timeout -k`
+//     inside WSL), output cap, cwd = the slot's worktree, explicit env only (provider keys never
+//     reach repo tooling);
 //   * optional container mode wraps the same command in `docker run --network none --cap-drop ALL
 //     --read-only ...` with only the worktree and SR_LOCAL_DIR mounted;
-//   * writes go through a realpath check so a symlink in the worktree cannot redirect them.
+//   * writes are realpath-checked so a symlink in the worktree cannot redirect them.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname as fsDirname } from 'node:path';
 import type { CompareFunctionResult, Finding, SelectionSpec } from '@decomp/core';
 import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
-import { runBounded, type RunResult } from '../util/proc.js';
+import type { RunResult } from '../util/proc.js';
+import { LocalHost, WslHost, type Host } from './host.js';
 import type { CompareOutcome, DiscoveredFunction, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
 
 export interface SrRepoConfig {
+  /** Paths are on the repository host: Windows/POSIX paths for `local`, Linux paths for `wsl`. */
   repoPath: string;
   baseRef: string;
   worktreeRoot: string;
@@ -29,6 +35,7 @@ export interface SrRepoConfig {
   localDir: string;
   python: string;
   slots: number;
+  host?: { kind: 'local' } | { kind: 'wsl'; distro: string };
   sandbox: { mode: 'local' } | { mode: 'docker'; image: string; cpus?: number; memory?: string };
   /** Exit codes of contrib.py that mean "infrastructure", not "candidate". */
   infraExitCodes?: number[];
@@ -47,30 +54,36 @@ export class InfraError extends Error {}
 export class SrRepo implements RepoAdapter {
   readonly name = 'skyrim_decomp';
   readonly slotCount: number;
+  readonly host: Host;
   private sha = '';
   private srMutex = new KeyedMutex();
   private baseCache = new Map<string, string | null>();
 
   constructor(private cfg: SrRepoConfig) {
     this.slotCount = cfg.slots;
-    if (!isAbsolute(cfg.localDir)) throw new Error('localDir (SR_LOCAL_DIR) must be absolute');
+    this.host = cfg.host?.kind === 'wsl' ? new WslHost(cfg.host.distro) : new LocalHost();
+    if (!this.host.path.isAbsolute(cfg.localDir)) throw new Error('localDir (SR_LOCAL_DIR) must be absolute');
   }
 
-  private wt(slot: number) {
-    return resolve(this.cfg.worktreeRoot, `slot-${slot}`);
+  private get p() {
+    return this.host.path;
+  }
+
+  wt(slot: number) {
+    return this.p.resolve(this.cfg.worktreeRoot, slot >= this.slotCount ? 'staging' : `slot-${slot}`);
   }
 
   private git(cwd: string, args: string[], timeoutMs = 60_000) {
-    return runBounded('git', args, { cwd, timeoutMs, maxOutputBytes: 64 * 1024 * 1024 });
+    return this.host.run('git', args, { cwd, timeoutMs, maxOutputBytes: 64 * 1024 * 1024 });
   }
 
   private srEnv() {
-    return { SR_LOCAL_DIR: this.cfg.localDir, SR_CONTRIB_OFFLINE: '1', SR_NO_SIBLING_NAMES: '1' };
+    return { SR_LOCAL_DIR: this.cfg.localDir, SR_CONTRIB_OFFLINE: '1', SR_NO_SIBLING_NAMES: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
   }
 
   /** Run `python tools/contrib.py --json <args>` in a slot (or the main checkout) under the sandbox. */
-  private async sr(cwd: string, args: string[], opts: { timeoutMs: number; signal?: AbortSignal }): Promise<{ run: RunResult; json: any }> {
-    const base = [join('tools', 'contrib.py'), '--json', ...args];
+  async sr(cwd: string, args: string[], opts: { timeoutMs: number; signal?: AbortSignal }): Promise<{ run: RunResult; json: any }> {
+    const base = ['tools/contrib.py', '--json', ...args];
     let run: RunResult;
     if (this.cfg.sandbox.mode === 'docker') {
       const sb = this.cfg.sandbox;
@@ -81,49 +94,48 @@ export class SrRepo implements RepoAdapter {
         '-e', 'SR_LOCAL_DIR=/local', '-e', 'SR_CONTRIB_OFFLINE=1', '-e', 'SR_NO_SIBLING_NAMES=1',
         sb.image, 'python3', ...base,
       ];
-      run = await runBounded('docker', dockerArgs, { cwd, timeoutMs: opts.timeoutMs, signal: opts.signal, maxOutputBytes: 8 * 1024 * 1024 });
+      run = await this.host.run('docker', dockerArgs, { cwd, timeoutMs: opts.timeoutMs, signal: opts.signal, maxOutputBytes: 8 * 1024 * 1024 });
     } else {
-      run = await runBounded(this.cfg.python, base, { cwd, env: this.srEnv(), timeoutMs: opts.timeoutMs, signal: opts.signal, maxOutputBytes: 8 * 1024 * 1024 });
+      run = await this.host.run(this.cfg.python, base, { cwd, env: this.srEnv(), timeoutMs: opts.timeoutMs, signal: opts.signal, maxOutputBytes: 8 * 1024 * 1024 });
     }
-    let json: any = null;
-    try {
-      json = JSON.parse(run.stdout);
-    } catch {
-      const start = run.stdout.indexOf('{');
-      if (start >= 0) {
-        try {
-          json = JSON.parse(run.stdout.slice(start));
-        } catch {
-          /* leave null */
-        }
-      }
-    }
-    return { run, json };
+    return { run, json: parseJsonOutput(run.stdout) };
   }
 
   // ---------------------------------------------------------------- lifecycle
 
   async init() {
     const repo = this.cfg.repoPath;
-    if (!existsSync(join(repo, 'tools', 'contrib.py'))) throw new Error(`${repo} is not a skyrim_decomp checkout (tools/contrib.py missing)`);
-    if (!existsSync(this.cfg.localDir)) throw new Error(`SR_LOCAL_DIR ${this.cfg.localDir} does not exist; run ./sr setup first`);
+    if (!this.host.exists(this.p.join(repo, 'tools', 'contrib.py'))) throw new Error(`${repo} is not a skyrim_decomp checkout (tools/contrib.py missing)`);
+    if (!this.host.exists(this.cfg.localDir)) throw new Error(`SR_LOCAL_DIR ${this.cfg.localDir} does not exist; run ./sr setup first`);
     const rev = await this.git(repo, ['rev-parse', '--verify', `${this.cfg.baseRef}^{commit}`]);
-    if (rev.code !== 0) throw new Error(`cannot resolve base ref ${this.cfg.baseRef}: ${rev.stderr}`);
+    if (rev.code !== 0) throw new Error(`cannot resolve base ref ${this.cfg.baseRef}: ${rev.stderr.trim()}`);
     this.sha = rev.stdout.trim();
-    mkdirSync(this.cfg.worktreeRoot, { recursive: true });
+    const mk = await this.host.run('mkdir', ['-p', this.cfg.worktreeRoot], { cwd: repo, timeoutMs: 30_000 });
+    if (this.host.kind === 'local' && mk.code !== 0) mkdirSync(this.cfg.worktreeRoot, { recursive: true });
     await this.git(repo, ['worktree', 'prune']);
-    for (let i = 0; i < this.slotCount; i++) {
-      const p = this.wt(i);
-      if (!existsSync(join(p, '.git'))) {
-        const r = await this.git(repo, ['worktree', 'add', '--detach', p, this.sha], 600_000);
-        if (r.code !== 0) throw new Error(`worktree add failed for slot ${i}: ${r.stderr}`);
-      }
-      await this.reset(i);
+    for (let i = 0; i < this.slotCount; i++) await this.ensureWorktree(i);
+  }
+
+  private async ensureWorktree(slot: number) {
+    const p = this.wt(slot);
+    if (!this.host.exists(this.p.join(p, '.git'))) {
+      const r = await this.git(this.cfg.repoPath, ['worktree', 'add', '--detach', p, this.sha], 900_000);
+      if (r.code !== 0) throw new Error(`worktree add failed for ${p}: ${r.stderr.trim()}`);
     }
+    await this.reset(slot);
   }
 
   get baseSha() {
     return this.sha;
+  }
+
+  /** Remove this adapter's worktrees from the checkout (used by tooling/tests; never automatic). */
+  async removeWorktrees() {
+    for (let i = 0; i <= this.slotCount; i++) {
+      const p = this.wt(i);
+      if (this.host.exists(p)) await this.git(this.cfg.repoPath, ['worktree', 'remove', '--force', p], 300_000);
+    }
+    await this.git(this.cfg.repoPath, ['worktree', 'prune']);
   }
 
   async reset(slot: number) {
@@ -131,7 +143,7 @@ export class SrRepo implements RepoAdapter {
     const a = await this.git(p, ['reset', '--hard', '-q', this.sha], 300_000);
     const b = await this.git(p, ['clean', '-ffdxq'], 300_000);
     const s = await this.git(p, ['status', '--porcelain=v1', '--untracked-files=all']);
-    if (a.code !== 0 || b.code !== 0 || s.stdout.trim()) throw new InfraError(`slot ${slot} could not be restored to a clean state`);
+    if (a.code !== 0 || b.code !== 0 || s.stdout.trim()) throw new InfraError(`slot ${slot} could not be restored to a clean state: ${(a.stderr + b.stderr + s.stdout).slice(0, 300)}`);
   }
 
   // ---------------------------------------------------------------- discovery
@@ -140,8 +152,10 @@ export class SrRepo implements RepoAdapter {
     if (sel.source === 'synthetic') throw new Error('synthetic selection is only for the simulator');
     const count = sel.source === 'sr_next' ? sel.count : 100_000;
     const maxSize = sel.source === 'sr_next' ? sel.maxSize : 1_000_000;
-    const { run, json } = await this.sr(this.cfg.repoPath, ['next', '--count', String(count), '--max-size', String(maxSize)], { timeoutMs: 300_000 });
-    if (!json?.candidates) throw new InfraError(`sr next failed (exit ${run.code}): ${json?.error ?? run.stderr.slice(0, 500)}`);
+    // Discover from a pristine slot at the base revision, not the operator's own checkout/branch.
+    const cwd = this.host.exists(this.p.join(this.wt(0), '.git')) ? this.wt(0) : this.cfg.repoPath;
+    const { run, json } = await this.sr(cwd, ['next', '--count', String(count), '--max-size', String(maxSize)], { timeoutMs: 600_000 });
+    if (!json?.candidates) throw new InfraError(`sr next failed (exit ${run.code}): ${json?.error ?? (run.stderr || run.stdout).slice(0, 500)}`);
     const want = sel.source === 'rva_list' ? new Set(sel.rvas.map((r) => `0x${parseInt(r, 16).toString(16)}`)) : null;
     return (json.candidates as any[])
       .filter((c) => c.startable && c.unit && (!want || want.has(c.rva)))
@@ -156,16 +170,26 @@ export class SrRepo implements RepoAdapter {
     // claim/start write shared state under SR_LOCAL_DIR: serialise them across slots
     const started = await this.srMutex.run('sr-local', async () => {
       const claim = await this.sr(cwd, ['claim', ...rvas, '--offline-ok', '--model', opts.model, '--drafted-by', opts.draftedBy], { timeoutMs: 120_000, signal: opts.signal });
-      if (claim.run.code !== 0 && !String(claim.json?.error ?? '').includes('already')) {
-        throw new InfraError(`sr claim failed (exit ${claim.run.code}): ${claim.json?.error ?? claim.run.stderr.slice(0, 300)}`);
+      if (claim.run.code !== 0) {
+        throw new InfraError(`sr claim failed (exit ${claim.run.code}): ${claim.json?.error ?? (claim.run.stderr || claim.run.stdout).slice(0, 300)}`);
       }
       return this.sr(cwd, ['start', ...rvas, '--no-branch', '--drafted-by', opts.draftedBy, '--model', opts.model], { timeoutMs: 600_000, signal: opts.signal });
     });
     const j = started.json;
-    if (started.run.code !== 0 || !j?.task) throw new InfraError(`sr start failed (exit ${started.run.code}): ${j?.error ?? started.run.stderr.slice(0, 300)}`);
+    if (started.run.code !== 0 || !j?.task) throw new InfraError(`sr start failed (exit ${started.run.code}): ${j?.error ?? (started.run.stderr || started.run.stdout).slice(0, 300)}`);
     const unit = (j.unit as string[]).map((p) => p.replace(/\\/g, '/'));
     const toolingChanges = (await this.changedPaths(slot)).filter((p) => !unit.includes(p));
     return { srTaskId: j.task, allowedPaths: unit, packs: (j.packs as string[]) ?? [], toolingChanges };
+  }
+
+  /** Release local claims taken by `prepare` (operator tooling / cleanup). */
+  async release(rvas: string[], reason: string) {
+    const out: Array<{ rva: string; ok: boolean; error: string | null }> = [];
+    for (const rva of rvas) {
+      const r = await this.srMutex.run('sr-local', () => this.sr(this.wt(0), ['release', rva, '--reason', reason], { timeoutMs: 120_000 }));
+      out.push({ rva, ok: r.run.code === 0, error: r.json?.error ?? null });
+    }
+    return out;
   }
 
   async baseFile(path: string) {
@@ -176,22 +200,21 @@ export class SrRepo implements RepoAdapter {
     return v;
   }
 
-  private safePath(slot: number, rel: string): string {
-    const root = realpathSync(this.wt(slot));
-    const abs = resolve(root, rel);
-    const r = relative(root, abs);
-    if (r.startsWith('..') || isAbsolute(r)) throw new InfraError(`path ${rel} escapes the worktree`);
-    if (existsSync(abs)) {
-      const real = realpathSync(abs);
-      const rr = relative(root, real);
-      if (rr.startsWith('..') || isAbsolute(rr)) throw new InfraError(`path ${rel} resolves outside the worktree (symlink)`);
-    }
+  private async safePath(slot: number, rel: string): Promise<string> {
+    const root = this.wt(slot);
+    const abs = this.p.resolve(root, rel);
+    const r = this.p.relative(root, abs);
+    if (r.startsWith('..') || this.p.isAbsolute(r)) throw new InfraError(`path ${rel} escapes the worktree`);
+    const [realRoot, realAbs] = await Promise.all([this.host.realpath(root), this.host.realpath(abs)]);
+    const rr = this.p.relative(realRoot, realAbs);
+    if (rr.startsWith('..') || this.p.isAbsolute(rr)) throw new InfraError(`path ${rel} resolves outside the worktree (symlink)`);
     return abs;
   }
 
   async readFile(slot: number, path: string) {
     try {
-      return readFileSync(this.safePath(slot, path), 'utf8');
+      const abs = this.p.resolve(this.wt(slot), path);
+      return readFileSync(this.host.fsPath(abs), 'utf8');
     } catch {
       return null;
     }
@@ -199,15 +222,15 @@ export class SrRepo implements RepoAdapter {
 
   async writeFiles(slot: number, files: Array<{ path: string; content: string }>) {
     for (const f of files) {
-      const abs = this.safePath(slot, f.path);
-      mkdirSync(dirname(abs), { recursive: true });
+      const abs = this.host.fsPath(await this.safePath(slot, f.path));
+      mkdirSync(fsDirname(abs), { recursive: true });
       writeFileSync(abs, f.content, 'utf8');
     }
   }
 
   async changedPaths(slot: number) {
     const r = await this.git(this.wt(slot), ['status', '--porcelain=v1', '-z', '--untracked-files=all', '--ignored=matching']);
-    if (r.code !== 0) throw new InfraError(`git status failed in slot ${slot}`);
+    if (r.code !== 0) throw new InfraError(`git status failed in slot ${slot}: ${r.stderr.slice(0, 200)}`);
     const out: string[] = [];
     const parts = r.stdout.split('\0').filter(Boolean);
     for (let i = 0; i < parts.length; i++) {
@@ -221,8 +244,8 @@ export class SrRepo implements RepoAdapter {
 
   async protectedDigest(slot: number) {
     const r = await this.git(this.wt(slot), ['status', '--porcelain=v1', '--untracked-files=all', '--ignored=matching', '--', ...PROTECTED_PATHS]);
-    const h = createHash('sha256').update(this.sha).update(r.stdout);
-    return h.digest('hex');
+    const filtered = r.stdout.split('\n').filter((l) => !/(^|\/)__pycache__\/|\.pyc$/.test(l)).join('\n');
+    return createHash('sha256').update(this.sha).update(filtered).digest('hex');
   }
 
   async compare(slot: number, task: TaskRow, prep: PreparedTask, opts: { signal: AbortSignal; timeoutMs: number }): Promise<CompareOutcome> {
@@ -230,12 +253,11 @@ export class SrRepo implements RepoAdapter {
     const { run, json } = await this.sr(this.wt(slot), ['compare', prep.srTaskId ?? ''], opts);
     const infraCodes = new Set(this.cfg.infraExitCodes ?? [2, 5, 7, 8]);
     const base = { durationMs: Date.now() - t };
-    if (run.timedOut) return { ...base, completed: false, allPass: false, compileError: false, functions: [], infraError: `compare timed out after ${opts.timeoutMs} ms` };
-    if (run.aborted) return { ...base, completed: false, allPass: false, compileError: false, functions: [], infraError: 'compare aborted' };
-    if (run.truncated) return { ...base, completed: false, allPass: false, compileError: false, functions: [], infraError: 'compare output exceeded the cap' };
-    if (!json || infraCodes.has(run.code ?? -1)) {
-      return { ...base, completed: false, allPass: false, compileError: false, functions: [], infraError: `compare infra failure (exit ${run.code}): ${json?.error ?? run.stderr.slice(0, 300)}` };
-    }
+    const fail = (infraError: string): CompareOutcome => ({ ...base, completed: false, allPass: false, compileError: false, functions: [], infraError });
+    if (run.timedOut || run.code === 124) return fail(`compare timed out after ${opts.timeoutMs} ms`);
+    if (run.aborted) return fail('compare aborted');
+    if (run.truncated) return fail('compare output exceeded the cap');
+    if (!json || infraCodes.has(run.code ?? -1)) return fail(`compare infra failure (exit ${run.code}): ${json?.error ?? (run.stderr || run.stdout).slice(0, 300)}`);
     if (run.code === 3 || run.code === 4) return { ...base, completed: true, allPass: false, compileError: true, functions: [], infraError: null };
     const functions: CompareFunctionResult[] = ((json.functions as any[]) ?? []).map((f) => ({
       rva: f.rva, name: f.name ?? null, result: f.result ?? 'fail', reason: f.reason ?? null, hint: f.hint || null,
@@ -249,9 +271,9 @@ export class SrRepo implements RepoAdapter {
 
   async preflight(slot: number, _task: TaskRow, prep: PreparedTask, opts: { signal: AbortSignal; timeoutMs: number }): Promise<PreflightOutcome> {
     const { run, json } = await this.sr(this.wt(slot), ['preflight', prep.srTaskId ?? ''], opts);
-    if (run.timedOut || !json) return { completed: false, ok: false, problems: [], infraError: `preflight failed to run (exit ${run.code})` };
+    if (run.timedOut || run.code === 124 || !json) return { completed: false, ok: false, problems: [], infraError: `preflight failed to run (exit ${run.code}): ${(run.stderr || run.stdout).slice(0, 200)}` };
     if (run.code === 0) return { completed: true, ok: true, problems: [], infraError: null };
-    const problems = [...((json.errors as string[]) ?? []), ...(json.error ? [String(json.error)] : [])].map((s) => s.slice(0, 400));
+    const problems = [...((json.errors as string[]) ?? []), ...(json.error ? [String(json.error)] : [])].map((s) => String(s).slice(0, 400));
     return { completed: true, ok: false, problems: problems.length ? problems : [`preflight exit ${run.code}`], infraError: null };
   }
 
@@ -262,7 +284,7 @@ export class SrRepo implements RepoAdapter {
     await this.git(p, ['add', '--intent-to-add', '--all']);
     const diff = await this.git(p, ['diff', '--no-renames', '--no-color', '-U0', '--diff-algorithm=minimal', this.sha, '--']);
     if (diff.code !== 0) return null;
-    const r =await runBounded(this.cfg.python, [join('tools', 'leakgrep.py'), '--diff', '-'], { cwd: p, stdin: diff.stdout, timeoutMs: 60_000, signal: opts.signal, env: this.srEnv() });
+    const r = await this.host.run(this.cfg.python, ['tools/leakgrep.py', '--diff', '-'], { cwd: p, stdin: diff.stdout, timeoutMs: 60_000, signal: opts.signal, env: this.srEnv() });
     if (r.code !== 0 && r.code !== 1) return null; // script unavailable: the TS port already ran
     return r.stdout
       .split('\n')
@@ -276,11 +298,11 @@ export class SrRepo implements RepoAdapter {
   async stageBatch(input: StageBatchInput): Promise<StageBatchResult> {
     const slot = this.slotCount; // dedicated staging worktree after the worker slots
     const p = this.wt(slot);
-    if (!existsSync(join(p, '.git'))) {
-      const r = await this.git(this.cfg.repoPath, ['worktree', 'add', '--detach', p, this.sha], 600_000);
-      if (r.code !== 0) return { branch: null, verified: false, problems: [`staging worktree: ${r.stderr.slice(0, 200)}`] };
+    try {
+      await this.ensureWorktree(slot);
+    } catch (e) {
+      return { branch: null, verified: false, problems: [`staging worktree: ${(e as Error).message.slice(0, 200)}`] };
     }
-    await this.reset(slot);
     await this.writeFiles(slot, input.files);
     const problems: string[] = [];
     const ac = new AbortController();
@@ -290,7 +312,7 @@ export class SrRepo implements RepoAdapter {
         continue;
       }
       const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: ac.signal, timeoutMs: 600_000 });
-      if (!r.allPass) problems.push(`${t.id}: ${r.infraError ?? r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') ?? 'compile error'}`);
+      if (!r.allPass) problems.push(`${t.id}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
     }
     const branch = `decomp/${input.runId}-b${input.seq}`;
     const co = await this.git(p, ['checkout', '-q', '-B', branch]);
@@ -305,12 +327,20 @@ export class SrRepo implements RepoAdapter {
   async docs(): Promise<DocSection[]> {
     const out: DocSection[] = [];
     for (const [id, rel, cap] of DOCS) {
-      const p = join(this.cfg.repoPath, rel);
-      if (!existsSync(p)) continue;
-      const text = readFileSync(p, 'utf8');
-      out.push({ id, title: rel, source: `${rel}@${this.sha.slice(0, 12)}`, content: text.length > cap ? `${text.slice(0, cap)}\n[truncated: ${text.length - cap} more chars in ${rel}]` : text });
+      const text = await this.readHostFile(this.p.join(this.cfg.repoPath, rel));
+      if (text === null) continue;
+      const shown = (await this.baseFile(rel)) ?? text; // prefer the pinned base revision's copy
+      out.push({ id, title: rel, source: `${rel}@${this.sha.slice(0, 12)}`, content: shown.length > cap ? `${shown.slice(0, cap)}\n[truncated: ${shown.length - cap} more chars in ${rel}]` : shown });
     }
     return out;
+  }
+
+  private async readHostFile(p: string) {
+    try {
+      return readFileSync(this.host.fsPath(p), 'utf8');
+    } catch {
+      return null;
+    }
   }
 
   async includedHeaders(slot: number, unitFiles: string[]): Promise<DocSection[]> {
@@ -320,7 +350,7 @@ export class SrRepo implements RepoAdapter {
       const src = (await this.readFile(slot, uf)) ?? '';
       for (const m of src.matchAll(/^\s*#\s*include\s*"([^"]+\.h)"/gm)) {
         const inc = m[1]!;
-        const candidates = [join('reconstruction', inc), join(dirname(uf), inc)].map((p) => p.replace(/\\/g, '/'));
+        const candidates = [`reconstruction/${inc}`, this.p.join(this.p.dirname(uf), inc)].map((x) => this.p.normalize(x));
         for (const c of candidates) {
           if (seen.has(c) || out.length >= 8) continue;
           const text = await this.readFile(slot, c);
@@ -337,12 +367,25 @@ export class SrRepo implements RepoAdapter {
   async readPack(pack: string): Promise<string | null> {
     const parts: string[] = [];
     for (const f of ['bytes.txt', 'decomp.c']) {
-      const p = join(pack, f);
-      if (existsSync(p)) {
-        const t = readFileSync(p, 'utf8');
-        parts.push(`--- ${f} ---\n${t.length > 40_000 ? `${t.slice(0, 40_000)}\n[truncated ${t.length - 40_000} chars]` : t}`);
-      }
+      const t = await this.readHostFile(this.p.join(pack, f));
+      if (t !== null) parts.push(`--- ${f} ---\n${t.length > 40_000 ? `${t.slice(0, 40_000)}\n[truncated ${t.length - 40_000} chars]` : t}`);
     }
     return parts.length ? parts.join('\n') : null;
+  }
+}
+
+function parseJsonOutput(stdout: string): any {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    const start = stdout.indexOf('{');
+    if (start >= 0) {
+      try {
+        return JSON.parse(stdout.slice(start));
+      } catch {
+        return null;
+      }
+    }
+    return null;
   }
 }

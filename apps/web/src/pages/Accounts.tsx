@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { Account } from '@decomp/core';
 import { api, stream, type AccountView } from '../api';
+import { ConfirmButton } from '../components/ConfirmButton';
 import { AccountsTable } from './Runs';
 
 const TEMPLATE: Record<string, unknown> = {
@@ -78,7 +79,7 @@ export default function Accounts() {
                   <button onClick={() => edit(a)}>Edit</button>
                   <button onClick={async () => { await api.accountAction(a.id, 'enable'); load(); }}>Reset health</button>
                   <button onClick={async () => { await api.accountAction(a.id, 'disable'); load(); }}>Disable</button>
-                  <button className="danger" onClick={async () => { if (confirm(`Delete ${a.id}?`)) { await api.deleteAccount(a.id); load(); } }}>Delete</button>
+                  <ConfirmButton onConfirm={async () => { await api.deleteAccount(a.id); load(); }} confirmLabel={`Delete ${a.id}?`}>Delete</ConfirmButton>
                 </td>
               </tr>
             ))}

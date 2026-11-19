@@ -18,6 +18,10 @@ export const ServerConfig = z.object({
       localDir: z.string(),
       python: z.string().default(process.platform === 'win32' ? 'python' : 'python3'),
       slots: z.number().int().min(1).max(128).default(8),
+      /** Where the checkout lives. With `wsl`, path/worktreeRoot/localDir are Linux paths. */
+      host: z
+        .discriminatedUnion('kind', [z.object({ kind: z.literal('local') }), z.object({ kind: z.literal('wsl'), distro: z.string().default('Ubuntu') })])
+        .default({ kind: 'local' }),
       sandbox: z
         .discriminatedUnion('mode', [
           z.object({ mode: z.literal('local') }),

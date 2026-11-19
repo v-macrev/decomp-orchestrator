@@ -10,7 +10,7 @@ import { seedRepoLessons } from './orchestrator/lessons.js';
 import { AccountPool } from './pool/scheduler.js';
 import { ProviderRegistry } from './providers/registry.js';
 import { SimRepo } from './repo/simRepo.js';
-import { SrRepo } from './repo/srRepo.js';
+import { SrRepo, type SrRepoConfig } from './repo/srRepo.js';
 import type { RepoAdapter } from './repo/types.js';
 import { EventBus } from './telemetry/events.js';
 
@@ -37,11 +37,7 @@ export async function createApp(cfg: ServerConfig, opts: { quiet?: boolean } = {
   let repo: RepoAdapter;
   let sim: SimRepo | null = null;
   if (cfg.mode === 'repo') {
-    const r = cfg.repo!;
-    repo = new SrRepo({
-      repoPath: fromRoot(r.path), baseRef: r.baseRef, worktreeRoot: fromRoot(r.worktreeRoot), localDir: fromRoot(r.localDir),
-      python: r.python, slots: r.slots, sandbox: r.sandbox,
-    });
+    repo = new SrRepo(srRepoConfig(cfg));
   } else {
     sim = new SimRepo({ slots: cfg.sim.slots, compareLatencyMs: cfg.sim.compareLatencyMs, infraRate: cfg.sim.infraRate });
     repo = sim;
@@ -66,6 +62,17 @@ export async function createApp(cfg: ServerConfig, opts: { quiet?: boolean } = {
       pool.close();
       store.db.close();
     },
+  };
+}
+
+export function srRepoConfig(cfg: ServerConfig): SrRepoConfig {
+  const r = cfg.repo!;
+  const wsl = r.host.kind === 'wsl';
+  // WSL paths are Linux paths inside the distribution: never resolve them against this checkout.
+  const at = (p: string) => (wsl ? p : fromRoot(p));
+  return {
+    repoPath: at(r.path), baseRef: r.baseRef, worktreeRoot: at(r.worktreeRoot), localDir: at(r.localDir),
+    python: wsl && r.python === 'python' ? 'python3' : r.python, slots: r.slots, host: r.host, sandbox: r.sandbox,
   };
 }
 

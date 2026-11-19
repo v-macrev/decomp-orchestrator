@@ -177,6 +177,9 @@ export const FlowEdge = z.object({
   source: z.string(),
   target: z.string(),
   kind: EdgeKind,
+  /** Canvas only: which connection point (l/t/r/b) the edge leaves from and arrives at. */
+  sourceHandle: z.string().max(16).nullable().optional(),
+  targetHandle: z.string().max(16).nullable().optional(),
 });
 export type FlowEdge = z.infer<typeof FlowEdge>;
 
