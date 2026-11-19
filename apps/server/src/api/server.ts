@@ -139,11 +139,15 @@ export async function buildServer(app: App) {
     return r ? { ...r, metrics: runMetrics(store, engine, pool, r.id) } : notFound(reply, 'run');
   });
   f.get('/api/runs/:id/metrics', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => runMetrics(store, engine, pool, req.params.id) ?? notFound(reply, 'run'));
-  f.post('/api/runs/:id/:action', async (req: FastifyRequest<{ Params: { id: string; action: string }; Body: { immediate?: boolean } | undefined }>, reply) => {
+  f.post('/api/runs/:id/:action', async (req: FastifyRequest<{ Params: { id: string; action: string }; Body: { immediate?: boolean; budgetUsd?: number | null } | undefined }>, reply) => {
     const { id, action } = req.params;
     if (!store.getRun(id)) return notFound(reply, 'run');
     if (action === 'pause') return { ok: engine.pause(id, !!req.body?.immediate) };
-    if (action === 'resume') return { ok: await engine.resume(id) };
+    if (action === 'resume') {
+      const { budgetUsd } = z.object({ budgetUsd: z.number().positive().nullable().optional() }).parse(req.body ?? {});
+      const r = await engine.resume(id, budgetUsd === undefined ? {} : { budgetUsd });
+      return r.ok ? r : reply.code(409).send({ error: r.reason, ok: false });
+    }
     if (action === 'cancel') return { ok: await engine.cancel(id) };
     return notFound(reply, 'action');
   });

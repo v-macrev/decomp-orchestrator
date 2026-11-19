@@ -251,7 +251,33 @@ export class RunEngine {
     return true;
   }
 
-  async resume(runId: string) {
+  /**
+   * Resume a paused run. `budgetUsd` replaces the run's budget first (null removes it). Without a new
+   * budget, a run whose spend has reached its cap is not resumed: it would only pause again at once.
+   */
+  async resume(runId: string, opts: { budgetUsd?: number | null } = {}): Promise<{ ok: boolean; reason?: string }> {
+    const row = this.deps.store.getRun(runId);
+    if (!row) return { ok: false, reason: 'run not found' };
+    if (opts.budgetUsd !== undefined) {
+      const before = row.config.budgetUsd;
+      if (opts.budgetUsd !== null && opts.budgetUsd <= row.costUsd) {
+        return { ok: false, reason: `a new budget must exceed the $${row.costUsd.toFixed(2)} already spent` };
+      }
+      this.deps.store.setRunBudget(runId, opts.budgetUsd);
+      const live = this.active.get(runId);
+      if (live) {
+        if (opts.budgetUsd === null) delete live.row.config.budgetUsd;
+        else live.row.config.budgetUsd = opts.budgetUsd;
+      }
+      this.deps.events.emit('run.budget', `run budget ${before === undefined ? 'none' : `$${before}`} → ${opts.budgetUsd === null ? 'none' : `$${opts.budgetUsd}`}`, { runId, data: { before: before ?? null, after: opts.budgetUsd } });
+    } else if (budgetReached(row)) {
+      return { ok: false, reason: `run budget $${row.config.budgetUsd} reached ($${row.costUsd.toFixed(2)} spent): resume with a higher budgetUsd, or budgetUsd: null to remove the cap` };
+    }
+    await this.resumeRun(runId);
+    return { ok: true };
+  }
+
+  private async resumeRun(runId: string) {
     const run = this.active.get(runId);
     if (!run) {
       this.deps.store.setRunStatus(runId, 'running', ['paused']);
@@ -916,6 +942,11 @@ function defaultReviewer(deps: EngineDeps, plan: FlowPlan): Reviewer | null {
 /** Header, lint, scope-line and output-contract findings only, and no comparator failure. */
 const FORMAT_CODES = /^(CONV_|PREFLIGHT_|SCOPE_LINE_TOO_LONG|OUTPUT_|LEAK_INCLUDE_OUTSIDE_ROOTS)/;
 const FORMAT_RETRIES = 3;
+/** True when a run has a budget and its spend has reached it (the engine pauses such a run). */
+export function budgetReached(row: { costUsd: number; config: { budgetUsd?: number } }): boolean {
+  return row.config.budgetUsd !== undefined && row.costUsd >= row.config.budgetUsd;
+}
+
 export function isFormatOnly(v: Verdict): boolean {
   const blocks = v.findings.filter((f) => f.severity === 'block');
   return blocks.length > 0 && blocks.every((f) => FORMAT_CODES.test(f.code)) && !(v.compare ?? []).some((c) => c.result !== 'pass');

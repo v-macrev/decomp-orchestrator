@@ -228,10 +228,11 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
           <h2 className="grow" style={{ margin: 0 }}>{m.run.name} <span className={`chip ${status}`}>{status}</span></h2>
           <button onClick={() => act('pause')} disabled={status !== 'running'}>Pause</button>
           <button onClick={() => act('pause', { immediate: true })} disabled={status !== 'running'} title="Abort in-flight attempts (not counted against tasks)">Pause now</button>
-          <button onClick={() => act('resume')} disabled={status !== 'paused'}>Resume</button>
+          <button onClick={() => act('resume')} disabled={status !== 'paused' || (m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd)} title={m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd ? 'Budget reached: set a new budget below to resume' : undefined}>Resume</button>
           <ConfirmButton onConfirm={() => act('cancel')} disabled={['completed', 'cancelled', 'failed'].includes(status)} confirmLabel="Cancel run? Open tasks stop">Cancel</ConfirmButton>
         </div>
         {m.run.error && <div className="lvl-error">{m.run.error}</div>}
+        {status === 'paused' && m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd && <BudgetPausedBanner m={m} onChange={onChange} />}
         <StackBar counts={f} total={m.totalFunctions} />
         <div className="kpis" style={{ marginTop: 12 }}>
           <Kpi l="Functions done" v={`${done}/${m.totalFunctions}`} />
@@ -445,6 +446,26 @@ function RoutingPanel({ r, knowledge }: { r: RoutingMetrics; knowledge: Metrics[
 }
 
 /** Per-worker quota progress against the hard per-run function cap, capacity plan and stalls. */
+/** A run paused on its budget can only continue with a new cap: plain Resume would pause again at once. */
+function BudgetPausedBanner({ m, onChange }: { m: Metrics; onChange: () => void }) {
+  const spent = m.run.costUsd;
+  const [next, setNext] = useState(() => Math.ceil(Math.max(spent * 1.5, (m.run.budgetUsd ?? 0) + 1)));
+  const [err, setErr] = useState<string | null>(null);
+  const go = (budgetUsd: number | null) => {
+    setErr(null);
+    api.runAction(m.run.id, 'resume', { budgetUsd }).then(onChange, (e: Error) => setErr(e.message));
+  };
+  return (
+    <div className="lvl-warn" style={{ margin: '8px 0', fontSize: 13 }}>
+      Paused: budget reached (${spent.toFixed(2)} spent of ${m.run.budgetUsd}). Resuming needs a higher budget.{' '}
+      <label className="inline" style={{ display: 'inline-flex' }}>new budget $<input type="number" min={Math.floor(spent) + 1} step={1} value={next} onChange={(e) => setNext(Number(e.target.value))} style={{ width: 70 }} /></label>{' '}
+      <button className="primary" disabled={!(next > spent)} onClick={() => go(next)}>Raise budget &amp; resume</button>{' '}
+      <ConfirmButton onConfirm={() => go(null)} confirmLabel="Resume with no budget cap?">Remove cap &amp; resume</ConfirmButton>
+      {err && <div className="lvl-error">{err}</div>}
+    </div>
+  );
+}
+
 function WorkerQuotaPanel({ m, onChange }: { m: Metrics; onChange: () => void }) {
   const w = m.workers;
   const cap = m.capacity;

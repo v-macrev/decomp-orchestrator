@@ -194,6 +194,37 @@ describe('RunEngine', () => {
     s.engine.close();
   }, 60_000);
 
+  it('a run paused on its budget resumes only with a new budget', async () => {
+    const s = setup(tmpDb());
+    const run = s.engine.createRun('budget', { flowId: 'default', selection: { source: 'synthetic', count: 200, seed: 5 }, budgetUsd: 0.000001 }, flow());
+    await s.engine.start(run.id);
+    for (let i = 0; i < 100 && s.store.getRun(run.id)!.status !== 'paused'; i++) await new Promise((r) => setTimeout(r, 50));
+    expect(s.store.getRun(run.id)!.status).toBe('paused');
+    const spent = s.store.getRun(run.id)!.costUsd;
+    expect(spent).toBeGreaterThan(0);
+
+    // Plain resume would only pause again: refused, with the reason.
+    const plain = await s.engine.resume(run.id);
+    expect(plain.ok).toBe(false);
+    expect(plain.reason).toMatch(/budget .* reached/);
+    // A new budget must exceed what is already spent.
+    expect((await s.engine.resume(run.id, { budgetUsd: spent / 2 })).ok).toBe(false);
+    expect(s.store.getRun(run.id)!.status).toBe('paused');
+
+    expect((await s.engine.resume(run.id, { budgetUsd: 1_000 })).ok).toBe(true);
+    expect(s.store.getRun(run.id)!.config.budgetUsd).toBe(1_000);
+    expect(s.store.getRun(run.id)!.status).toBe('running');
+    await new Promise((r) => setTimeout(r, 100));
+    expect(s.store.getRun(run.id)!.status).toBe('running'); // stays running under the new cap
+
+    s.engine.pause(run.id, true);
+    expect((await s.engine.resume(run.id, { budgetUsd: null })).ok).toBe(true);
+    expect(s.store.getRun(run.id)!.config.budgetUsd).toBeUndefined();
+    await s.engine.cancel(run.id);
+    s.pool.close();
+    s.engine.close();
+  }, 30_000);
+
   it('pauses, resumes and cancels', async () => {
     const s = setup(tmpDb());
     const run = s.engine.createRun('ctl', { flowId: 'default', selection: { source: 'synthetic', count: 200, seed: 4 } }, flow());

@@ -444,6 +444,14 @@ export class Store {
         worker_id: string; node_id: string; tier: number; capability: string | null; max_functions: number; assigned_function_count: number; assigned_tasks: number; passed_functions: number; attempts: number;
       }>;
   }
+  /** Change a run's USD budget (null removes the cap): the operator's way past a budget pause. */
+  setRunBudget(runId: string, budgetUsd: number | null): boolean {
+    const sql = budgetUsd === null
+      ? 'UPDATE runs SET config_json = json_remove(config_json, \'$.budgetUsd\'), updated_at = @now WHERE id = @id'
+      : 'UPDATE runs SET config_json = json_set(config_json, \'$.budgetUsd\', @b), updated_at = @now WHERE id = @id';
+    return this.db.prepare(sql).run({ id: runId, now: Date.now(), ...(budgetUsd === null ? {} : { b: budgetUsd }) }).changes > 0;
+  }
+
   /** Raise (never lower) the per-worker cap of a run: the operator's way out of a capacity stall. */
   raiseWorkerCap(runId: string, max: number): boolean {
     const run = this.getRun(runId);
