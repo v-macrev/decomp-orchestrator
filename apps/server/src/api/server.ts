@@ -13,6 +13,7 @@ import type { App } from '../app.js';
 import { fromRoot } from '../config.js';
 import { ingestGithubReviews, seedRepoLessons } from '../orchestrator/lessons.js';
 import { runMetrics } from '../telemetry/metrics.js';
+import { flowAssignments } from '../pool/assignments.js';
 
 const CreateRun = z.object({ name: z.string().min(1).max(120), flowId: z.string(), config: z.record(z.string(), z.unknown()) });
 
@@ -70,6 +71,14 @@ export async function buildServer(app: App) {
   f.delete('/api/flows/:id', async (req: FastifyRequest<{ Params: { id: string } }>) => {
     store.deleteFlow(req.params.id);
     return { ok: true };
+  });
+  // Which account·model serves each node of a flow, by the scheduler's own matching. `accounts` in the
+  // body resolves against unsaved drafts (the Accounts tab's assignment grid) instead of the saved pool.
+  f.post('/api/flows/:id/assignments', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const flow = store.getFlow(req.params.id);
+    if (!flow) return notFound(reply, 'flow');
+    const body = z.object({ accounts: z.array(Account).optional() }).parse(req.body ?? {});
+    return flowAssignments(flow, body.accounts ?? store.listAccounts());
   });
   f.post('/api/flows/validate', async (req) => {
     const flow = Flow.parse(req.body);

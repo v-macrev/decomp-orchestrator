@@ -113,3 +113,19 @@ tr.click:hover td { background: var(--panel-2); cursor: pointer; }
 .edge-rule { font-size: 10px; font-weight: 700; padding: 1px 6px; border-radius: 999px; background: var(--panel); border: 1px solid var(--border); color: var(--text); pointer-events: all; }
 .toggle-row { display: flex; gap: 6px; flex-wrap: wrap; }
 .toggle-row button.on { border-color: var(--accent); color: var(--accent); }
+
+/* Accounts: model assignment grid and account form */
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; vertical-align: middle; margin: 0 2px; }
+.dot.on { background: var(--ok); }
+.dot.off { background: transparent; border: 2px solid var(--warn); width: 6px; height: 6px; }
+.dot.fb { background: var(--muted); }
+button.tiny { padding: 0 6px; font-size: 11px; line-height: 18px; }
+table.assign th { text-transform: none; letter-spacing: 0; font-size: 12px; vertical-align: bottom; min-width: 110px; }
+table.assign th:first-child { min-width: 200px; }
+table.assign tr.acct td { background: var(--panel-2); padding-top: 8px; }
+table.assign tfoot td { border-bottom: none; }
+table.assign input[type=checkbox], table.models input[type=checkbox] { margin: 0; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; align-items: start; }
+.form-grid .wide { grid-column: 1 / -1; }
+.form-grid .hint { font-size: 11px; }
+table.models td { vertical-align: middle; }

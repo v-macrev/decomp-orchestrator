@@ -78,6 +78,39 @@ const DEFAULTS: SchedulerOptions = {
 
 export class NoEligibleAccountError extends Error {}
 
+/**
+ * The account·model pairs a binding resolves to for a role (pure; ignores health). One model per
+ * account: the first that matches. With a capability, models declaring it win; when no account in the
+ * binding declares it, plain role matching is used (`fallback`), so pools without capability
+ * metadata keep working.
+ */
+export function resolveBinding(accounts: Account[], binding: PoolBinding, role: Role): { pairs: Array<{ account: Account; model: ModelSpec }>; fallback: boolean } {
+  const out: Array<{ account: Account; model: ModelSpec }> = [];
+  const byCapability: Array<{ account: Account; model: ModelSpec }> = [];
+  for (const a of accounts) {
+    if (!bindingAdmits(binding, a)) continue;
+    if (binding.model) {
+      const model = a.models.find((m) => m.id === binding.model);
+      if (model) out.push({ account: a, model });
+      continue;
+    }
+    const model = a.models.find((m) => m.roles.includes(role));
+    if (model) out.push({ account: a, model });
+    if (binding.capability) {
+      const cap = a.models.find((m) => m.roles.includes(role) && m.capability === binding.capability);
+      if (cap) byCapability.push({ account: a, model: cap });
+    }
+  }
+  if (binding.capability && byCapability.length) return { pairs: byCapability, fallback: false };
+  return { pairs: out, fallback: !!binding.capability && !binding.model && out.length > 0 };
+}
+
+/** Whether a binding's strategy and tags let this account in at all (before any model matching). */
+export function bindingAdmits(binding: PoolBinding, a: Account): boolean {
+  if (binding.strategy === 'bound') return binding.accountIds.includes(a.id);
+  return !binding.tags.length || binding.tags.every((t) => a.tags.includes(t));
+}
+
 class AccountSlot {
   rpm: TokenBucket;
   itpm: TokenBucket;
@@ -173,26 +206,8 @@ export class AccountPool {
    * working (pre-Phase-2 configs).
    */
   resolve(binding: PoolBinding, role: Role): Array<{ slot: AccountSlot; model: ModelSpec }> {
-    const out: Array<{ slot: AccountSlot; model: ModelSpec }> = [];
-    const byCapability: Array<{ slot: AccountSlot; model: ModelSpec }> = [];
-    for (const slot of this.slots.values()) {
-      const a = slot.account;
-      if (binding.strategy === 'bound') {
-        if (!binding.accountIds.includes(a.id)) continue;
-      } else if (binding.tags.length && !binding.tags.every((t) => a.tags.includes(t))) continue;
-      if (binding.model) {
-        const model = a.models.find((m) => m.id === binding.model);
-        if (model) out.push({ slot, model });
-        continue;
-      }
-      const model = a.models.find((m) => m.roles.includes(role));
-      if (model) out.push({ slot, model });
-      if (binding.capability) {
-        const cap = a.models.find((m) => m.roles.includes(role) && m.capability === binding.capability);
-        if (cap) byCapability.push({ slot, model: cap });
-      }
-    }
-    return binding.capability && byCapability.length ? byCapability : out;
+    const slots = [...this.slots.values()];
+    return resolveBinding(slots.map((s) => s.account), binding, role).pairs.map((p) => ({ slot: slots.find((s) => s.account.id === p.account.id)!, model: p.model }));
   }
 
   private refresh(slot: AccountSlot) {

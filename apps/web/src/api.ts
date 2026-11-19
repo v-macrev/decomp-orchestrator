@@ -53,6 +53,21 @@ export interface AccountView {
   models: string[];
 }
 
+/** Which account·model serves each node of a flow (the scheduler's own matching). */
+export interface NodeAssignment {
+  nodeId: string;
+  label: string;
+  role: 'orchestrator' | 'worker' | 'gatekeeper';
+  capability: CapabilityTier | null;
+  instances: number;
+  binding: { strategy: 'bound' | 'pool'; tags: string[]; accountIds: string[]; model: string | null };
+  usesModel: boolean;
+  serves: Array<{ accountId: string; modelId: string; enabled: boolean }>;
+  fallback: boolean;
+  excluded: Array<{ accountId: string; reason: string }>;
+}
+export interface FlowAssignments { flowId: string; nodes: NodeAssignment[] }
+
 export interface FlowIssue {
   level: 'error' | 'warn';
   message: string;
@@ -199,6 +214,7 @@ export const api = {
   flows: () => req<Flow[]>('GET', '/api/flows'),
   saveFlow: (f: Flow) => req<{ flow: Flow; issues: FlowIssue[] }>('PUT', `/api/flows/${encodeURIComponent(f.id)}`, f),
   deleteFlow: (id: string) => req('DELETE', `/api/flows/${encodeURIComponent(id)}`),
+  flowAssignments: (flowId: string, accounts?: Account[]) => req<FlowAssignments>('POST', `/api/flows/${encodeURIComponent(flowId)}/assignments`, accounts ? { accounts } : {}),
   validateFlow: (f: Flow, capacity?: { batch: number; cap: number; stealing?: boolean }) =>
     req<{ issues: FlowIssue[]; plan: FlowPlanView | null; repoSlots: number; capacity: CapacityPlan | null }>('POST', `/api/flows/validate${capacity ? `?batch=${capacity.batch}&cap=${capacity.cap}&stealing=${capacity.stealing === false ? 0 : 1}` : ''}`, f),
   gatherPreview: (filter: Record<string, unknown>) => req<GatherPreview>('POST', '/api/gather/preview', filter),
