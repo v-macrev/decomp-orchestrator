@@ -5,9 +5,10 @@ import { api, getToken, setToken } from './api';
 import Accounts from './pages/Accounts';
 import FlowBuilder from './pages/FlowBuilder';
 import Runs from './pages/Runs';
+import Skills from './pages/Skills';
 import './styles.css';
 
-type Tab = 'runs' | 'flow' | 'accounts';
+type Tab = 'runs' | 'flow' | 'skills' | 'accounts';
 const TAB_KEY = 'decomp.tab';
 
 function App() {
@@ -35,7 +36,7 @@ function App() {
       <header className="topbar">
         <span className="brand">decomp·orchestrator</span>
         <nav className="tabs">
-          {([['runs', 'Runs & telemetry'], ['flow', 'Flow builder'], ['accounts', 'Accounts']] as Array<[Tab, string]>).map(([k, l]) => (
+          {([['runs', 'Runs & telemetry'], ['flow', 'Flow builder'], ['skills', 'Skills & optimization'], ['accounts', 'Accounts']] as Array<[Tab, string]>).map(([k, l]) => (
             <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>
           ))}
         </nav>
@@ -48,7 +49,7 @@ function App() {
           </span>
         )}
       </header>
-      {tab === 'flow' ? <FlowBuilder /> : tab === 'accounts' ? <Accounts /> : <Runs mode={health?.mode ?? 'sim'} />}
+      {tab === 'flow' ? <FlowBuilder /> : tab === 'accounts' ? <Accounts /> : tab === 'skills' ? <Skills /> : <Runs mode={health?.mode ?? 'sim'} />}
     </div>
   );
 }

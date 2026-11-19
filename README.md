@@ -31,6 +31,17 @@ Bulk LLM orchestration for function matching in
 
   On real packets this sends 67% fewer tokens than full context (−77% with the cached prefix).
   See [docs/PHASE2.md](docs/PHASE2.md).
+* **Self-improving skills.** A registry of compact matching recipes (`SKILL.md`, ≤ 600 tokens each)
+  with deterministic triggers: listing regexes, symbol prefixes, shape counts, verdict codes. They
+  are matched locally before each call, so no extra round-trips. A curator works between runs:
+  * bootstraps skills from the repo's cookbook and PR history;
+  * mines new ones from retry wins;
+  * patches skills that keep failing;
+  * promotes widely used skills into the cached prefix;
+  * compresses bloated ones and deprecates harmful ones.
+
+  Nothing reaches workers until it wins a shadow replay through the Gate Keeper. Skills never
+  change a running run's cached prefix. See [docs/PHASE3.md](docs/PHASE3.md).
 * **Visual flow builder.** A React Flow canvas for Orchestrator, Worker-tier and Gate Keeper
   topologies (fan-out, fan-in, retry loops, escalation, difficulty rules on dispatch edges), saved
   as named presets.
@@ -56,6 +67,7 @@ crash at 40% and resume):
 npm run sim -- --count 500 --crash-at 0.4 --speed 4
 npm test               # scheduler, gate-rule corpus (0 FP / 0 FN), gate pipeline, engine + crash recovery, routing, context
 npm run bench:context -w @decomp/server -- --count 500   # legacy vs budgeted vs routed: tokens and cost per matched function
+npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap → run → curate → run, skills off vs on per backlog
 ```
 
 ## Against a real skyrim_decomp checkout
@@ -79,7 +91,8 @@ to `127.0.0.1` by default.
 
 ```
 packages/core     Zod schemas (accounts, flows, tasks, attempts, verdicts) + flow validation/compilation
-apps/server       engine, queue, account pool, providers, Gate Keeper, repo adapters, API, simulator
+packages/skills   skill schemas, deterministic trigger matcher, SKILL.md format, compression, safety scans, cookbook parser
+apps/server       engine, queue, account pool, providers, Gate Keeper, repo adapters, skill registry/curator/shadow evaluator, API, simulator
 apps/web          React + React Flow UI
 docs/             architecture
 config/           example configs

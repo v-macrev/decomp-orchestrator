@@ -274,9 +274,14 @@ bottleneck is compare throughput, so set `gateConcurrency` to roughly physical c
   * Budgeted TaskContextBundle v2, prompt caching and token telemetry.
   * Run knowledge cache.
   * Details and measured results: **[PHASE2.md](PHASE2.md)**.
+* **Phase 3 (shipped):**
+  * Skill registry (`packages/skills` + SQLite + SKILL.md mirror) with deterministic triggers.
+  * Cache-safe injection: core skills frozen into the static prefix per run, dynamic skills after the shared breakpoint, prefix pre-warm.
+  * Skill curator: repo-history bootstrap, retry-win mining, failure-cluster patching, core promotion, compression, deprecation.
+  * Shadow evaluation through the real Gate Keeper before any skill or edit is used.
+  * Details and measured results: **[PHASE3.md](PHASE3.md)**.
 * **Next:**
   * LLM orchestrator planner (prioritisation across units, dependency ordering from call graphs).
-  * LLM lesson distillation from review prose.
   * Agentic workers in containers.
   * Postgres store for multi-host runs.
   * Run-level reports and cost forecasting.

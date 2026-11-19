@@ -72,10 +72,10 @@ tr.click:hover td { background: var(--panel-2); cursor: pointer; }
 .log div { padding: 2px 0; border-bottom: 1px dashed var(--border); white-space: pre-wrap; word-break: break-word; }
 .lvl-warn { color: var(--warn); } .lvl-error { color: var(--bad); }
 .drawer { position: fixed; top: 0; right: 0; bottom: 0; width: min(920px, 100vw); background: var(--panel); border-left: 1px solid var(--border); box-shadow: -10px 0 30px rgba(0,0,0,.35); overflow: auto; padding: 16px; z-index: 50; }
-.diff { font-family: var(--mono); font-size: 12px; border: 1px solid var(--border); border-radius: 6px; overflow: auto; max-height: 420px; }
-.diff div { padding: 0 8px; white-space: pre; }
-.diff .add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
-.diff .del { background: color-mix(in srgb, var(--bad) 14%, transparent); }
+.diffview { font-family: var(--mono); font-size: 12px; border: 1px solid var(--border); border-radius: 6px; overflow: auto; max-height: 420px; }
+.diffview div { padding: 0 8px; white-space: pre; }
+.diffview .add { background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.diffview .del { background: color-mix(in srgb, var(--bad) 14%, transparent); }
 .builder { display: grid; grid-template-columns: 190px 1fr 320px; height: calc(100vh - 49px); }
 .palette, .inspector { background: var(--panel); border-right: 1px solid var(--border); padding: 12px; overflow: auto; }
 .inspector { border-right: none; border-left: 1px solid var(--border); }

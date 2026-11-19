@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import type { Account, Attempt, CapabilityTier, Difficulty, Flow, KnowledgeEntry, Task, TaskContextBundle, TelemetryEvent, Verdict } from '@decomp/core';
+import type { RunSkillSnapshot, Skill, SkillEvalRun, SkillJob, SkillVersion } from '@decomp/skills';
 
 const TOKEN_KEY = 'decomp.apiToken';
 export const getToken = () => {
@@ -74,6 +75,7 @@ export interface Metrics {
   run: { id: string; name: string; status: string; costUsd: number; startedAt: number | null; finishedAt: number | null; budgetUsd: number | null; error: string | null; contextMode: 'budgeted' | 'legacy'; routingEnabled: boolean };
   routing: RoutingMetrics | null;
   knowledge: { byKind: Array<{ kind: string; n: number; uses: number }>; recent: Array<{ kind: string; symbol: string; sourceUnit: string; uses: number }> };
+  skills: RunSkillMetrics;
   engine: { active: boolean; paused: boolean; activeSlots: number; busySlots: number };
   tasks: Record<string, number>;
   functions: Record<string, number>;
@@ -89,6 +91,42 @@ export interface Metrics {
   throughput: { passedPerMin5: number; etaMinutes: number | null; series: Array<{ t: number; passed: number }> };
   byAccount: Array<{ account_id: string; model: string; attempts: number; completed: number; provider_errors: number; input_tokens: number; cached_input_tokens: number; cache_write_tokens: number; output_tokens: number; cache_hit_rate: number; cost_usd: number; avg_latency_ms: number }>;
   accounts: AccountView[];
+}
+
+export type RunSkillMetrics =
+  | { enabled: false }
+  | {
+      enabled: true;
+      core: Array<{ id: string; name: string; tokens: number }>;
+      coreTokens: number;
+      dynamic: number;
+      staticPrefixes: number;
+      bySkill: Array<{ skillId: string; name: string; tasks: number; injected: number; heldOut: number; tokens: number; passRate: number | null; heldOutPassRate: number | null }>;
+    };
+
+export interface SkillProposal {
+  skill: Skill;
+  version: SkillVersion;
+  current: SkillVersion | null;
+  evalRun: SkillEvalRun | null;
+  diff: { before: string | null; after: string | null };
+}
+
+export interface SkillsOverview {
+  skills: Skill[];
+  proposals: SkillProposal[];
+  jobs: SkillJob[];
+  evals: SkillEvalRun[];
+  curator: { busy: string | null; modelAvailable: boolean; engineIdle: boolean };
+  lastRun: null | { id: string; name: string; totalFunctions: number; skills: Array<{ skillId: string; name: string; status: string; tasks: number; functions: number; coverage: number; injected: number; injectedPass: number; heldOut: number; heldOutPass: number }> };
+  nextRun: RunSkillSnapshot;
+}
+
+export interface SkillDetail {
+  skill: Skill;
+  versions: Array<SkillVersion & { md: string | null }>;
+  evals: SkillEvalRun[];
+  lift: { lift: number | null; method: string; se: number | null; treated: number; control: number };
 }
 
 export interface RoutingMetrics {
@@ -149,6 +187,12 @@ export const api = {
   requeue: (id: string, tier = 0) => req('POST', `/api/tasks/${id}/requeue`, { tier }),
   events: (runId: string) => req<TelemetryEvent[]>('GET', `/api/events?runId=${runId}&limit=200&minLevel=info`),
   lessons: () => req<Array<{ id: string; source: string; topic: string; text: string; weight: number }>>('GET', '/api/lessons'),
+  skills: () => req<SkillsOverview>('GET', '/api/skills'),
+  skill: (id: string) => req<SkillDetail>('GET', `/api/skills/${encodeURIComponent(id)}`),
+  skillJob: (kind: 'bootstrap' | 'mine' | 'update' | 'optimize' | 'curate' | 'shadow', body: Record<string, unknown> = {}) => req<{ jobId: string }>('POST', `/api/skills/jobs/${kind}`, body),
+  skillVersionAction: (id: string, v: number, action: 'evaluate' | 'reject' | 'reopen') => req('POST', `/api/skills/${encodeURIComponent(id)}/versions/${v}/${action}`, {}),
+  skillStatus: (id: string, status: 'active' | 'deprecated' | 'promoted_to_core') => req('POST', `/api/skills/${encodeURIComponent(id)}/status`, { status }),
+  importSkills: () => req<{ created: string[]; proposed: string[]; problems: string[] }>('POST', '/api/skills/import', {}),
   refreshLessons: (github: boolean) => req<{ repoLessons: number; github: { codes: number; comments: number } | null }>('POST', '/api/lessons/refresh', { github }),
 };
 

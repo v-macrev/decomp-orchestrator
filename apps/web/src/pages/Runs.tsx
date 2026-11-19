@@ -3,7 +3,7 @@
 // throughput, token/cost tracking, per-function drill-down with diffs and Gate Keeper verdicts.
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { Flow, Task, TelemetryEvent } from '@decomp/core';
-import { api, stream, type AccountView, type Batch, type Metrics, type RoutingMetrics, type RunSummary } from '../api';
+import { api, stream, type AccountView, type Batch, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { TaskDrawer } from '../components/TaskDrawer';
 
@@ -70,6 +70,7 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
     name: `run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, flowId: 'default', source: mode === 'sim' ? 'synthetic' : 'sr_next',
     count: 500, maxSize: 64, rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: false, draftedBy: 'operator',
     routing: true, llmTieBreak: false, promoteAfter: 2, workStealing: true, contextMode: 'budgeted',
+    skills: true, autoCurate: false,
   });
   const [err, setErr] = useState('');
   useEffect(() => {
@@ -89,6 +90,7 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
         exposureConsent: f.exposureConsent, draftedBy: f.draftedBy, ...(f.budgetUsd ? { budgetUsd: Number(f.budgetUsd) } : {}),
         routing: { enabled: f.routing, llmTieBreak: f.llmTieBreak, promoteAfterFailures: f.promoteAfter, workStealing: f.workStealing },
         context: { mode: f.contextMode },
+        skills: { enabled: f.skills, autoCurate: f.autoCurate },
       });
       onCreated(r.id);
     } catch (x) {
@@ -124,6 +126,8 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
         <label className="inline" title="Borderline scores go to the Orchestrator's model (shape counts only, never listings)"><input type="checkbox" checked={f.llmTieBreak} disabled={!f.routing} onChange={(e) => set('llmTieBreak', e.target.checked)} />LLM tie-break</label>
         <label>Promote after<input type="number" min={1} max={20} value={f.promoteAfter} disabled={!f.routing} onChange={(e) => set('promoteAfter', Number(e.target.value))} style={{ width: 60 }} /></label>
         <label>Context<select value={f.contextMode} onChange={(e) => set('contextMode', e.target.value)}><option value="budgeted">budgeted bundles (v2)</option><option value="legacy">legacy bundles</option></select></label>
+        <label className="inline" title="Core skills in the cached prefix + up to 2 triggered skills per attempt (frozen for the run)"><input type="checkbox" checked={f.skills} disabled={f.contextMode !== 'budgeted'} onChange={(e) => set('skills', e.target.checked)} />Skills</label>
+        <label className="inline" title="When the run completes: mine, patch, optimize and shadow-evaluate skills automatically"><input type="checkbox" checked={f.autoCurate} disabled={!f.skills || f.contextMode !== 'budgeted'} onChange={(e) => set('autoCurate', e.target.checked)} />Curate after run</label>
       </div>
       <label>Drafted by (recorded on claims)<input value={f.draftedBy} onChange={(e) => set('draftedBy', e.target.value)} /></label>
       <label className="inline" style={{ alignItems: 'flex-start' }}>
@@ -204,6 +208,7 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
 
       <TokenPanel m={m} />
       {m.routing && <RoutingPanel r={m.routing} knowledge={m.knowledge} />}
+      {m.skills?.enabled && <RunSkillsPanel s={m.skills} />}
 
       <div className="grid2">
         <div className="panel">
@@ -386,6 +391,38 @@ function RoutingPanel({ r, knowledge }: { r: RoutingMetrics; knowledge: Metrics[
           Run knowledge: {knowledge.byKind.length ? knowledge.byKind.map((k) => `${k.n} ${k.kind.replace('_', ' ')} (${k.uses} uses)`).join(' · ') : 'none yet'}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The run's frozen skill view and what each dynamic skill did (vs. its held-out control group). */
+function RunSkillsPanel({ s }: { s: Extract<RunSkillMetrics, { enabled: true }> }) {
+  return (
+    <div className="panel">
+      <div className="row">
+        <h2 className="grow" style={{ margin: 0 }}>Skills in this run</h2>
+        <span className={`chip ${s.staticPrefixes <= 1 ? 'ok' : 'warn'}`} title="Distinct static prefixes sent in this run: 1 means skills never changed the shared cache prefix">
+          {s.staticPrefixes <= 1 ? 'static prefix frozen' : `${s.staticPrefixes} static prefixes`}
+        </span>
+      </div>
+      <div className="muted" style={{ fontSize: 12, margin: '6px 0' }}>
+        {s.core.length ? `${s.core.length} core skill(s) in the cached prefix (${s.coreTokens} tok): ${s.core.map((c) => c.name).join(' · ')}` : 'No core skills in the prefix.'} · {s.dynamic} dynamic skill(s) matched per attempt
+      </div>
+      {s.bySkill.length > 0 && (
+        <table>
+          <thead><tr><th>Skill</th><th>Packets</th><th>Injected</th><th>Held out</th><th>Pass rate (injected)</th><th>Pass rate (control)</th><th>Tokens</th></tr></thead>
+          <tbody>
+            {s.bySkill.map((r) => (
+              <tr key={r.skillId}>
+                <td>{r.name}</td><td>{r.tasks}</td><td>{r.injected}</td><td>{r.heldOut}</td>
+                <td className="mono">{r.passRate === null ? '—' : `${Math.round(r.passRate * 100)}%`}</td>
+                <td className="mono">{r.heldOutPassRate === null ? '—' : `${Math.round(r.heldOutPassRate * 100)}%`}</td>
+                <td className="mono">{fmt(r.tokens)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
