@@ -5,6 +5,7 @@
 //      guidance (comment text is untrusted — only codes matching a strict pattern are kept);
 //   3. this run's own most frequent Gate Keeper rejections ("common pitfalls").
 import { createHash } from 'node:crypto';
+import type { Verdict } from '@decomp/core';
 import type { Store } from '../db/store.js';
 import type { RepoAdapter } from '../repo/types.js';
 import { runBounded } from '../util/proc.js';
@@ -28,6 +29,44 @@ export const FINDING_GUIDANCE: Record<string, string> = {
   COMPARE_SYMBOL_MISSING: 'Define the function with exactly the declared signature so it binds to its symbol.',
   OUTPUT_PARSE: 'Return only the JSON object described in the output contract.',
 };
+
+/** Coarse failure category of a finding code (retry delta headline, skill triggers, failure clusters). */
+const CATEGORY: Array<[RegExp, string]> = [
+  [/^COMPARE_COMPILE_ERROR$/, 'COMPILE_ERROR'],
+  [/^(CHEAT|LEAK|SCOPE|INTEGRITY)_/, 'ANTI_CHEAT_VIOLATION'],
+  [/^COMPARE_/, 'BYTE_MISMATCH'],
+  [/^(PREFLIGHT|CONV)_/, 'PREFLIGHT_LINT'],
+  [/^(OUTPUT|PROVIDER)_/, 'OUTPUT_CONTRACT'],
+  [/^REVIEW_/, 'REVIEW_BLOCK'],
+];
+export function failureCategory(code: string): string {
+  return CATEGORY.find(([re]) => re.test(code))?.[1] ?? 'OTHER';
+}
+
+/**
+ * Everything a verdict says about why it failed, as trigger keys: categories, finding codes and the
+ * comparator's per-function reasons (code-mismatch, function-size-mismatch, symbol-missing, ...).
+ */
+export function failureSignals(v: Verdict | null | undefined): string[] {
+  if (!v || v.decision === 'pass') return [];
+  const blocks = v.findings.filter((f) => f.severity === 'block');
+  const out = new Set<string>();
+  for (const f of blocks) {
+    out.add(f.code);
+    out.add(failureCategory(f.code));
+  }
+  for (const c of v.compare ?? []) if (c.result !== 'pass' && c.reason) out.add(c.reason);
+  return [...out];
+}
+
+/** First blocking finding's (category, code): the key failure clusters are grouped by. */
+export function primaryFailure(v: Verdict): { category: string | null; code: string | null } {
+  if (v.decision === 'pass') return { category: null, code: null };
+  const f = v.findings.find((x) => x.severity === 'block');
+  const reason = (v.compare ?? []).find((c) => c.result !== 'pass')?.reason;
+  const code = f?.code === 'COMPARE_MISMATCH' && reason ? reason : f?.code ?? reason ?? null;
+  return { category: f ? failureCategory(f.code) : reason ? 'BYTE_MISMATCH' : null, code };
+}
 
 export async function seedRepoLessons(store: Store, repo: RepoAdapter) {
   const docs = await repo.docs();

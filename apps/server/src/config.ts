@@ -10,6 +10,10 @@ export const ServerConfig = z.object({
   /** sim: in-memory repository + mock providers allowed; repo: drive a real skyrim_decomp checkout. */
   mode: z.enum(['sim', 'repo']).default('sim'),
   accountsFile: z.string().default('config/accounts.json'),
+  /** SKILL.md mirror of the skill registry (one folder per skill, every version as vN.md). */
+  skillsDir: z.string().default('data/skills'),
+  /** Shadow evaluation size: benchmark packets per proposal and replays per packet and arm. */
+  skills: z.object({ shadowCases: z.number().int().min(3).max(40).default(12), shadowRepeats: z.number().int().min(1).max(4).default(1) }).default({ shadowCases: 12, shadowRepeats: 1 }),
   repo: z
     .object({
       path: z.string(),
@@ -35,8 +39,10 @@ export const ServerConfig = z.object({
       slots: z.number().int().min(1).max(256).default(16),
       compareLatencyMs: z.tuple([z.number(), z.number()]).default([150, 600]),
       infraRate: z.number().min(0).max(1).default(0.01),
+      /** Matching traps the skill loop can learn (see repo/simContent.ts). */
+      traps: z.boolean().default(true),
     })
-    .default({ slots: 16, compareLatencyMs: [150, 600], infraRate: 0.01 }),
+    .default({ slots: 16, compareLatencyMs: [150, 600], infraRate: 0.01, traps: true }),
   engine: z
     .object({
       leaseMs: z.number().int().optional(),

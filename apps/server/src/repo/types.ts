@@ -81,6 +81,10 @@ export interface RepoAdapter {
   analyze?(fns: FunctionTarget[], opts?: { packs?: string[] }): Promise<Map<string, FunctionFeatures>>;
   /** Budgeted listing for one pack: compact listing form, at most `maxChars` (exposure consent only). */
   readPackSlice?(pack: string, maxChars: number, opts?: { withDecompiler?: boolean }): Promise<{ text: string; rawChars: number } | null>;
+  /** A repository document in full (docs() caps each doc for prompts; skill bootstrap needs all of it). */
+  docFile?(rel: string): Promise<string | null>;
+  /** Local pack directory of a function, if one exists (skill matching for shadow-evaluation cases). */
+  packFor?(fn: FunctionTarget): Promise<string | null>;
   /** Give back local claims taken by `prepare` for packets that will not be submitted. */
   releaseClaims?(rvas: string[], reason: string): Promise<Array<{ rva: string; ok: boolean; error: string | null }>>;
   /**

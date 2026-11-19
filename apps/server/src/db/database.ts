@@ -185,6 +185,105 @@ const MIGRATIONS: string[] = [
   );
   CREATE INDEX knowledge_symbol ON run_knowledge_cache (run_id, symbol);
   `,
+  // v3 — Phase 3: skill registry, immutable skill versions, shadow evaluations, per-attempt skill
+  // injections (the telemetry behind lift, failure clusters and core promotion), curator jobs.
+  `
+  CREATE TABLE skills (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,                 -- candidate | active | promoted_to_core | deprecated
+    version INTEGER NOT NULL,             -- current version (candidates: their proposed v1)
+    origin TEXT NOT NULL,                 -- repo_bootstrap | pr_history | retry_mining | failure_patch | compression | manual
+    token_count INTEGER NOT NULL,
+    triggers_json TEXT NOT NULL,
+    body TEXT NOT NULL,
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    status_reason TEXT,
+    trigger_count INTEGER NOT NULL DEFAULT 0,      -- eligible (attempt, skill) pairs, injected or held out
+    inject_count INTEGER NOT NULL DEFAULT 0,
+    pass_count INTEGER NOT NULL DEFAULT 0,         -- injected attempts that passed the Gate Keeper
+    fail_count INTEGER NOT NULL DEFAULT 0,
+    holdout_count INTEGER NOT NULL DEFAULT 0,
+    holdout_pass_count INTEGER NOT NULL DEFAULT 0,
+    tokens_injected INTEGER NOT NULL DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  );
+  CREATE INDEX skills_status ON skills (status);
+  CREATE TABLE skill_versions (
+    skill_id TEXT NOT NULL REFERENCES skills(id),
+    version INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    body TEXT NOT NULL,
+    triggers_json TEXT NOT NULL,
+    token_count INTEGER NOT NULL,
+    state TEXT NOT NULL,                  -- proposed | accepted | rejected | superseded
+    change_kind TEXT NOT NULL,            -- create | patch | tighten | compress | manual
+    rationale TEXT,
+    evidence_json TEXT,
+    parent_version INTEGER,
+    eval_run_id TEXT,
+    created_at INTEGER NOT NULL,
+    decided_at INTEGER,
+    PRIMARY KEY (skill_id, version)
+  );
+  CREATE INDEX skill_versions_state ON skill_versions (state, created_at);
+  CREATE TABLE skill_eval_runs (
+    id TEXT PRIMARY KEY,
+    skill_id TEXT NOT NULL REFERENCES skills(id),
+    version INTEGER NOT NULL,
+    baseline_version INTEGER,             -- NULL: baseline is "without this skill"
+    status TEXT NOT NULL,                 -- running | passed | failed | error
+    cases INTEGER NOT NULL DEFAULT 0,
+    baseline_pass INTEGER NOT NULL DEFAULT 0,
+    candidate_pass INTEGER NOT NULL DEFAULT 0,
+    baseline_tokens INTEGER NOT NULL DEFAULT 0,
+    candidate_tokens INTEGER NOT NULL DEFAULT 0,
+    baseline_exact INTEGER NOT NULL DEFAULT 0,
+    candidate_exact INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0,
+    decision TEXT,                        -- accept | reject
+    reason TEXT,
+    details_json TEXT NOT NULL DEFAULT '[]',
+    created_at INTEGER NOT NULL,
+    finished_at INTEGER
+  );
+  CREATE INDEX skill_eval_skill ON skill_eval_runs (skill_id, created_at);
+  CREATE TABLE skill_injections (
+    attempt_id TEXT NOT NULL,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    skill_id TEXT NOT NULL,
+    version INTEGER NOT NULL,
+    placement TEXT NOT NULL,              -- packet | retry
+    injected INTEGER NOT NULL,            -- 0 = eligible but held out (control group)
+    tokens INTEGER NOT NULL,
+    score REAL NOT NULL,
+    matched_json TEXT NOT NULL,
+    difficulty TEXT,
+    functions INTEGER NOT NULL DEFAULT 1,
+    decision TEXT,                        -- verdict decision, filled when the attempt is routed
+    category TEXT,                        -- BYTE_MISMATCH | COMPILE_ERROR | ... (first blocking finding)
+    code TEXT,                            -- first blocking finding code
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY (attempt_id, skill_id)
+  );
+  CREATE INDEX skill_inj_skill ON skill_injections (skill_id, decision);
+  CREATE INDEX skill_inj_run ON skill_injections (run_id, skill_id);
+  CREATE TABLE skill_jobs (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,                   -- bootstrap | mine | update | optimize | shadow | curate
+    status TEXT NOT NULL,                 -- running | done | failed
+    summary_json TEXT NOT NULL DEFAULT '{}',
+    cost_usd REAL NOT NULL DEFAULT 0,
+    error TEXT,
+    started_at INTEGER NOT NULL,
+    finished_at INTEGER
+  );
+  ALTER TABLE runs ADD COLUMN skills_json TEXT;   -- frozen RunSkillSnapshot (core prefix + dynamic set)
+  `,
 ];
 
 export function openDatabase(path: string): DB {

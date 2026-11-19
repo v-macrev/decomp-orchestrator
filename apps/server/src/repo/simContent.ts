@@ -103,3 +103,75 @@ export function simPack(rva: string, size: number): { bytes: string; listing: st
   const decomp = Array.from({ length: Math.max(3, Math.round(size / 6)) }, (_, i) => `  iVar${i} = *(int *)(param_1 + 0x${(i * 8).toString(16)});`).join('\n');
   return { bytes: bytes.join('\n'), listing: listing.join('\n'), decomp: `int FUN_${rva.slice(2)}(longlong param_1)\n{\n${decomp}\n}` };
 }
+
+// ---------------------------------------------------------------------------------------------
+// Matching traps (Phase 3 simulator). A trap is a quirk of the original source that makes a
+// function much harder to match until the worker is told the fix. Each trap leaves a signature in
+// the listing (or the shape counts), which is what deterministic skill triggers key on. Two traps are
+// documented in the synthetic cookbook (repo bootstrap finds them); the rest must be mined from
+// retry wins. Effect sizes are simulator assumptions, not measurements of real models.
+// ---------------------------------------------------------------------------------------------
+
+export type SimTrapId = 'vslot-gap' | 'bit-test' | 'null-reload' | 'shared-constant' | 'switch-width';
+
+export interface SimTrapInfo {
+  id: SimTrapId;
+  title: string;
+  /** Lines the trap adds to the listing. */
+  listing: string[];
+  /** Regex (as a skill trigger would write it) that finds the trap's listing signature. */
+  signature: string | null;
+  /** The phrase guidance must contain for the trap to be fixed. */
+  fix: RegExp;
+  /** A rule that fixes it (what a good mined skill says). */
+  fixText: string;
+  documented: boolean;
+}
+
+export const SIM_TRAPS: Record<SimTrapId, SimTrapInfo> = {
+  'vslot-gap': {
+    id: 'vslot-gap', title: 'Missing virtual slots shift every virtual call', listing: ['CALL qword ptr [RAX + 0x210]'], signature: null,
+    fix: /placeholder virtuals?|earlier virtuals/i, fixText: 'A call through slot N needs N - 1 earlier virtuals in the stand-in class, including inherited ones; add placeholder virtuals labelled GUESS until the slot offset matches.', documented: true,
+  },
+  'bit-test': {
+    id: 'bit-test', title: 'A flag bit tested as shr + test al,1 is a by-value bit-index helper', listing: ['SHR EAX, 0x3', 'TEST AL, 0x1'], signature: String.raw`\bshr\s+eax\s*,\s*(?:0x)?[0-9a-f]+h?`,
+    fix: /TestBit/, fixText: 'Read the flag word into a local and call an inline TestBit(flags, bit) helper that takes the word by value: ((flags >> bit) & 1) != 0. Masks and bit-fields fold into a memory test instead.', documented: true,
+  },
+  'null-reload': {
+    id: 'null-reload', title: 'A null test after a dereference: re-read the member', listing: ['MOV RCX, qword ptr [RBX + 0x28]', 'TEST RCX, RCX', 'MOV RCX, qword ptr [RBX + 0x28]'], signature: String.raw`mov\s+rcx\s*,\s*qword ptr \[rbx \+ 0x28\]`,
+    fix: /re-?read the member|reload the member/i, fixText: 'When the target tests a pointer it already dereferenced, re-read the member where the target tests it instead of keeping a local: a reload counts as a new value to MSVC.', documented: false,
+  },
+  'shared-constant': {
+    id: 'shared-constant', title: 'One materialised -1 reused for compare and result: a value helper', listing: ['OR EAX, 0xffffffff'], signature: String.raw`\bor\s+eax\s*,\s*0xffffffff`,
+    fix: /own helper|value-producing branch/i, fixText: 'Put the value-producing branch in its own helper (int32 mask = -1; if (...) mask = table[i]; return mask;) so MSVC materialises -1 once.', documented: false,
+  },
+  'switch-width': {
+    id: 'switch-width', title: 'Switch register differences: change the width of the switch operand', listing: ['MOVZX EAX, byte ptr [RCX + 0x1a]', 'JMP qword ptr [RDX + RAX*0x8]'], signature: String.raw`jmp\s+qword ptr \[rdx \+ rax\*0x8\]`,
+    fix: /width of the switch|switch operand width/i, fixText: 'Try switch (static_cast<std::uint32_t>(byteField)) and switching on the byte enum: the width of the switch operand changes register allocation and zero-extension.', documented: false,
+  },
+};
+
+export function simTrap(rva: string, size: number): SimTrapInfo | null {
+  const f = simFeatures(rva, size);
+  const r = hashUnit(`${rva}:trap`);
+  if ((f.indirectCalls ?? 0) > 0 && r < 0.8) return SIM_TRAPS['vslot-gap'];
+  if ((f.indirectJumps ?? 0) > 0) return SIM_TRAPS['switch-width'];
+  if (size > 20 && r > 0.92) return SIM_TRAPS['bit-test'];
+  if (size > 12 && r > 0.84 && r <= 0.92) return SIM_TRAPS['null-reload'];
+  if (size > 30 && r > 0.8 && r <= 0.84) return SIM_TRAPS['shared-constant'];
+  return null;
+}
+
+/** Cookbook recipes for the documented traps, in the real cookbook's "**N. Title.** (high)" format. */
+export function simTrapRecipes(): string {
+  return [
+    '## Data and calls',
+    '',
+    `**1. ${SIM_TRAPS['vslot-gap'].title}.** (high)`,
+    `Symptom: the target calls through a virtual slot the candidate's stand-in class does not reach, so every virtual call lands on the wrong offset. Fix: ${SIM_TRAPS['vslot-gap'].fixText} Closed SimForm::Update 0x1a2b30.`,
+    '',
+    `**2. ${SIM_TRAPS['bit-test'].title}.** (high)`,
+    `Symptom: the target reads a flag word, shifts it right by the bit number and tests the low byte (\`mov eax,[rcx+0x10]; shr eax,3; test al,1\`); the candidate has \`test byte ptr [mem],imm\`. Fix: ${SIM_TRAPS['bit-test'].fixText}`,
+    '',
+  ].join('\n');
+}

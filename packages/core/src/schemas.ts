@@ -258,6 +258,7 @@ export const RunConfig = z.object({
   draftedBy: z.string().default('operator'),
   routing: z.lazy(() => RoutingConfig).default(() => RoutingConfig.parse({})),
   context: z.lazy(() => ContextConfig).default(() => ContextConfig.parse({})),
+  skills: z.lazy(() => SkillsConfig).default(() => SkillsConfig.parse({})),
 });
 export type RunConfig = z.infer<typeof RunConfig>;
 
@@ -521,6 +522,10 @@ export const ContextSectionKind = z.enum([
   'matched_pr_lessons',
   'shared_run_discoveries',
   'retry_delta',
+  /** Triggered skills whose triggers are packet-static (stable across retries → inside the per-packet cache block). */
+  'dynamic_skills',
+  /** Skills triggered by the previous verdict's failure codes (volatile block, after every breakpoint). */
+  'retry_skills',
 ]);
 export type ContextSectionKind = z.infer<typeof ContextSectionKind>;
 
@@ -538,6 +543,9 @@ export const ContextBudgets = z.object({
   matched_pr_lessons: SectionBudget.default({ min: 200, max: 500 }),
   shared_run_discoveries: SectionBudget.default({ min: 100, max: 400 }),
   retry_delta: SectionBudget.default({ min: 200, max: 600 }),
+  /** Top 0–2 triggered skills (each ≤ 600 tokens). */
+  dynamic_skills: SectionBudget.default({ min: 0, max: 1_200 }),
+  retry_skills: SectionBudget.default({ min: 0, max: 600 }),
 });
 export type ContextBudgets = z.infer<typeof ContextBudgets>;
 
@@ -585,6 +593,10 @@ export const TaskContextBundle = z.object({
   elidedFunctions: z.array(z.string()),
   /** Detected code patterns used to match lessons (sse, vtable, eh, loop, switch, ...). */
   patterns: z.array(z.string()),
+  /** Skills considered for this attempt (injected or held out) — recorded per attempt for lift telemetry. */
+  skills: z.array(z.lazy(() => SkillSelection)).default([]),
+  /** sha256 of the frozen core-skills block inside the static prefix ('' when none). */
+  coreSkillsHash: z.string().default(''),
 });
 export type TaskContextBundle = z.infer<typeof TaskContextBundle>;
 
@@ -606,6 +618,47 @@ export const KnowledgeEntry = z.object({
   uses: z.number().int(),
 });
 export type KnowledgeEntry = z.infer<typeof KnowledgeEntry>;
+
+// ---------------------------------------------------------------------------
+// Skills (Phase 3): run-level config + the per-attempt selection record. The registry, matcher and
+// curator live in @decomp/skills and the server; these types are here because RunConfig and the
+// context bundle carry them.
+// ---------------------------------------------------------------------------
+
+export const SkillsConfig = z.object({
+  /** Off = no core skills in the prefix and no dynamic skills (pre-Phase-3 behaviour). */
+  enabled: z.boolean().default(true),
+  /** Dynamic skills injected per attempt (packet + retry placements combined). */
+  maxDynamic: z.number().int().min(0).max(4).default(2),
+  /**
+   * Fraction of eligible (packet, skill) pairs that are deliberately held out, deterministically per
+   * task, so pass-rate lift is measured against a real control group rather than assumed.
+   */
+  holdoutRate: z.number().min(0).max(0.5).default(0.1),
+  /** Token cap of the promoted_to_core block frozen into the static prefix. */
+  coreMaxTokens: z.number().int().min(0).max(8_000).default(1_500),
+  /** Warm each (account, model) prefix cache once before worker slots fan out. */
+  prewarm: z.boolean().default(true),
+  /** Run the curator (mine → update → optimize → shadow-evaluate) automatically when the run completes. */
+  autoCurate: z.boolean().default(false),
+});
+export type SkillsConfig = z.infer<typeof SkillsConfig>;
+
+export const SkillPlacement = z.enum(['packet', 'retry']);
+export type SkillPlacement = z.infer<typeof SkillPlacement>;
+
+export const SkillSelection = z.object({
+  skillId: z.string(),
+  version: z.number().int(),
+  placement: SkillPlacement,
+  /** false = eligible but held out (control group). */
+  injected: z.boolean(),
+  tokens: z.number().int(),
+  score: z.number(),
+  /** Trigger groups that matched (mnemonics, symbols, features, patterns, failures). */
+  matched: z.array(z.string()),
+});
+export type SkillSelection = z.infer<typeof SkillSelection>;
 
 export const TelemetryEvent = z.object({
   seq: z.number().int(),

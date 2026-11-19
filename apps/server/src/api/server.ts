@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
-import { Account, Flow, compileFlowPlan, validateFlow, type TelemetryEvent } from '@decomp/core';
+import { Account, Flow, RunConfig, compileFlowPlan, validateFlow, type TelemetryEvent } from '@decomp/core';
 import { z } from 'zod';
 import type { App } from '../app.js';
 import { fromRoot } from '../config.js';
@@ -140,6 +140,73 @@ export async function buildServer(app: App) {
     const gh = req.body?.github ? await ingestGithubReviews(store, { repoSlug: req.body.repoSlug ?? 'awarebayes/skyrim_decomp', cwd: fromRoot('.') }) : null;
     return { repoLessons: repoN, github: gh };
   });
+
+  // ---------------- skills (registry, curator jobs, proposals, shadow evaluations)
+  // Curator jobs run in the background (202 + job id); progress streams as skills.* events.
+  const { skills, curator } = app;
+  const lastRunId = () => curator.latestRun();
+  f.get('/api/skills', async () => {
+    const runId = lastRunId();
+    return {
+      skills: skills.list(),
+      proposals: skills.proposals().map((p) => ({ ...p, diff: { before: p.current ? skills.renderMd(p.skill.id, p.current.version) : '', after: skills.renderMd(p.skill.id, p.version.version) } })),
+      jobs: skills.jobs(15),
+      evals: skills.evals(30),
+      curator: curator.status(),
+      lastRun: runId ? { id: runId, name: store.getRun(runId)?.name ?? runId, ...skills.runStats(runId) } : null,
+      nextRun: skills.buildSnapshot(RunConfig.shape.skills.parse({})),
+    };
+  });
+  f.get('/api/skills/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const s = skills.get(req.params.id);
+    if (!s) return notFound(reply, 'skill');
+    return { skill: s, versions: skills.versions(s.id).map((v) => ({ ...v, md: skills.renderMd(s.id, v.version) })), evals: skills.evals(200).filter((e) => e.skillId === s.id), lift: skills.lift(s.id) };
+  });
+  const SkillJobBody = z.object({ runId: z.string().optional(), github: z.boolean().optional(), repoSlug: z.string().regex(/^[\w.-]+\/[\w.-]+$/).optional(), useModel: z.boolean().optional(), evaluate: z.boolean().optional() }).default({});
+  f.post('/api/skills/jobs/:kind', async (req: FastifyRequest<{ Params: { kind: string } }>, reply) => {
+    const kind = z.enum(['bootstrap', 'mine', 'update', 'optimize', 'curate', 'shadow']).parse(req.params.kind);
+    const body = SkillJobBody.parse(req.body ?? {});
+    try {
+      const { jobId } = curator.run(kind, body);
+      return reply.code(202).send({ jobId });
+    } catch (e) {
+      return reply.code(409).send({ error: (e as Error).message });
+    }
+  });
+  f.post('/api/skills/:id/versions/:v/:action', async (req: FastifyRequest<{ Params: { id: string; v: string; action: string } }>, reply) => {
+    const { id, action } = req.params;
+    const v = Number(req.params.v);
+    const ver = skills.version(id, v);
+    if (!ver) return notFound(reply, 'skill version');
+    if (action === 'evaluate') {
+      try {
+        return reply.code(202).send({ jobId: curator.run('shadow', { skillId: id, version: v }).jobId });
+      } catch (e) {
+        return reply.code(409).send({ error: (e as Error).message });
+      }
+    }
+    if (action === 'reject') {
+      if (ver.state !== 'proposed') return reply.code(409).send({ error: `v${v} is ${ver.state}` });
+      return { ok: skills.reject(id, v, null, 'rejected by the operator') };
+    }
+    if (action === 'reopen') {
+      const r = skills.reopen(id, v);
+      return r.ok ? r : reply.code(409).send({ error: r.reason });
+    }
+    return notFound(reply, 'action');
+  });
+  f.post('/api/skills/:id/status', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const { status } = z.object({ status: z.enum(['active', 'deprecated', 'promoted_to_core']) }).parse(req.body);
+    const s = skills.get(req.params.id);
+    if (!s) return notFound(reply, 'skill');
+    // Activation is earned in shadow evaluation; the operator may only re-activate a skill that won one.
+    if (status === 'active' && s.status === 'deprecated' && !skills.versions(s.id).some((v) => v.state === 'accepted' || v.state === 'superseded')) {
+      return reply.code(409).send({ error: 'this skill never passed a shadow evaluation; evaluate a proposal instead' });
+    }
+    if (s.status === 'candidate') return reply.code(409).send({ error: 'candidates become active only through shadow evaluation' });
+    return { ok: skills.setStatus(s.id, status, `set to ${status} by the operator`) };
+  });
+  f.post('/api/skills/import', async () => skills.importFromDisk());
 
   // ---------------- events + SSE
   f.get('/api/events', async (req: FastifyRequest<{ Querystring: { runId?: string; taskId?: string; afterSeq?: string; limit?: string; minLevel?: string } }>) => {

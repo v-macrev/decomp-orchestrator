@@ -17,7 +17,7 @@
 //     --read-only ...` with only the worktree and SR_LOCAL_DIR mounted;
 //   * writes are realpath-checked so a symlink in the worktree cannot redirect them.
 import { createHash } from 'node:crypto';
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { dirname as fsDirname } from 'node:path';
 import type { CompareFunctionResult, Finding, FunctionFeatures, FunctionTarget, SelectionSpec } from '@decomp/core';
 import { featuresFromPack, type PackJson } from '../intel/x64features.js';
@@ -351,6 +351,27 @@ export class SrRepo implements RepoAdapter {
       out.push({ id, title: rel, source: `${rel}@${this.sha.slice(0, 12)}`, content: shown.length > cap ? `${shown.slice(0, cap)}\n[truncated: ${shown.length - cap} more chars in ${rel}]` : shown });
     }
     return out;
+  }
+
+  async docFile(rel: string): Promise<string | null> {
+    if (!/^docs\/[A-Za-z0-9_.-]+\.md$/.test(rel)) return null;
+    return (await this.baseFile(rel)) ?? (await this.readHostFile(this.p.join(this.cfg.repoPath, rel)));
+  }
+
+  async packFor(fn: FunctionTarget): Promise<string | null> {
+    const root = this.p.join(this.cfg.localDir, 'contrib', 'packs');
+    const leaf = `0x${parseInt(fn.rva, 16).toString(16)}`;
+    let builds: string[] = [];
+    try {
+      builds = readdirSync(this.host.fsPath(root));
+    } catch {
+      return null;
+    }
+    for (const b of builds) {
+      const dir = this.p.join(root, b, leaf);
+      if (existsSync(this.host.fsPath(this.p.join(dir, 'pack.json')))) return dir;
+    }
+    return null;
   }
 
   private async readHostFile(p: string) {

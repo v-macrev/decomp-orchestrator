@@ -82,6 +82,8 @@ function toRun(r: Raw): RunRow {
   // Runs created before Phase 2 keep their behaviour: no difficulty routing, legacy bundles.
   if (!('routing' in raw)) raw.routing = { enabled: false };
   if (!('context' in raw)) raw.context = { mode: 'legacy' };
+  // Runs created before Phase 3 keep their behaviour: no core skills, no dynamic skills.
+  if (!('skills' in raw)) raw.skills = { enabled: false };
   return {
     id: r.id, name: r.name, status: r.status, config: RunConfig.parse(raw),
     flow: Flow.parse(JSON.parse(r.flow_json)), costUsd: r.cost_usd, error: r.error,

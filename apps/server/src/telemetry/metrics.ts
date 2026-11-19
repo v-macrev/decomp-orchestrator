@@ -84,6 +84,7 @@ export function runMetrics(store: Store, engine: RunEngine, pool: AccountPool, r
         }
       : null,
     knowledge: { byKind: store.knowledgeStats(runId), recent: store.listKnowledge(runId, 8).map((k) => ({ kind: k.kind, symbol: k.symbol, sourceUnit: k.sourceUnit, uses: k.uses })) },
+    skills: skillMetrics(store, runId, run.config.skills.enabled),
     engine: engine.status(runId),
     tasks,
     functions,
@@ -113,5 +114,31 @@ export function runMetrics(store: Store, engine: RunEngine, pool: AccountPool, r
     throughput: { passedPerMin5: Math.round(perMin5 * 10) / 10, etaMinutes: perMin5 > 0 ? Math.round(open / perMin5) : null, series },
     byAccount: store.usageByAccount(runId),
     accounts: pool.view(),
+  };
+}
+
+/** Frozen skill snapshot of the run + per-skill injections, held-out controls and outcomes. */
+function skillMetrics(store: Store, runId: string, enabled: boolean) {
+  if (!enabled) return { enabled: false as const };
+  const row = store.db.prepare('SELECT skills_json FROM runs WHERE id = ?').get(runId) as { skills_json: string | null } | undefined;
+  const snap = row?.skills_json ? (JSON.parse(row.skills_json) as { core: Array<{ id: string; name: string; tokens: number }>; dynamic: unknown[]; coreHash: string }) : null;
+  const rows = store.db.prepare(`SELECT si.skill_id, s.name, SUM(si.injected) injected, SUM(1 - si.injected) held,
+      SUM(CASE WHEN si.injected = 1 AND si.decision = 'pass' THEN 1 ELSE 0 END) injected_pass, SUM(CASE WHEN si.injected = 1 AND si.decision IS NOT NULL THEN 1 ELSE 0 END) injected_done,
+      SUM(CASE WHEN si.injected = 0 AND si.decision = 'pass' THEN 1 ELSE 0 END) held_pass, SUM(CASE WHEN si.injected = 0 AND si.decision IS NOT NULL THEN 1 ELSE 0 END) held_done,
+      SUM(si.tokens) tokens, COUNT(DISTINCT si.task_id) tasks
+    FROM skill_injections si LEFT JOIN skills s ON s.id = si.skill_id WHERE si.run_id = ? GROUP BY si.skill_id ORDER BY injected DESC`).all(runId) as Array<Record<string, number | string>>;
+  const prefixes = (store.db.prepare(`SELECT COUNT(DISTINCT json_extract(b.json, '$.staticPrefixHash')) n FROM attempts a JOIN bundles b ON b.hash = a.bundle_hash WHERE a.run_id = ?`).get(runId) as { n: number }).n;
+  return {
+    enabled: true as const,
+    core: snap?.core ?? [],
+    coreTokens: (snap?.core ?? []).reduce((s, c) => s + c.tokens, 0),
+    dynamic: snap?.dynamic.length ?? 0,
+    /** Distinct static prefixes sent in this run: 1 means the shared cache prefix never changed. */
+    staticPrefixes: prefixes,
+    bySkill: rows.map((r) => ({
+      skillId: r.skill_id as string, name: (r.name as string) ?? (r.skill_id as string), tasks: r.tasks as number, injected: r.injected as number, heldOut: r.held as number, tokens: r.tokens as number,
+      passRate: (r.injected_done as number) ? Math.round(((r.injected_pass as number) / (r.injected_done as number)) * 1000) / 1000 : null,
+      heldOutPassRate: (r.held_done as number) ? Math.round(((r.held_pass as number) / (r.held_done as number)) * 1000) / 1000 : null,
+    })),
   };
 }

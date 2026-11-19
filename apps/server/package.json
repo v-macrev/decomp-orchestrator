@@ -9,11 +9,13 @@
     "test": "vitest run",
     "sim": "tsx src/sim/simulate.ts",
     "smoke:repo": "tsx src/sim/smokeRepo.ts",
-    "bench:context": "tsx src/sim/benchContext.ts"
+    "bench:context": "tsx src/sim/benchContext.ts",
+    "bench:skills": "tsx src/sim/benchSkills.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "latest",
     "@decomp/core": "*",
+    "@decomp/skills": "*",
     "@fastify/cors": "^11.4.3",
     "@fastify/static": "^10.1.11",
     "better-sqlite3": "^12.0.0",

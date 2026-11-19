@@ -9,6 +9,11 @@
 //   matched_pr_lessons     lessons/recipes whose tags match this packet's patterns           ≤500
 //   shared_run_discoveries verified declarations from earlier packets of this run            ≤400
 //   retry_delta            structured verdict + failing function bodies only (retries)       ≤600
+//   dynamic_skills         top triggered skills, packet-static triggers (per-packet block)   ≤1.2k
+//   retry_skills           skills triggered by the previous verdict (volatile block)         ≤600
+//
+// Skills (Phase 3): promoted_to_core skills are frozen into the static prefix by the run snapshot;
+// dynamic skills are matched locally (SkillMatcher) and always render after the shared breakpoint.
 //
 // Never included: full docs, whole unrelated headers, previous complete files, chat history.
 // Each section records `rawTokens` — what the unsliced sources would have cost (≈ the legacy
@@ -18,6 +23,8 @@ import {
   patternsOf, sizeOnlyFeatures,
   type ContextBudgets, type ContextConfig, type ContextSection, type ContextSectionKind, type Difficulty, type FunctionFeatures, type TaskContextBundle,
 } from '@decomp/core';
+import { SkillMatcher, type MatchableSkill, type RunSkillSnapshot } from '@decomp/skills';
+import type { SkillSelection, SkillsConfig } from '@decomp/core';
 import type { Store, TaskRow } from '../db/store.js';
 import { extractFunctions, lex } from '../gatekeeper/cpp.js';
 import { HeaderSlicer } from '../intel/headerSlicer.js';
@@ -26,7 +33,7 @@ import { distillRules, type DistilledRules } from '../intel/ruleDistiller.js';
 import type { PreparedTask, RepoAdapter } from '../repo/types.js';
 import { charsFor, clipToTokens, estimateTokens } from '../util/tokens.js';
 import { elideBodies } from './edits.js';
-import { FINDING_GUIDANCE } from './lessons.js';
+import { FINDING_GUIDANCE, failureCategory, failureSignals } from './lessons.js';
 import { WORKER_CONTRACT_V2, buildStaticPrefix, type Feedback } from './prompts.js';
 
 export interface BuildOptionsV2 {
@@ -37,30 +44,62 @@ export interface BuildOptionsV2 {
   feedback: Feedback | null;
   pitfalls: string[];
   context: ContextConfig;
+  skills?: RunSkills | null;
+}
+
+/** What the engine (or the shadow evaluator) hands the builder for one run. */
+export interface RunSkills {
+  snapshot: RunSkillSnapshot;
+  dynamic: MatchableSkill[];
+  config: SkillsConfig;
+  /** One dynamic slot is kept for retry-placement skills when the snapshot has any. */
+  reserveRetrySlot: boolean;
+  /** Registry skills derived from the cookbook replace its pattern recipes in matched_pr_lessons. */
+  replacesCookbookLessons: boolean;
+  /** Shadow evaluation only. */
+  force?: string[];
+  suppress?: string[];
+  holdout?: boolean;
+}
+
+/** Does a set of dynamic skills contain any that can only fire on a retry? */
+export function hasRetryOnlySkills(skills: MatchableSkill[]): boolean {
+  const staticGroups = (s: MatchableSkill) => s.triggers.mnemonics.length || s.triggers.symbols.length || s.triggers.patterns.length || Object.values(s.triggers.features).some((v) => v !== undefined);
+  return skills.some((s) => s.triggers.failures.length && (!staticGroups(s) || s.triggers.require.includes('failures')));
 }
 
 const LEGACY_HEADER_CAP = 8_000; // what the legacy bundle pasted per header (for raw-token accounting)
 
 export class TaskContextBuilder {
   private distilled: DistilledRules | null = null;
-  private prefix: { text: string; hash: string } | null = null;
+  /** Static prefix per frozen core-skills block ('' = none): one per run snapshot, byte-stable. */
+  private prefixes = new Map<string, { text: string; hash: string }>();
+  private matcher = new SkillMatcher();
   private slicer: HeaderSlicer | null = null;
   private docsRawTokens = 0;
 
   constructor(private repo: RepoAdapter, private store: Store) {}
 
-  /** Distil once per process/base revision; the result is the run-wide cached prefix. */
-  async staticPrefix(budgets: ContextBudgets): Promise<{ text: string; hash: string; distilled: DistilledRules }> {
-    if (!this.prefix || !this.distilled) {
+  /**
+   * Distil once per process/base revision; the result (+ the run's frozen core skills) is the
+   * run-wide cached prefix. Same snapshot -> same bytes -> same provider cache entry.
+   */
+  async staticPrefix(budgets: ContextBudgets, core: { text: string; hash: string } | null = null): Promise<{ text: string; hash: string; distilled: DistilledRules }> {
+    if (!this.distilled) {
       const docs = await this.repo.docs();
       this.docsRawTokens = docs.reduce((s, d) => s + estimateTokens(d.content), 0);
       const contractTokens = estimateTokens(WORKER_CONTRACT_V2);
       const room = Math.max(200, budgets.static_system_prefix.max - contractTokens - 20);
       this.distilled = distillRules(docs, { maxTokens: room, source: `${this.repo.name}${docs[0]?.source.includes('@') ? `@${docs[0].source.split('@')[1]}` : ''}` });
-      this.prefix = buildStaticPrefix(this.distilled.text);
       for (const r of this.distilled.recipes) this.store.upsertLesson({ id: r.id, source: 'repo-cookbook', topic: r.topic, text: r.text, weight: r.weight, tags: r.tags });
     }
-    return { ...this.prefix, distilled: this.distilled };
+    const key = core?.hash ?? '';
+    let prefix = this.prefixes.get(key);
+    if (!prefix) {
+      prefix = buildStaticPrefix(this.distilled.text, core?.text ?? '');
+      this.prefixes.set(key, prefix);
+    }
+    return { ...prefix, distilled: this.distilled };
   }
 
   async build(task: TaskRow, prepared: PreparedTask, slot: number, opts: BuildOptionsV2): Promise<TaskContextBundle> {
@@ -72,8 +111,11 @@ export class TaskContextBuilder {
     };
 
     // 1. static prefix ---------------------------------------------------------------------------
-    const prefix = await this.staticPrefix(B);
-    add('static_system_prefix', 'Contract + distilled repository rules', prefix.text, this.docsRawTokens + estimateTokens(WORKER_CONTRACT_V2), ['contract', 'repo-docs']);
+    const snap = opts.skills?.config.enabled ? opts.skills.snapshot : null;
+    const core = snap?.coreText ? { text: snap.coreText, hash: snap.coreHash } : null;
+    const prefix = await this.staticPrefix(B, core);
+    add('static_system_prefix', core ? `Contract + distilled repository rules + ${snap!.core.length} core skill(s)` : 'Contract + distilled repository rules', prefix.text,
+      this.docsRawTokens + estimateTokens(WORKER_CONTRACT_V2) + (core ? estimateTokens(core.text) : 0), ['contract', 'repo-docs', ...(core ? ['core-skills'] : [])]);
 
     // Unit files first (needed for references, signatures, elision decisions).
     const unitTexts = new Map<string, string | null>();
@@ -171,6 +213,7 @@ export class TaskContextBuilder {
     const legacyLessonsRaw = lessonsAll.slice(0, 16).reduce((s, l) => s + estimateTokens(l.text) + 2, 0);
     const scored = lessonsAll
       .filter((l) => !(l.source === 'repo-docs' && l.tags.every((t) => t === 'general'))) // already in the static prefix
+      .filter((l) => !(opts.skills?.replacesCookbookLessons && l.source === 'repo-cookbook')) // superseded by registry skills
       .map((l) => ({ l, s: l.weight + 6 * l.tags.filter((t) => patterns.includes(t)).length, match: l.tags.some((t) => patterns.includes(t)) }))
       .sort((a, b) => Number(b.match) - Number(a.match) || b.s - a.s || a.l.id.localeCompare(b.l.id));
     const picked: string[] = [];
@@ -212,6 +255,53 @@ export class TaskContextBuilder {
       this.store.bumpKnowledgeUses(opts.runId, used);
     }
 
+    // 7b. dynamic skills (deterministic triggers, evaluated locally; nothing extra is sent) --------
+    const selections: SkillSelection[] = [];
+    if (opts.skills?.config.enabled && opts.skills.dynamic.length) {
+      // The listing is read locally for matching only: it is never put in a section without consent.
+      let listing: string | null = null;
+      if (this.repo.readPackSlice && prepared.packs.length) {
+        const parts: string[] = [];
+        for (const pack of prepared.packs) {
+          const s = await this.repo.readPackSlice(pack, 200_000).catch(() => null);
+          if (s) parts.push(s.text);
+        }
+        listing = parts.length ? parts.join('\n') : null;
+      }
+      const failures = opts.feedback ? failureSignals(opts.feedback.verdict) : null;
+      const sel = this.matcher.select(opts.skills.dynamic, {
+        taskId: task.id, difficulty: task.difficulty, patterns,
+        functions: task.functions.map((f, i) => ({ name: f.name, features: feats[i]! })),
+        symbols: [...new Set([...task.functions.flatMap((f) => (f.name ? [f.name] : [])), ...primary, ...slice.included, ...references])],
+        listing, failures: failures?.length ? failures : null,
+      }, {
+        maxDynamic: opts.skills.config.maxDynamic, holdoutRate: opts.skills.holdout === false ? 0 : opts.skills.config.holdoutRate,
+        reserveRetrySlot: opts.skills.reserveRetrySlot, force: opts.skills.force, suppress: opts.skills.suppress,
+      });
+      const render = (place: 'packet' | 'retry', budget: number) => {
+        const out: string[] = [];
+        let used = 0;
+        for (const r of sel.injected.filter((x) => x.placement === place)) {
+          const t = r.skill.tokenCount + 12;
+          if (used + t > budget) continue;
+          const name = r.skill.name.replace(/"/g, "'");
+          out.push(`<skill id="${r.skill.id}" v="${r.skill.version}" name="${name}" matched="${r.matched.join(',')}">\n${r.skill.body}\n</skill>`);
+          selections.push({ skillId: r.skill.id, version: r.skill.version, placement: place, injected: true, tokens: r.skill.tokenCount, score: r.score, matched: r.matched });
+          used += t;
+        }
+        return out;
+      };
+      const packetSkills = render('packet', B.dynamic_skills.max);
+      const retrySkills = render('retry', B.retry_skills.max);
+      for (const r of sel.heldOut) selections.push({ skillId: r.skill.id, version: r.skill.version, placement: r.placement, injected: false, tokens: 0, score: r.score, matched: r.matched });
+      if (packetSkills.length) {
+        add('dynamic_skills', `${packetSkills.length} triggered skill(s)`, `<skills note="matching recipes whose triggers fired on this packet; apply them where the symptom fits">\n${packetSkills.join('\n')}\n</skills>`, 0, ['skill-registry']);
+      }
+      if (retrySkills.length) {
+        add('retry_skills', `${retrySkills.length} skill(s) for the reported failure`, `<retry_skills note="recipes for the failure reported in <retry>">\n${retrySkills.join('\n')}\n</retry_skills>`, 0, ['skill-registry']);
+      }
+    }
+
     // 8. retry delta + pitfalls (volatile) --------------------------------------------------------
     const relevantPitfalls = opts.pitfalls.slice(0, 4);
     if (opts.feedback) {
@@ -221,17 +311,17 @@ export class TaskContextBuilder {
       add('retry_delta', 'Common rejections in this run', `<pitfalls>\n${relevantPitfalls.map((p) => `- ${p}`).join('\n')}\n</pitfalls>`, 0, ['run']);
     }
 
-    const order: ContextSectionKind[] = ['static_system_prefix', 'function_spec', 'disassembly_slice', 'minimal_local_context', 'unit_files', 'matched_pr_lessons', 'shared_run_discoveries', 'retry_delta'];
+    const order: ContextSectionKind[] = ['static_system_prefix', 'function_spec', 'disassembly_slice', 'minimal_local_context', 'unit_files', 'matched_pr_lessons', 'dynamic_skills', 'shared_run_discoveries', 'retry_delta', 'retry_skills'];
     sections.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
     const canon = JSON.stringify(sections.map((s) => [s.kind, s.content]));
     const hash = createHash('sha256').update(canon).digest('hex');
     const sent = sections.reduce((s, x) => s + x.tokens, 0);
     const raw = sections.reduce((s, x) => s + x.rawTokens, 0);
-    const taskPrefix = sections.filter((s) => ['function_spec', 'disassembly_slice', 'minimal_local_context', 'unit_files', 'matched_pr_lessons'].includes(s.kind)).reduce((s, x) => s + x.tokens, 0);
+    const taskPrefix = sections.filter((s) => ['function_spec', 'disassembly_slice', 'minimal_local_context', 'unit_files', 'matched_pr_lessons', 'dynamic_skills'].includes(s.kind)).reduce((s, x) => s + x.tokens, 0);
     const bundle: TaskContextBundle = {
       version: 2, hash, taskId: task.id, difficulty: task.difficulty, allowedPaths: prepared.allowedPaths, staticPrefixHash: prefix.hash,
       sections, tokens: { sent, raw, staticPrefix: sections[0]?.tokens ?? 0, taskPrefix }, containsPrivate: sections.some((s) => s.privacy === 'private'),
-      outputMode, elidedFunctions: elided, patterns,
+      outputMode, elidedFunctions: elided, patterns, skills: selections, coreSkillsHash: core?.hash ?? '',
     };
     // Persist for audit, private sections redacted (game-derived text never leaves .local/).
     this.store.putBundle(hash, {
@@ -290,19 +380,11 @@ function findSignature(qualified: string, sources: string[]): string | null {
   return null;
 }
 
-const CATEGORY: Array<[RegExp, string]> = [
-  [/^COMPARE_COMPILE_ERROR$/, 'COMPILE_ERROR'],
-  [/^(CHEAT|LEAK|SCOPE|INTEGRITY)_/, 'ANTI_CHEAT_VIOLATION'],
-  [/^COMPARE_/, 'BYTE_MISMATCH'],
-  [/^(PREFLIGHT|CONV)_/, 'PREFLIGHT_LINT'],
-  [/^(OUTPUT|PROVIDER)_/, 'OUTPUT_CONTRACT'],
-  [/^REVIEW_/, 'REVIEW_BLOCK'],
-];
 
 /** Structured verdict + only the failing functions' previous bodies — never the whole previous file. */
 export function renderRetryDelta({ verdict, attempt }: Feedback, task: TaskRow, maxTokens: number): { text: string; category: string; rawTokens: number } {
   const blocks = verdict.findings.filter((f) => f.severity === 'block');
-  const cats = [...new Set(blocks.map((f) => CATEGORY.find(([re]) => re.test(f.code))?.[1] ?? 'OTHER'))];
+  const cats = [...new Set(blocks.map((f) => failureCategory(f.code)))];
   const category = cats[0] ?? (verdict.decision === 'pass' ? 'PASS' : 'OTHER');
   const fails = (verdict.compare ?? []).filter((c) => c.result !== 'pass');
   const passes = (verdict.compare ?? []).filter((c) => c.result === 'pass');

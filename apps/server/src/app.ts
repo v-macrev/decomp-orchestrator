@@ -13,6 +13,10 @@ import { SimRepo } from './repo/simRepo.js';
 import { SrRepo, type SrRepoConfig } from './repo/srRepo.js';
 import type { RepoAdapter } from './repo/types.js';
 import { EventBus } from './telemetry/events.js';
+import { SkillCurator } from './skills/curator.js';
+import { SkillRegistry } from './skills/registry.js';
+import { ShadowEvaluator } from './skills/shadow.js';
+import { CuratorModel } from './skills/synth.js';
 
 export interface App {
   cfg: ServerConfig;
@@ -22,6 +26,8 @@ export interface App {
   pool: AccountPool;
   providers: ProviderRegistry;
   engine: RunEngine;
+  skills: SkillRegistry;
+  curator: SkillCurator;
   reloadAccounts(): void;
   close(): Promise<void>;
 }
@@ -39,7 +45,7 @@ export async function createApp(cfg: ServerConfig, opts: { quiet?: boolean } = {
   if (cfg.mode === 'repo') {
     repo = new SrRepo(srRepoConfig(cfg));
   } else {
-    sim = new SimRepo({ slots: cfg.sim.slots, compareLatencyMs: cfg.sim.compareLatencyMs, infraRate: cfg.sim.infraRate });
+    sim = new SimRepo({ slots: cfg.sim.slots, compareLatencyMs: cfg.sim.compareLatencyMs, infraRate: cfg.sim.infraRate, traps: cfg.sim.traps });
     repo = sim;
   }
   await repo.init();
@@ -50,10 +56,21 @@ export async function createApp(cfg: ServerConfig, opts: { quiet?: boolean } = {
 
   const pool = new AccountPool(store.listAccounts(), store, events);
   const providers = new ProviderRegistry({ oracle: sim ?? undefined });
-  const engine = new RunEngine({ store, pool, providers, repo, events }, cfg.engine);
+  const skills = new SkillRegistry(store, cfg.dbPath === ':memory:' ? null : fromRoot(cfg.skillsDir));
+  skills.failStaleJobs();
+  const engine = new RunEngine({ store, pool, providers, repo, events, skills }, cfg.engine);
+  const shadow = new ShadowEvaluator({ store, registry: skills, repo, pool, providers, events, engine, context: engine.contextV2 });
+  const curator = new SkillCurator({ store, registry: skills, repo, events, engine, shadow, model: new CuratorModel(pool, providers), cwd: fromRoot('.') }, { shadow: { cases: cfg.skills.shadowCases, repeats: cfg.skills.shadowRepeats } });
+  engine.afterRun = (runId) => {
+    try {
+      curator.run('curate', { runId });
+    } catch (e) {
+      events.emit('skills.job', `auto-curation skipped: ${(e as Error).message}`, { runId, level: 'warn' });
+    }
+  };
 
   return {
-    cfg, store, events, repo, pool, providers, engine,
+    cfg, store, events, repo, pool, providers, engine, skills, curator,
     reloadAccounts() {
       pool.setAccounts(store.listAccounts());
     },

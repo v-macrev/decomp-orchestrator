@@ -11,8 +11,9 @@
 // most the in-flight attempts abandoned (and not counted against any task's budget).
 import {
   CAPABILITY_RANK, DIFFICULTIES, DIFFICULTY_RANK, Flow, RunConfig, WorkerOutput, compileFlowPlan, harder, promote, stealSources, tierFor, validateFlow,
-  type Attempt, type CapabilityTier, type Difficulty, type FlowPlan, type PoolBinding, type Verdict,
+  type Attempt, type CapabilityTier, type Difficulty, type FlowPlan, type PoolBinding, type SkillSelection, type Verdict,
 } from '@decomp/core';
+import { createHash } from 'node:crypto';
 import type { RunRow, Store, TaskRow } from '../db/store.js';
 import { GateKeeper, type Reviewer } from '../gatekeeper/gatekeeper.js';
 import { LlmReviewer, extractJson } from '../gatekeeper/review.js';
@@ -31,6 +32,8 @@ import { materialise } from './edits.js';
 import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
 import { stageRun } from './staging.js';
+import { SkillRegistry } from '../skills/registry.js';
+import { hasRetryOnlySkills, type RunSkills } from './contextBuilder.js';
 
 export interface EngineOptions {
   leaseMs: number;
@@ -62,6 +65,7 @@ export interface EngineDeps {
   repo: RepoAdapter;
   events: EventBus;
   reviewer?: (plan: FlowPlan) => Reviewer | null;
+  skills?: SkillRegistry;
 }
 
 class ActiveRun {
@@ -76,6 +80,8 @@ class ActiveRun {
   slotsByTier = new Map<number, number[]>();
   finished: Promise<void> = Promise.resolve();
   budgetPaused = false;
+  /** Frozen skill view for the whole run (null: skills off or legacy context). */
+  skills: RunSkills | null = null;
   constructor(readonly row: RunRow, readonly plan: FlowPlan, readonly gate: GateKeeper) {}
 
   idleSlots(tier: number): number {
@@ -93,6 +99,11 @@ export class RunEngine {
   private context: ContextBuilder;
   readonly contextV2: TaskContextBuilder;
   readonly classifier: ComplexityClassifier;
+  readonly skills: SkillRegistry;
+  /** Called after a run completes (the app wires the skill curator here when autoCurate is on). */
+  afterRun: ((runId: string) => void) | null = null;
+  /** Held by work that needs the worktree slots outside a run (shadow evaluation). */
+  private exclusiveHolder: string | null = null;
   private reaper: NodeJS.Timeout;
 
   constructor(private deps: EngineDeps, opts: Partial<EngineOptions> = {}) {
@@ -101,6 +112,7 @@ export class RunEngine {
     this.context = new ContextBuilder(deps.repo, deps.store);
     this.contextV2 = new TaskContextBuilder(deps.repo, deps.store);
     this.classifier = new ComplexityClassifier({ store: deps.store, repo: deps.repo, pool: deps.pool, providers: deps.providers, events: deps.events });
+    this.skills = deps.skills ?? new SkillRegistry(deps.store, null);
     // Periodic reaper: reclaims leases of slots that stalled without crashing the process.
     this.reaper = setInterval(() => {
       for (const id of this.active.keys()) {
@@ -125,6 +137,7 @@ export class RunEngine {
     const { store, events } = this.deps;
     if (this.active.has(runId)) return;
     if (this.active.size > 0) throw new Error('another run is active; worktree slots are exclusive to one run at a time');
+    if (this.exclusiveHolder) throw new Error(`worktree slots are busy (${this.exclusiveHolder}); start the run when it finishes`);
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
     if (['completed', 'cancelled'].includes(row.status)) throw new Error(`run is ${row.status}`);
@@ -165,7 +178,17 @@ export class RunEngine {
 
     const usable = allocateSlots(plan, this.deps.repo.slotCount);
     for (const s of usable) run.slotsByTier.set(s.tier, [...(run.slotsByTier.get(s.tier) ?? []), s.slot]);
-    if (run.row.config.context.mode === 'budgeted') await this.contextV2.staticPrefix(run.row.config.context.budgets).catch(() => undefined);
+    if (run.row.config.context.mode === 'budgeted') {
+      run.skills = this.runSkills(run.row);
+      const snap = run.skills?.snapshot;
+      const prefix = await this.contextV2.staticPrefix(run.row.config.context.budgets, snap?.coreText ? { text: snap.coreText, hash: snap.coreHash } : null).catch(() => null);
+      if (snap) {
+        events.emit('skills.snapshot', `skills frozen for this run: ${snap.core.length} core (${snap.core.reduce((s, c) => s + c.tokens, 0)} tok in the cached prefix), ${snap.dynamic.length} dynamic`, {
+          runId, data: { core: snap.core.map((c) => `${c.id}@${c.version}`), dynamic: snap.dynamic.length, coreHash: snap.coreHash.slice(0, 12) },
+        });
+      }
+      if (prefix && run.row.config.skills.prewarm && run.row.status !== 'paused') await this.prewarm(run, prefix.text).catch((e) => events.emit('cache.prewarm', `prewarm failed: ${(e as Error).message}`, { runId, level: 'warn' }));
+    }
     if (usable.length < plan.workerSlots) {
       events.emit('run.slots', `flow wants ${plan.workerSlots} worker slots; repo has ${this.deps.repo.slotCount} worktrees — scaled down proportionally`, { runId, level: 'warn' });
     }
@@ -258,6 +281,80 @@ export class RunEngine {
 
   close() {
     clearInterval(this.reaper);
+  }
+
+  /** Run `fn` with exclusive use of the worktree slots (refused while a run is active). */
+  async exclusive<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    if (this.active.size) throw new Error('a run is active; shadow evaluation uses the worktree slots and runs between runs');
+    if (this.exclusiveHolder) throw new Error(`worktree slots are busy (${this.exclusiveHolder})`);
+    this.exclusiveHolder = label;
+    try {
+      return await fn();
+    } finally {
+      this.exclusiveHolder = null;
+    }
+  }
+
+  isIdle() {
+    return this.active.size === 0 && this.exclusiveHolder === null;
+  }
+
+  /** The run's frozen skill view (snapshot persisted on first start, reused on resume). */
+  private runSkills(row: RunRow): RunSkills | null {
+    const cfg = row.config.skills;
+    if (!cfg.enabled) return null;
+    const snapshot = this.skills.snapshotForRun(row.id, cfg);
+    const dynamic = this.skills.resolveDynamic(snapshot);
+    const ids = [...snapshot.core.map((c) => c.id), ...snapshot.dynamic.map((d) => d.id)];
+    const replacesCookbookLessons = ids.some((id) => this.skills.get(id)?.origin === 'repo_bootstrap');
+    return { snapshot, dynamic, config: cfg, reserveRetrySlot: hasRetryOnlySkills(dynamic), replacesCookbookLessons };
+  }
+
+  /**
+   * Prefix-cache pre-warm: one tiny request per (account, model) the flow will use, carrying the
+   * exact static prefix with its breakpoint, before the slots fan out. Without it, N parallel
+   * first calls all miss and all pay the cache write; with it they all read.
+   */
+  private async prewarm(run: ActiveRun, prefixText: string) {
+    const { pool, providers, store, events } = this.deps;
+    const runId = run.row.id;
+    const seen = new Set<string>();
+    const targets: Array<{ accountId: string; modelId: string }> = [];
+    for (const t of run.plan.tiers) {
+      const binding: PoolBinding = { ...t.node.data.pool, capability: t.node.data.pool.capability ?? (run.row.config.routing.enabled ? t.capability : undefined) };
+      for (const { slot, model } of pool.resolve(binding, 'worker')) {
+        const key = `${slot.account.id}/${model.id}`;
+        if (seen.has(key) || slot.account.provider === 'claude_cli' || !slot.account.enabled) continue;
+        seen.add(key);
+        targets.push({ accountId: slot.account.id, modelId: model.id });
+      }
+    }
+    if (!targets.length) return;
+    const signal = AbortSignal.any([run.cancel.signal, AbortSignal.timeout(45_000)]);
+    let ok = 0;
+    let cost = 0;
+    let written = 0;
+    await Promise.all(targets.slice(0, 8).map(async (t) => {
+      const lease = await pool.acquire({ binding: { strategy: 'bound', accountIds: [t.accountId], tags: [], model: t.modelId }, role: 'worker', estInputTokens: Math.ceil(prefixText.length / 3.3), estOutputTokens: 8 }, signal).catch(() => null);
+      if (!lease) return;
+      const t0 = Date.now();
+      try {
+        const resp = await providers.complete(lease.account, {
+          system: prefixText, prompt: 'Reply with OK.', blocks: [{ text: 'Reply with OK.', cache: false }], cacheKey: `decomp:${createHash('sha256').update(prefixText).digest('hex').slice(0, 32)}`,
+          model: lease.model, maxOutputTokens: 8, timeoutMs: 30_000, signal,
+        });
+        pool.release(lease, { kind: 'ok', usage: resp.usage, latencyMs: Date.now() - t0, rateLimit: resp.rateLimit });
+        const c = costUsd(lease.model, resp.usage);
+        store.addRunUsage(runId, c, resp.usage);
+        cost += c;
+        written += resp.usage.cacheWriteTokens + resp.usage.cacheReadTokens;
+        ok++;
+      } catch (e) {
+        const pe = e instanceof ProviderError ? e : new ProviderError('network', (e as Error).message);
+        pool.release(lease, { kind: pe.kind, retryAfterMs: pe.retryAfterMs, message: pe.message, latencyMs: Date.now() - t0 });
+      }
+    }));
+    events.emit('cache.prewarm', `pre-warmed the static prefix on ${ok}/${Math.min(8, targets.length)} account·model pair(s) (${written} tokens cached, $${cost.toFixed(4)})`, { runId, data: { ok, targets: targets.length, cost } });
   }
 
   status(runId: string) {
@@ -381,6 +478,7 @@ export class RunEngine {
       let contextRawTokens: number;
       let outputMode: 'files' | 'edits' | 'either' = 'files';
       let elided: string[] = [];
+      let selections: SkillSelection[] = [];
       if (cfg.context.mode === 'legacy') {
         const bundle = await this.context.build(task, prepared, slot, { runId, exposureConsent: cfg.exposureConsent, carried });
         system = WORKER_SYSTEM;
@@ -388,7 +486,8 @@ export class RunEngine {
         bundleHash = bundle.hash;
         contextTokens = contextRawTokens = Math.ceil((system.length + prompt.length) / 3.3);
       } else {
-        const bundle = await this.contextV2.build(task, prepared, slot, { runId, exposureConsent: cfg.exposureConsent, carried, attemptNo: n, feedback, pitfalls: runPitfalls(store, runId), context: cfg.context });
+        const bundle = await this.contextV2.build(task, prepared, slot, { runId, exposureConsent: cfg.exposureConsent, carried, attemptNo: n, feedback, pitfalls: runPitfalls(store, runId), context: cfg.context, skills: run.skills });
+        selections = bundle.skills;
         const r = renderBundle(bundle, n, shouldCacheTaskPrefix(cfg.context.cacheTaskPrefix, task.difficulty, n, bundle.tokens.taskPrefix));
         ({ system, prompt, blocks } = r);
         cacheKey = `decomp:${bundle.staticPrefixHash.slice(0, 32)}`;
@@ -406,6 +505,7 @@ export class RunEngine {
         difficulty: task.difficulty, contextTokens, contextRawTokens,
       };
       store.insertAttempt(attempt);
+      this.skills.recordSelections({ attemptId: attempt.id, runId, taskId: task.id, difficulty: task.difficulty, functions: task.functions.length }, selections);
 
       // 3. account lease + model call
       const tier = run.plan.tiers[tierIdx]!;
@@ -546,6 +646,7 @@ export class RunEngine {
       store.insertVerdict({ ...verdict, route: 'retry' });
       return this.infraFailure(run, task, leaseId, verdict.findings.find((f) => f.code.startsWith('INFRA'))?.message ?? 'infra');
     }
+    this.skills.recordOutcome(attempt.id, verdict);
     const attemptsTotal = task.attemptsTotal + 1;
     const attemptsAtTier = task.attemptsAtTier + 1;
     const improved = verdict.exactBytes > task.bestExactBytes;
@@ -643,6 +744,7 @@ export class RunEngine {
       store.setRunStatus(runId, 'completed', ['running', 'paused']);
       const fc = store.functionCounts(runId);
       events.emit('run.completed', `completed: ${(fc.passed ?? 0) + (fc.staged ?? 0)} functions matched, ${fc.dead ?? 0} dead-lettered, ${fc.quarantined ?? 0} quarantined; ${batches} PR batch(es) staged`, { runId, data: fc });
+      if (run.row.config.skills.enabled && run.row.config.skills.autoCurate) queueMicrotask(() => this.afterRun?.(runId));
     } catch (e) {
       store.setRunStatus(runId, 'failed', undefined, { error: (e as Error).message });
       events.emit('run.failed', `staging failed: ${(e as Error).message}`, { runId, level: 'error' });

@@ -9,7 +9,7 @@ import type { TaskRow } from '../db/store.js';
 import { simIdent, type SimOracle } from '../providers/mock.js';
 import { sleep } from '../util/async.js';
 import { clipMiddle } from './srRepo.js';
-import { simDocs, simFeatures, simPack, simSharedHeader } from './simContent.js';
+import { simDocs, simFeatures, simPack, simSharedHeader, simTrap, simTrapRecipes, type SimTrapInfo } from './simContent.js';
 import type { CompareOutcome, DiscoveredFunction, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
 
 export interface SimRepoOptions {
@@ -22,6 +22,8 @@ export interface SimRepoOptions {
   rand?: () => number;
   /** Realistic context volumes (docs, shared header, big units, listings). Default true. */
   realisticContext?: boolean;
+  /** Matching traps (Phase 3): listing signatures + documented/undocumented fixes. Default false. */
+  traps?: boolean;
 }
 
 function mulberry32(seed: number) {
@@ -55,6 +57,11 @@ export class SimRepo implements RepoAdapter, SimOracle {
   }
 
   async init() {}
+
+  /** Ground-truth matching trap of a function (null when traps are off or it has none). */
+  trapInfo(rva: string, size: number): SimTrapInfo | null {
+    return this.opts.traps ? simTrap(rva, size) : null;
+  }
 
   difficulty(rva: string, size: number): Difficulty {
     return assessPacket([simFeatures(rva, size)], THRESHOLDS).difficulty;
@@ -184,7 +191,11 @@ export class SimRepo implements RepoAdapter, SimOracle {
   }
 
   async docs(): Promise<DocSection[]> {
-    if (this.realistic) return simDocs();
+    if (this.realistic) {
+      const docs = simDocs();
+      if (!this.opts.traps) return docs;
+      return docs.map((d) => (d.id === 'matching-cookbook' ? { ...d, content: `${d.content}\n\n${simTrapRecipes()}` } : d));
+    }
     return [{ id: 'rules', title: 'Simulated contributor rules', source: 'sim', content: 'Write plausible C++. Never use asm, byte arrays or #pragma.' }];
   }
   async includedHeaders(_slot: number, _unitFiles: string[], opts: { maxChars?: number } = {}): Promise<DocSection[]> {
@@ -205,9 +216,19 @@ export class SimRepo implements RepoAdapter, SimOracle {
   }
   async readPackSlice(pack: string, maxChars: number, opts: { withDecompiler?: boolean } = {}) {
     const p = this.pack(pack);
-    let text = clipMiddle(p.listing, maxChars);
+    const [, size, rva] = pack.split('/');
+    const trap = this.trapInfo(rva ?? '0x0', Number(size) || 16);
+    const listing = trap ? spliceTrap(p.listing, trap.listing) : p.listing;
+    let text = clipMiddle(listing, maxChars);
     if (opts.withDecompiler && maxChars - text.length > 400) text += `\n--- decompiler ---\n${clipMiddle(p.decomp, maxChars - text.length - 24)}`;
     return { text, rawChars: p.bytes.length + p.decomp.length };
+  }
+  async docFile(rel: string): Promise<string | null> {
+    if (rel !== 'docs/matching-cookbook.md') return null;
+    return (await this.docs()).find((d) => d.id === 'matching-cookbook')?.content ?? null;
+  }
+  async packFor(fn: FunctionTarget): Promise<string | null> {
+    return this.realistic ? `sim-pack/${fn.size}/${fn.rva}` : null;
   }
   async analyze(fns: FunctionTarget[]): Promise<Map<string, FunctionFeatures>> {
     return new Map(fns.map((f) => [f.rva, simFeatures(f.rva, f.size)]));
@@ -215,4 +236,11 @@ export class SimRepo implements RepoAdapter, SimOracle {
 }
 
 const THRESHOLDS = ComplexityThresholds.parse({});
+
+/** Put a trap's lines in the middle of a listing (offsets continue the listing's own format). */
+function spliceTrap(listing: string, lines: string[]): string {
+  const rows = listing.split('\n');
+  const at = Math.max(1, Math.floor(rows.length / 2));
+  return [...rows.slice(0, at), ...lines.map((l, i) => `  +0x${(at * 4 + i).toString(16).padStart(3, '0')}  ${l}`), ...rows.slice(at)].join('\n');
+}
 const HEADER = ['// Source exposure: public (community headers).', '// Code origin: original; simulated base', '#include "Sim.h"', ''].join('\n');

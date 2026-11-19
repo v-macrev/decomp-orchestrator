@@ -16,6 +16,7 @@ import { createHash } from 'node:crypto';
 import type { Account, Difficulty, Usage } from '@decomp/core';
 import { sleep } from '../util/async.js';
 import { estimateTokens } from '../util/tokens.js';
+import { compressSkillBody } from '@decomp/skills';
 import { ProviderError, type CompletionRequest, type CompletionResponse, type ProviderAdapter } from './types.js';
 
 /** Default P(match per attempt) by model capability × packet difficulty (simulator only). */
@@ -63,9 +64,24 @@ export interface SimOracle {
   solution(rva: string): string;
   /** Ground-truth difficulty of a function (independent of what any prompt claims). */
   difficulty?(rva: string, size: number): Difficulty;
+  /** Ground-truth matching trap (simulator): what guidance must say for the function to be matchable. */
+  trapInfo?(rva: string, size: number): { id: string; title: string; signature: string | null; fix: RegExp; fixText: string } | null;
+}
+
+/**
+ * Guidance the worker was given, as separate chunks: each core skill (static prefix) and each
+ * dynamic/retry skill body. The mock scores traps against these exactly as a real model would
+ * benefit from them: only text that states the fix helps.
+ */
+function guidanceChunks(req: CompletionRequest): { core: string[]; dynamic: string[] } {
+  const core = (/<core_skills[^>]*>([\s\S]*?)<\/core_skills>/.exec(req.system)?.[1] ?? '').split(/\n(?=## )/).filter((c) => c.trim());
+  const dynamic = [...req.prompt.matchAll(/<skill id="[^"]*"[^>]*>([\s\S]*?)<\/skill>/g)].map((m) => m[1]!);
+  return { core, dynamic };
 }
 
 const RANK: Record<Difficulty, number> = { easy: 0, medium: 1, hard: 2 };
+/** The simulator's over-generalised mined lesson (see curatorAnswer): wrong for every trap-less function. */
+const MISLEADING = /into locals in the order the target loads them/;
 
 interface SpecFn {
   rva: string;
@@ -127,6 +143,8 @@ export class MockAdapter implements ProviderAdapter {
 
   /** Build a WorkerOutput JSON from the machine-readable TASK_SPEC block every worker prompt carries. */
   private answer(req: CompletionRequest, o: Record<string, any>): string {
+    const curator = this.curatorAnswer(req);
+    if (curator !== null) return curator;
     const batch = req.prompt.match(/<complexity_batch>\s*([\s\S]*?)\s*<\/complexity_batch>/);
     if (batch) {
       // Tie-break: settle on the static score with a deterministic nudge (a stand-in for model judgement).
@@ -148,7 +166,20 @@ export class MockAdapter implements ProviderAdapter {
       ? spec.functions.map((f) => this.oracle!.difficulty!(f.rva, f.size)).reduce<Difficulty>((m, d) => (RANK[d] > RANK[m] ? d : m), 'easy')
       : spec.difficulty;
     const base = cap && truth ? matrix[cap]?.[truth] ?? (o.skill ?? 0.6) : (o.skill ?? 0.6);
-    const skill = Math.min(0.97, base + 0.08 * Math.max(0, attempt - 1));
+    const packetSkill = Math.min(0.97, base + 0.08 * Math.max(0, attempt - 1));
+    // Traps (simulator): a trapped function is far harder unless some guidance states its fix; each
+    // injected skill that does not help this function costs a little attention.
+    const { core, dynamic } = guidanceChunks(req);
+    const odds = (f: SpecFn) => {
+      const trap = this.oracle?.trapInfo?.(f.rva, f.size) ?? null;
+      const helps = (g: string) => !!trap && trap.fix.test(g);
+      // Plausible-but-wrong advice (a lesson over-fitted to lucky retries) actively misleads.
+      const distract = dynamic.filter((g) => !helps(g)).reduce((acc, g) => acc + (MISLEADING.test(g) ? 0.12 : 0.03), 0);
+      if (!trap) return Math.max(0.02, packetSkill - distract);
+      const fixed = core.some(helps) || dynamic.some(helps);
+      return Math.max(0.02, Math.min(0.97, fixed ? packetSkill + 0.05 : packetSkill * 0.5) - distract);
+    };
+    const skill = packetSkill;
     const edits = spec.outputMode === 'edits' || (spec.outputMode === 'either' && this.rand() < (o.editRate ?? 0.7));
     // Like a well-behaved model: start from the current unit shown in the prompt and keep everything
     // that is not one of this packet's functions (previously accepted bodies must survive).
@@ -158,17 +189,91 @@ export class MockAdapter implements ProviderAdapter {
     if (this.rand() < (o.cheatRate ?? 0)) {
       const c = CHEATS[Math.floor(this.rand() * CHEATS.length)]!(spec.functions[0]!, spec.allowedPaths);
       if (c.path) files.push({ path: c.path, content: c.body });
-      else files.push({ path: cpp, content: unit(current, spec.functions.map((f, i) => (i === 0 ? { f, body: c.body } : { f, body: this.body(f, skill) }))) });
+      else files.push({ path: cpp, content: unit(current, spec.functions.map((f, i) => (i === 0 ? { f, body: c.body } : { f, body: this.body(f, odds(f)) }))) });
       return JSON.stringify({ files, notes: 'sim cheat' });
     }
     if (edits) {
-      const functions = spec.functions.map((f) => ({ name: simIdent(f), code: `int ${simIdent(f)}()\n{\n${this.body(f, skill)}\n}` }));
+      const functions = spec.functions.map((f) => ({ name: simIdent(f), code: `int ${simIdent(f)}()\n{\n${this.body(f, odds(f))}\n}` }));
       const header = current && current.trim() ? undefined : ['// Source exposure: public (community headers).', '// Code origin: original; simulated draft', ...spec.functions.map((f) => `// ${f.rva} ${f.name ?? 'Unknown'}`)].join('\n');
       const decls = [...(header ? ['#include "Sim.h"'] : []), ...helperDecls(spec.functions)].join('\n');
       return JSON.stringify({ edits: [{ path: cpp, ...(header ? { header } : {}), ...(decls ? { declarations: decls } : {}), functions }], notes: `sim attempt ${attempt} (edits)` });
     }
-    files.push({ path: cpp, content: unit(current, spec.functions.map((f) => ({ f, body: this.body(f, skill) }))) });
+    files.push({ path: cpp, content: unit(current, spec.functions.map((f) => ({ f, body: this.body(f, odds(f)) }))) });
+    void skill;
     return JSON.stringify({ files, notes: `sim attempt ${attempt}` });
+  }
+
+  /**
+   * Stand-in for the curator's frontier model. It answers from ground truth the way a capable model
+   * would answer from the diffs: it recognises a trap when at least two retry wins share it. It also
+   * proposes one over-broad "lesson" from trap-less wins, so the shadow gate has something to reject.
+   */
+  private curatorAnswer(req: CompletionRequest): string | null {
+    const block = (tag: string) => {
+      const m = new RegExp(`<${tag}>\\s*([\\s\\S]*?)\\s*</${tag}>`).exec(req.prompt);
+      return m ? JSON.parse(m[1]!) : null;
+    };
+    const mining = block('skill_mining') as { wins: Array<{ id: string; functions: SpecFn[] }>; existingSkills: string[]; maxSkills?: number } | null;
+    if (mining) {
+      const known = new Set(mining.existingSkills.map((n) => n.toLowerCase()));
+      const byTrap = new Map<string, { info: NonNullable<ReturnType<NonNullable<SimOracle['trapInfo']>>>; ids: string[] }>();
+      const plain: string[] = [];
+      for (const w of mining.wins) {
+        const info = w.functions.map((f) => this.oracle?.trapInfo?.(f.rva, f.size) ?? null).find((x) => x) ?? null;
+        if (!info) {
+          plain.push(w.id);
+          continue;
+        }
+        const g = byTrap.get(info.id) ?? { info, ids: [] };
+        g.ids.push(w.id);
+        byTrap.set(info.id, g);
+      }
+      const skills: unknown[] = [];
+      for (const { info, ids } of byTrap.values()) {
+        if (ids.length < 2 || known.has(info.title.toLowerCase())) continue;
+        skills.push({
+          name: info.title,
+          description: `Recognised in ${ids.length} retry wins that share this listing signature.`,
+          body: `**${info.title}.**\nSymptom: first attempts reproduce the logic but miss this shape, and the comparator reports a byte mismatch around it.\nFix: ${info.fixText}`,
+          triggers: info.signature ? { mnemonics: [info.signature], minScore: 3 } : { patterns: ['vtable'], features: { minIndirectCalls: 1 }, minScore: 2.5 },
+          rationale: `${ids.length} wins: the passing diff applies this fix, the failed diff did not`,
+          winIds: ids,
+        });
+      }
+      if (plain.length >= 3 && !known.has('keep call arguments in source order')) {
+        skills.push({
+          name: 'Keep call arguments in source order',
+          description: 'Several retries passed after reordering statements.',
+          body: '**Keep call arguments in source order.**\nSymptom: argument setup order differs at a call. Fix: evaluate arguments into locals in the order the target loads them, then make the call; keep stores in source order.',
+          triggers: { patterns: ['calls'], minScore: 1 },
+          rationale: `${plain.length} wins changed statement order`,
+          winIds: plain.slice(0, 6),
+        });
+      }
+      return JSON.stringify({ skills: skills.slice(0, mining.maxSkills ?? 4) });
+    }
+    const patch = block('skill_patch') as { skill: { body: string; triggers: Record<string, any> }; failing: Array<{ functions: SpecFn[] }>; passing: Array<{ functions: SpecFn[] }> } | null;
+    if (patch) {
+      const traps = new Map<string, { info: NonNullable<ReturnType<NonNullable<SimOracle['trapInfo']>>>; n: number }>();
+      for (const f of patch.failing.flatMap((x) => x.functions)) {
+        const info = this.oracle?.trapInfo?.(f.rva, f.size);
+        if (!info || info.fix.test(patch.skill.body)) continue;
+        traps.set(info.id, { info, n: (traps.get(info.id)?.n ?? 0) + 1 });
+      }
+      const top = [...traps.values()].sort((a, b) => b.n - a.n)[0];
+      if (top && top.n >= Math.max(2, Math.ceil(patch.failing.length / 3))) {
+        const mn = new Set<string>([...(patch.skill.triggers.mnemonics ?? []), ...(top.info.signature ? [top.info.signature] : [])]);
+        return JSON.stringify({ action: 'add_rule', body: `${patch.skill.body.trim()}\nAlso: ${top.info.fixText}`, triggers: { ...patch.skill.triggers, mnemonics: [...mn] }, rationale: `${top.n} failing packets share an unaddressed shape (${top.info.title})` });
+      }
+      if ((patch.skill.triggers.mnemonics ?? []).length && !(patch.skill.triggers.require ?? []).includes('mnemonics')) {
+        return JSON.stringify({ action: 'tighten', triggers: { ...patch.skill.triggers, require: ['mnemonics'] }, rationale: 'failures fire without the listing signature: require it' });
+      }
+      return JSON.stringify({ action: 'none', rationale: 'no shared root cause the skill can address' });
+    }
+    const compress = block('skill_compress') as { body: string; targetTokens: number } | null;
+    if (compress) return JSON.stringify({ body: compressSkillBody(compress.body, { target: compress.targetTokens }).body });
+    if (block('pr_corrections') || block('recipe_triggers')) return JSON.stringify({ skills: [] });
+    return null;
   }
 
   private body(f: SpecFn, skill: number): string {
