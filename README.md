@@ -18,6 +18,18 @@ Bulk LLM orchestration for function matching in
   * Integrity and tamper digests.
   * Bounded, env-scrubbed processes in per-slot git worktrees, with optional Docker.
   * Structured verdicts with exact `file:line` reasons that route back to workers.
+* **Function gathering.** The Orchestrator builds each batch from the repository itself:
+  * the public inventory (`data/progress.json`), joined with `sr next` for unit mapping, readiness
+    and claims;
+  * local claims and this tool's own in-flight work;
+  * the unit sources (declared signature, existing draft or stub);
+  * local packs and an optional function table for shape and xrefs.
+
+  Filters by size, RVA range, namespace, module, unit and name origin. Every exclusion is counted.
+* **Per-worker function cap.** Each worker instance may claim at most 60 functions per run
+  (configurable), charged atomically with the lease. The run form warns when
+  `workers × 60 < batch`, and a run that exhausts every eligible worker pauses with a clear
+  message; the operator can raise the cap and resume. See [docs/PHASE4.md](docs/PHASE4.md).
 * **Capability routing.** Each function is scored from its shape: branches, loops, virtual calls,
   SSE, EH funclets, earlier failures. Packets go to fast, balanced or frontier worker tiers. Idle
   higher tiers steal lower-tier backlog, and failing packets are promoted up the ladder.

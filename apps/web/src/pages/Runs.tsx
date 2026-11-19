@@ -3,7 +3,7 @@
 // throughput, token/cost tracking, per-function drill-down with diffs and Gate Keeper verdicts.
 import { useCallback, useEffect, useState, type FormEvent } from 'react';
 import type { Flow, Task, TelemetryEvent } from '@decomp/core';
-import { api, stream, type AccountView, type Batch, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary } from '../api';
+import { api, stream, type AccountView, type Batch, type CapacityPlan, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { TaskDrawer } from '../components/TaskDrawer';
 
@@ -71,8 +71,27 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
     count: 500, maxSize: 64, rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: false, draftedBy: 'operator',
     routing: true, llmTieBreak: false, promoteAfter: 2, workStealing: true, contextMode: 'budgeted',
     skills: true, autoCurate: false,
+    capPerWorker: 60, gMaxSize: 256, gNamespaces: '', gModules: '', gRange: '', gExcludeGuess: false, gExcludeDrafted: false,
   });
   const [err, setErr] = useState('');
+  const [capacity, setCapacity] = useState<CapacityPlan | null>(null);
+  const [preview, setPreview] = useState<GatherPreview | null>(null);
+  const [previewing, setPreviewing] = useState(false);
+  const list = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
+  const gatherFilter = () => ({
+    maxFunctions: f.count, maxSize: f.gMaxSize, namespaces: list(f.gNamespaces), modules: list(f.gModules),
+    rvaRanges: list(f.gRange).map((r) => r.split('-')).filter((x) => x.length === 2).map(([start, end]) => ({ start: start!, end: end! })),
+    excludeNameOrigins: f.gExcludeGuess ? ['GUESS'] : [], excludeDrafted: f.gExcludeDrafted,
+  });
+  // Live pre-run check: (worker instances × per-worker cap) vs the batch size.
+  useEffect(() => {
+    const flow = flows.find((x) => x.id === f.flowId);
+    if (!flow || f.source === 'rva_list') return setCapacity(null);
+    const t = setTimeout(() => {
+      api.validateFlow(flow, { batch: f.count, cap: f.capPerWorker, stealing: f.routing && f.workStealing }).then((r) => setCapacity(r.capacity)).catch(() => setCapacity(null));
+    }, 250);
+    return () => clearTimeout(t);
+  }, [flows, f.flowId, f.count, f.capPerWorker, f.source, f.routing, f.workStealing]);
   useEffect(() => {
     api.flows().then((x) => {
       setFlows(x);
@@ -83,10 +102,10 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setErr('');
-    const selection = f.source === 'rva_list' ? { source: 'rva_list', rvas: f.rvas.split(/[\s,]+/).filter(Boolean) } : f.source === 'synthetic' ? { source: 'synthetic', count: f.count, seed: Math.floor(Math.random() * 1e6) } : { source: 'sr_next', count: f.count, maxSize: f.maxSize };
+    const selection = f.source === 'rva_list' ? { source: 'rva_list', rvas: f.rvas.split(/[\s,]+/).filter(Boolean) } : f.source === 'synthetic' ? { source: 'synthetic', count: f.count, seed: Math.floor(Math.random() * 1e6) } : f.source === 'gather' ? { source: 'gather', filter: gatherFilter() } : { source: 'sr_next', count: f.count, maxSize: f.maxSize };
     try {
       const r = await api.createRun(f.name, f.flowId, {
-        selection, packetMaxFunctions: f.packetMaxFunctions, gateConcurrency: f.gateConcurrency, prBatchSize: f.prBatchSize,
+        selection, maxFunctionsPerWorker: f.capPerWorker, packetMaxFunctions: f.packetMaxFunctions, gateConcurrency: f.gateConcurrency, prBatchSize: f.prBatchSize,
         exposureConsent: f.exposureConsent, draftedBy: f.draftedBy, ...(f.budgetUsd ? { budgetUsd: Number(f.budgetUsd) } : {}),
         routing: { enabled: f.routing, llmTieBreak: f.llmTieBreak, promoteAfterFailures: f.promoteAfter, workStealing: f.workStealing },
         context: { mode: f.contextMode },
@@ -108,18 +127,44 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
         <label>Backlog source
           <select value={f.source} onChange={(e) => set('source', e.target.value)}>
             {mode === 'sim' ? <option value="synthetic">synthetic (simulator)</option> : <><option value="sr_next">sr next (readiness-ranked)</option><option value="rva_list">explicit RVAs</option></>}
+            <option value="gather">gather (inventory scan + filters)</option>
           </select>
         </label>
         {f.source !== 'rva_list' && <label>Functions<input type="number" min={1} value={f.count} onChange={(e) => set('count', Number(e.target.value))} style={{ width: 90 }} /></label>}
         {f.source === 'sr_next' && <label>Max size (B)<input type="number" value={f.maxSize} onChange={(e) => set('maxSize', Number(e.target.value))} style={{ width: 90 }} /></label>}
       </div>
       {f.source === 'rva_list' && <label>RVAs (hex, comma/space separated)<textarea rows={3} value={f.rvas} onChange={(e) => set('rvas', e.target.value)} /></label>}
+      {f.source === 'gather' && (
+        <div style={{ display: 'grid', gap: 8, border: '1px dashed var(--border)', borderRadius: 8, padding: 10 }}>
+          <div className="row">
+            <label>Max size (B)<input type="number" value={f.gMaxSize} onChange={(e) => set('gMaxSize', Number(e.target.value))} style={{ width: 80 }} /></label>
+            <label className="grow" title="Qualified-name prefixes on :: boundaries">Namespaces / classes<input value={f.gNamespaces} placeholder="RE, BSTArray, TESForm" onChange={(e) => set('gNamespaces', e.target.value)} /></label>
+            <label className="grow" title="reconstruction/<area>/…">Modules<input value={f.gModules} placeholder="skyrim, gamebryo" onChange={(e) => set('gModules', e.target.value)} /></label>
+            <label title="Half-open ranges, comma separated">RVA ranges<input value={f.gRange} placeholder="0x1000-0x2000" onChange={(e) => set('gRange', e.target.value)} style={{ width: 150 }} /></label>
+          </div>
+          <div className="row">
+            <label className="inline"><input type="checkbox" checked={f.gExcludeGuess} onChange={(e) => set('gExcludeGuess', e.target.checked)} />Skip GUESS-named functions</label>
+            <label className="inline" title="Skip functions whose unit already contains a non-trivial draft"><input type="checkbox" checked={f.gExcludeDrafted} onChange={(e) => set('gExcludeDrafted', e.target.checked)} />Skip drafted</label>
+            <span className="muted" style={{ fontSize: 12 }}>Locked (claimed) and in-flight functions are always skipped.</span>
+            <span className="grow" />
+            <button type="button" disabled={previewing} onClick={() => { setPreviewing(true); api.gatherPreview(gatherFilter()).then(setPreview).catch((e) => setErr(String(e.message))).finally(() => setPreviewing(false)); }}>{previewing ? 'Gathering…' : 'Preview gather'}</button>
+          </div>
+          {preview && <GatherSummary g={preview} />}
+        </div>
+      )}
       <div className="row">
         <label>Functions / packet<input type="number" min={1} max={60} value={f.packetMaxFunctions} onChange={(e) => set('packetMaxFunctions', Number(e.target.value))} style={{ width: 80 }} /></label>
         <label>Concurrent compares<input type="number" min={1} max={64} value={f.gateConcurrency} onChange={(e) => set('gateConcurrency', Number(e.target.value))} style={{ width: 80 }} /></label>
         <label>Functions / PR (≤60)<input type="number" min={1} max={60} value={f.prBatchSize} onChange={(e) => set('prBatchSize', Number(e.target.value))} style={{ width: 80 }} /></label>
         <label>Budget USD<input value={f.budgetUsd} placeholder="none" onChange={(e) => set('budgetUsd', e.target.value)} style={{ width: 80 }} /></label>
+        <label title="Hard ceiling of distinct functions one worker instance may take in this run">Max fn / worker<input type="number" min={1} max={5000} value={f.capPerWorker} onChange={(e) => set('capPerWorker', Number(e.target.value))} style={{ width: 80 }} /></label>
       </div>
+      {capacity && (
+        <div className={capacity.warnings.length ? 'lvl-warn' : 'muted'} style={{ fontSize: 12 }}>
+          {capacity.workers} worker instance(s) × {capacity.maxPerWorker} = {capacity.capacity} function capacity for a batch of {capacity.batch}
+          {capacity.warnings.length ? <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>{capacity.warnings.map((w) => <li key={w}>{w}</li>)}</ul> : ' — ok'}
+        </div>
+      )}
       <div className="row" style={{ alignItems: 'center' }}>
         <label className="inline"><input type="checkbox" checked={f.routing} onChange={(e) => set('routing', e.target.checked)} />Route by complexity</label>
         <label className="inline" title="Idle higher tiers pull lower-tier backlog"><input type="checkbox" checked={f.workStealing} disabled={!f.routing} onChange={(e) => set('workStealing', e.target.checked)} />Work stealing</label>
@@ -209,6 +254,8 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
       <TokenPanel m={m} />
       {m.routing && <RoutingPanel r={m.routing} knowledge={m.knowledge} />}
       {m.skills?.enabled && <RunSkillsPanel s={m.skills} />}
+      {m.workers?.list.length > 0 && <WorkerQuotaPanel m={m} onChange={onChange} />}
+      {m.gather && <div className="panel"><h2>Function gathering</h2><GatherSummary g={m.gather} /></div>}
 
       <div className="grid2">
         <div className="panel">
@@ -230,7 +277,7 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
           </select>
         </div>
         <table>
-          <thead><tr><th>Unit</th><th>Functions</th><th>Difficulty</th><th>State</th><th>Tier</th><th>Attempts</th><th>Best bytes</th></tr></thead>
+          <thead><tr><th>Unit</th><th>Functions</th><th>Difficulty</th><th>State</th><th>Tier</th><th>Worker</th><th>Attempts</th><th>Best bytes</th></tr></thead>
           <tbody>
             {tasks.map((t) => {
               const tier = m.routing?.tiers[t.tier];
@@ -241,6 +288,7 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
                   <td><DifficultyBadge d={t.difficulty} score={t.complexity} promoted={!!t.assessment && t.assessment.difficulty !== t.difficulty} /></td>
                   <td><span className={`chip ${t.state}`}>{t.state}</span></td>
                   <td>{tier ? <><span className={`cap ${tier.capability}`}>{tier.capability}</span> <span className="muted">{t.tier}</span></> : t.tier}</td>
+                  <td className="mono" style={{ fontSize: 11 }}>{(t as { assignedWorker?: string | null }).assignedWorker ?? <span className="muted">—</span>}</td>
                   <td>{t.attemptsTotal}</td><td>{t.bestExactBytes}</td>
                 </tr>
               );
@@ -391,6 +439,90 @@ function RoutingPanel({ r, knowledge }: { r: RoutingMetrics; knowledge: Metrics[
           Run knowledge: {knowledge.byKind.length ? knowledge.byKind.map((k) => `${k.n} ${k.kind.replace('_', ' ')} (${k.uses} uses)`).join(' · ') : 'none yet'}
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Per-worker quota progress against the hard per-run function cap, capacity plan and stalls. */
+function WorkerQuotaPanel({ m, onChange }: { m: Metrics; onChange: () => void }) {
+  const w = m.workers;
+  const cap = m.capacity;
+  const [raise, setRaise] = useState(w.maxPerWorker * 2);
+  const used = w.list.reduce((s, x) => s + x.assigned, 0);
+  return (
+    <div className="panel">
+      <div className="row">
+        <h2 className="grow" style={{ margin: 0 }}>Worker quotas</h2>
+        <span className="muted" style={{ fontSize: 12 }}>{w.list.length} worker(s) · max {w.maxPerWorker} functions each · {used} / {w.list.length * w.maxPerWorker} assigned</span>
+      </div>
+      {cap?.stalled && (
+        <div className="lvl-error" style={{ margin: '8px 0', fontSize: 13 }}>
+          Capacity exhausted: {cap.stalled.functions} function(s) in {cap.stalled.packets} packet(s) left and every eligible worker is at its cap.{' '}
+          <label className="inline" style={{ display: 'inline-flex' }}>raise to<input type="number" min={w.maxPerWorker + 1} value={raise} onChange={(e) => setRaise(Number(e.target.value))} style={{ width: 70 }} /></label>{' '}
+          <button className="primary" onClick={() => api.raiseWorkerCap(m.run.id, raise).then(onChange)}>Raise cap &amp; resume</button>
+        </div>
+      )}
+      {cap && cap.warnings.length > 0 && !cap.stalled && <ul className="lvl-warn" style={{ fontSize: 12, margin: '6px 0 6px 16px', padding: 0 }}>{cap.warnings.map((x) => <li key={x}>{x}</li>)}</ul>}
+      {cap?.perTier && (
+        <div className="row" style={{ gap: 14, fontSize: 12, margin: '4px 0 8px' }}>
+          {cap.perTier.map((t) => (
+            <span key={t.tier}><span className={`cap ${t.capability}`}>{t.capability}</span> {t.demand ?? '?'} fn → {t.workers} × {cap.maxPerWorker} = {t.capacity}{t.overflow ? <span className="lvl-warn"> (overflow {t.overflow})</span> : ''}</span>
+          ))}
+        </div>
+      )}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(210px, 1fr))', gap: 8 }}>
+        {w.list.map((x) => <QuotaCard key={x.workerId} q={x} />)}
+      </div>
+    </div>
+  );
+}
+
+function QuotaCard({ q }: { q: WorkerQuota }) {
+  const pct = q.max ? q.assigned / q.max : 0;
+  return (
+    <div className="kpi" style={{ padding: '8px 10px' }}>
+      <div className="row" style={{ gap: 6 }}>
+        {q.capability && <span className={`cap ${q.capability}`}>{q.capability}</span>}
+        <span className="mono grow" style={{ fontSize: 11 }}>{q.workerId}</span>
+        {q.capped ? <span className="chip warn">capped</span> : q.busy ? <span className="chip running">busy</span> : <span className="chip">idle</span>}
+      </div>
+      <div className="meter" style={{ marginTop: 6 }}>
+        <div className="mono" style={{ fontSize: 12 }}><b>{q.assigned}</b> / {q.max} functions · {q.matched} matched · {q.attempts} attempt(s)</div>
+        <div className="track" role="meter" aria-label={`${q.workerId} quota`} aria-valuemin={0} aria-valuemax={q.max} aria-valuenow={q.assigned}>
+          <div className="fill" style={{ width: `${Math.min(1, pct) * 100}%`, background: pct >= 1 ? 'var(--warn)' : 'var(--accent)' }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** What the FunctionGatherer found and why the rest was left out. */
+function GatherSummary({ g }: { g: Omit<GatherPreview, 'functions' | 'byTier'> & Partial<Pick<GatherPreview, 'functions' | 'byTier'>> }) {
+  const ex = Object.entries(g.excluded).filter(([k, n]) => n && k !== 'matched').sort((a, b) => b[1] - a[1]);
+  return (
+    <div style={{ fontSize: 12, display: 'grid', gap: 6 }}>
+      <div><b>{g.selected}</b> function(s) in {g.units} unit(s), {g.selectedBytes} B · from {g.inventory.mapped} unmatched of {g.inventory.total} ({g.inventory.matched} matched) · <span className="muted">{g.source}{g.claimsChecked ? '' : ' · others\' claims not checked (offline)'}</span></div>
+      {ex.length > 0 && <div className="muted">Excluded: {ex.map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(' · ')}</div>}
+      <div className="muted">Shape: {g.withPackFeatures} with local pack counts · {g.withTableFacts} with function-table xrefs · modules {Object.entries(g.byModule).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([k, n]) => `${k} ${n}`).join(', ')}</div>
+      {g.byTier && <div className="row" style={{ gap: 8 }}>{(['easy', 'medium', 'hard'] as const).map((d) => <span key={d}><DifficultyBadge d={d} /> {g.byTier![d]}</span>)}</div>}
+      {g.functions && g.functions.length > 0 && (
+        <div style={{ maxHeight: 260, overflow: 'auto' }}>
+          <table>
+            <thead><tr><th>RVA</th><th>Function</th><th>Size</th><th>Tier</th><th>Signature</th><th>Draft</th><th>Blocks</th><th>Xrefs in/out</th></tr></thead>
+            <tbody>
+              {g.functions.slice(0, 80).map((x) => (
+                <tr key={x.rva} title={x.reasons.join(' · ')}>
+                  <td className="mono">{x.rva}</td><td>{x.name}<div className="muted" style={{ fontSize: 10 }}>{x.unit}</div></td><td className="mono">{x.size}</td>
+                  <td><DifficultyBadge d={x.complexityTier} score={x.complexityScore} /></td>
+                  <td className="mono" style={{ fontSize: 10, maxWidth: 220 }}>{x.signature ?? <span className="muted">—</span>}</td>
+                  <td>{x.draft === 'none' ? <span className="muted">—</span> : <span className={`chip ${x.draft === 'stub' ? 'warn' : ''}`}>{x.draft}</span>}</td>
+                  <td className="mono">{x.basicBlocks ?? '—'}</td><td className="mono">{x.xrefsIn ?? '?'} / {x.xrefsOut ?? '?'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   );
 }

@@ -280,6 +280,11 @@ bottleneck is compare throughput, so set `gateConcurrency` to roughly physical c
   * Skill curator: repo-history bootstrap, retry-win mining, failure-cluster patching, core promotion, compression, deprecation.
   * Shadow evaluation through the real Gate Keeper before any skill or edit is used.
   * Details and measured results: **[PHASE3.md](PHASE3.md)**.
+* **Phase 4 (shipped):**
+  * FunctionGatherer over the repository's inventory, `sr next`, claims, unit sources, packs and an optional function table, with filters and counted exclusions.
+  * Hard per-worker function cap (default 60), charged atomically with the lease; capacity planning, stall pause and in-run cap raise.
+  * Worker quota UI, gather preview, live capacity warnings.
+  * Details: **[PHASE4.md](PHASE4.md)**.
 * **Next:**
   * LLM orchestrator planner (prioritisation across units, dependency ordering from call graphs).
   * Agentic workers in containers.

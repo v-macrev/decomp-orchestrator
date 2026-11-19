@@ -11,7 +11,7 @@
       "name": "orchestrator-demo",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "start", "-w", "@decomp/server"],
-      "env": { "ORCH_CONFIG": "data/sim/phase3-demo.json", "PORT": "8788" },
+      "env": { "ORCH_CONFIG": "data/sim/phase4-demo.json", "PORT": "8788" },
       "port": 8788
     }
   ]

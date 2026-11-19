@@ -76,6 +76,9 @@ export interface Metrics {
   routing: RoutingMetrics | null;
   knowledge: { byKind: Array<{ kind: string; n: number; uses: number }>; recent: Array<{ kind: string; symbol: string; sourceUnit: string; uses: number }> };
   skills: RunSkillMetrics;
+  workers: { maxPerWorker: number; list: WorkerQuota[] };
+  capacity: (CapacityPlan & { stalled?: { at: number; packets: number; functions: number } }) | null;
+  gather: Omit<GatherPreview, 'functions' | 'byTier'> | null;
   engine: { active: boolean; paused: boolean; activeSlots: number; busySlots: number };
   tasks: Record<string, number>;
   functions: Record<string, number>;
@@ -91,6 +94,28 @@ export interface Metrics {
   throughput: { passedPerMin5: number; etaMinutes: number | null; series: Array<{ t: number; passed: number }> };
   byAccount: Array<{ account_id: string; model: string; attempts: number; completed: number; provider_errors: number; input_tokens: number; cached_input_tokens: number; cache_write_tokens: number; output_tokens: number; cache_hit_rate: number; cost_usd: number; avg_latency_ms: number }>;
   accounts: AccountView[];
+}
+
+export interface WorkerQuota {
+  workerId: string; nodeId: string; tier: number; capability: CapabilityTier | null; max: number; assigned: number; packets: number; matched: number; attempts: number; busy: boolean; capped: boolean;
+}
+
+export interface CapacityPlan {
+  maxPerWorker: number; workers: number; workersWanted: number; repoSlots: number; capacity: number; batch: number; workersNeeded: number;
+  perTier: Array<{ tier: number; label: string; capability: CapabilityTier; workers: number; capacity: number; demand: number | null; overflow: number }>;
+  unplaced: number; headroom: number; ok: boolean; warnings: string[];
+}
+
+export interface GatheredFunctionView {
+  rva: string; name: string | null; size: number; unit: string; nameOrigin: string | null; readiness?: number; signature: string | null; draft: 'none' | 'stub' | 'present';
+  xrefsIn: number | null; xrefsOut: number | null; basicBlocks: number | null; instructions: number | null; branches: number | null; sources: string[];
+  complexityScore: number; complexityTier: Difficulty; reasons: string[];
+}
+
+export interface GatherPreview {
+  source: string; at: number; inventory: { total: number; matched: number; mapped: number; other: number }; candidates: number; claimsChecked: boolean;
+  excluded: Record<string, number>; selected: number; selectedBytes: number; withPackFeatures: number; withTableFacts: number; units: number; byModule: Record<string, number>;
+  functions: GatheredFunctionView[]; byTier: Record<Difficulty, number>;
 }
 
 export type RunSkillMetrics =
@@ -174,7 +199,10 @@ export const api = {
   flows: () => req<Flow[]>('GET', '/api/flows'),
   saveFlow: (f: Flow) => req<{ flow: Flow; issues: FlowIssue[] }>('PUT', `/api/flows/${encodeURIComponent(f.id)}`, f),
   deleteFlow: (id: string) => req('DELETE', `/api/flows/${encodeURIComponent(id)}`),
-  validateFlow: (f: Flow) => req<{ issues: FlowIssue[]; plan: FlowPlanView | null; repoSlots: number }>('POST', '/api/flows/validate', f),
+  validateFlow: (f: Flow, capacity?: { batch: number; cap: number; stealing?: boolean }) =>
+    req<{ issues: FlowIssue[]; plan: FlowPlanView | null; repoSlots: number; capacity: CapacityPlan | null }>('POST', `/api/flows/validate${capacity ? `?batch=${capacity.batch}&cap=${capacity.cap}&stealing=${capacity.stealing === false ? 0 : 1}` : ''}`, f),
+  gatherPreview: (filter: Record<string, unknown>) => req<GatherPreview>('POST', '/api/gather/preview', filter),
+  raiseWorkerCap: (runId: string, maxFunctionsPerWorker: number) => req('POST', `/api/runs/${runId}/capacity`, { maxFunctionsPerWorker, resume: true }),
   runs: () => req<RunSummary[]>('GET', '/api/runs'),
   createRun: (name: string, flowId: string, config: Record<string, unknown>) => req<{ id: string }>('POST', '/api/runs', { name, flowId, config }),
   metrics: (id: string) => req<Metrics>('GET', `/api/runs/${id}/metrics`),
