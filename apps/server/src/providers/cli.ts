@@ -41,13 +41,41 @@ export function resolveCliBinary(name: string): string {
   return out;
 }
 
+/**
+ * Milliseconds until "resets 3am (America/Sao_Paulo)" / "resets 11:30pm" (next occurrence of that
+ * wall-clock time in that zone, or locally). Null when the message names no time.
+ */
+export function resetDelayMs(text: string, now = new Date()): number | null {
+  const m = /resets\s+(?:[A-Za-z]{3,9}\s+\d{1,2},?\s+)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]+)\))?/i.exec(text);
+  if (!m) return null;
+  let h = Number(m[1]) % 12;
+  if (!m[3] || m[3].toLowerCase() === 'pm') h = m[3] ? h + 12 : Number(m[1]);
+  const min = Number(m[2] ?? 0);
+  let cur: { h: number; m: number; s: number };
+  try {
+    const parts = new Intl.DateTimeFormat('en-GB', { timeZone: m[4] || undefined, hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }).formatToParts(now);
+    const get = (t: string) => Number(parts.find((p) => p.type === t)?.value ?? 0);
+    cur = { h: get('hour'), m: get('minute'), s: get('second') };
+  } catch {
+    cur = { h: now.getHours(), m: now.getMinutes(), s: now.getSeconds() };
+  }
+  let delta = ((h * 60 + min) - (cur.h * 60 + cur.m)) * 60_000 - cur.s * 1000;
+  if (delta <= 0) delta += 24 * 3_600_000;
+  return delta + 60_000; // a minute of slack past the reset
+}
+
 function classifyCliFailure(text: string, timedOut: boolean, aborted: boolean): ProviderError {
   const t = text.toLowerCase();
   if (aborted) return new ProviderError('aborted', 'aborted');
   // A missing binary is configuration, not a provider fault: do not retry it as a server error.
   if (/spawn error|enoent|is not recognized as an internal or external command/.test(t)) return new ProviderError('auth', `CLI binary not found: ${text.trim().slice(0, 160)}`);
   if (timedOut) return new ProviderError('timeout', 'cli timed out');
-  if (/usage limit|limit reached|quota|credit balance|billing/.test(t)) return new ProviderError('quota', 'cli usage limit reached', 30 * 60_000);
+  // Subscription limits ("You've hit your weekly limit · resets 3am (America/Sao_Paulo)") last until
+  // the stated reset — retrying every few minutes as for a 429 just burns attempts.
+  if (/usage limit|limit reached|hit your [\w ]*limit|(weekly|daily|session|5-hour) limit|quota|credit balance|billing/.test(t)) {
+    const wait = resetDelayMs(text) ?? 30 * 60_000;
+    return new ProviderError('quota', `subscription limit reached${/resets[^.\n]*/i.exec(text)?.[0] ? ` (${/resets[^.\n]*/i.exec(text)![0].trim()})` : ''}`, wait);
+  }
   if (/rate.?limit|429|too many requests/.test(t)) return new ProviderError('rate_limited', 'cli rate limited');
   if (/overloaded|529|503/.test(t)) return new ProviderError('overloaded', 'provider overloaded');
   if (/not logged in|please run .*login|invalid api key|unauthori[sz]ed|401|403|authentication/.test(t)) return new ProviderError('auth', 'cli profile is not authenticated');

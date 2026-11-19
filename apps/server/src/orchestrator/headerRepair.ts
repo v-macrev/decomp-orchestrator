@@ -22,6 +22,12 @@ const NOISE = /^\/\/\s*(?:Task|Labels?|Recipe|Evidence|Drafted by|Disclaimer|Not
 const KEYED = /^\/\/\s*([A-Z][A-Za-z -]{1,40}):/;
 const COMPARED = /^\/\/\s*0x[0-9a-fA-F]+(?:\s|$)/;
 const PLACEHOLDER = /SKELETON_TODO\w*/;
+/** The repo lint's header budget and what it does not count (labels, sibling sources, compared functions, SPDX). */
+const HEADER_BUDGET = 6;
+const LABEL_WORD = /(?<![A-Za-z0-9_])(?:COMMUNITY|SIBLING|GUESS|EXE_RTTI|STANDIN|OBSERVED)[A-Za-z0-9_]*/;
+function countedLines(es: Array<{ lines: string[] }>): number {
+  return es.flatMap((e) => e.lines).filter((l) => l.trim() && l.trim() !== '//' && !LABEL_WORD.test(l) && !l.includes('Sibling source:') && !COMPARED.test(l.trim()) && !l.includes('SPDX-License-Identifier')).length;
+}
 
 interface Entry {
   lines: string[];
@@ -125,6 +131,20 @@ export function repairHeader(path: string, after: string, before: string | null,
     es.splice(at >= 0 ? at + 1 : 0, 0, { lines: [`// Code origin: ${opts.originHint}`], key: 'Code origin', placeholder: false, added: true });
     changes.push(`Code origin: added the worker's own statement (required in every changed file's header)`);
   }
+  // 5. Still over the repo's 6-line budget? `sr start` stacks its skeleton on top of the unit's
+  // existing header, so the file itself may carry a second "Source exposure" or a "Recipe:" /
+  // "Drafted by" line from an older draft. Untouched, the lint tolerates that; once the header
+  // changes it must fit. Only then drop pre-existing banned lines and later duplicates of
+  // single-valued keys (adaptation and licence statements are never dropped).
+  if (countedLines(es) > HEADER_BUDGET) {
+    const before0 = es.length;
+    es = es.filter((e) => e.added || !NOISE.test(e.lines.join(' ')) || e.key === 'Licence' || e.key === 'License');
+    for (const key of ['Source exposure', 'Code origin', 'Recipe']) {
+      const all = es.filter((e) => e.key === key && !e.placeholder);
+      for (const extra of all.slice(1)) es = es.filter((e) => e !== extra);
+    }
+    if (es.length < before0) changes.push(`dropped ${before0 - es.length} pre-existing banned or duplicate header line(s) to fit the ${HEADER_BUDGET}-line budget`);
+  }
   if (!changes.length) return { content: after, changes };
   return { content: [...es.flatMap((e) => e.lines), ...rest].join('\n'), changes };
 }
@@ -137,6 +157,7 @@ export async function repairAnswer(
   files: Array<{ path: string; content: string }>,
   current: (path: string) => Promise<string | null>,
   stated: { codeOrigin?: string; adaptedBodies?: string } = {},
+  opts: { untouched?: Array<{ path: string; current: string | null; base: string | null }> } = {},
 ): Promise<{ files: Array<{ path: string; content: string }>; changes: string[] }> {
   const order = [...files].sort((a, b) => Number(a.path.endsWith('.h')) - Number(b.path.endsWith('.h')));
   const out = new Map(files.map((f) => [f.path, f.content]));
@@ -151,5 +172,16 @@ export async function repairAnswer(
     changes.push(...r.changes.map((c) => `${f.path}: ${c}`));
     hint ??= originStatement(r.content);
   }
+  // Files the worker did not return but `prepare` changed (skeleton headers/declarations): the
+  // repo's preflight checks them too. Compare against the base revision; add them only if repaired.
+  const extra: Array<{ path: string; content: string }> = [];
+  for (const x of opts.untouched ?? []) {
+    if (out.has(x.path) || x.current === null || x.current === x.base) continue;
+    const r = repairHeader(x.path, x.current, x.base, { originHint: hint, adaptedHint: adapted });
+    if (!r.changes.length) continue;
+    extra.push({ path: x.path, content: r.content });
+    changes.push(...r.changes.map((c) => `${x.path} (changed by prepare): ${c}`));
+  }
+  if (extra.length) return { files: [...files.map((f) => ({ path: f.path, content: out.get(f.path)! })), ...extra], changes };
   return { files: files.map((f) => ({ path: f.path, content: out.get(f.path)! })), changes };
 }

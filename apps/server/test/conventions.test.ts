@@ -8,6 +8,7 @@ import { planCapacity } from '../src/orchestrator/capacity.js';
 import { applyEdit } from '../src/orchestrator/edits.js';
 import { allocateSlots, isFormatOnly } from '../src/orchestrator/engine.js';
 import { originStatement, repairAnswer, repairHeader } from '../src/orchestrator/headerRepair.js';
+import { resetDelayMs } from '../src/providers/cli.js';
 
 const SPDX = '// SPDX-License-Identifier: MIT (CommonLibSSE-NG declarations, Copyright (c) 2018 Ryan-rsm-McKenzie; full text: licenses/CommonLibSSE-NG.txt)';
 const SKELETON = [
@@ -109,6 +110,63 @@ describe('header repair', () => {
     expect(r.problems).toEqual([]);
     expect(r.content.startsWith('// Source exposure: mixed.\n// Code origin: written here.\n')).toBe(true);
     expect(r.content).toContain('#include <cstdint>');
+  });
+});
+
+describe('pre-existing header clutter and files changed by prepare (second real run)', () => {
+  // sr start stacked its skeleton on the unit's existing header, which already had an older
+  // "Source exposure: ... Drafted by ..." line: still 7 counted lines after the placeholders were filled.
+  const BEFORE = [
+    '// Source exposure: mixed (community headers; the pinned image listing).',
+    '// Code origin: SKELETON_TODO_CODE_ORIGIN (state the actual origin and any adaptation)',
+    '// 0x22b2c0 TESObjectREFR::GetInventoryChanges',
+    '// Adapted bodies: SKELETON_TODO_ORIGIN (write "none" when attempt prints no "origin advice" line;',
+    '// otherwise name each adapted body, its upstream file, revision and licence).',
+    '// Licence: uses the GetEncounterZone and BGSEncounterZone names from powerof3/CommonLibSSE (see the header), so this file is GPL-3.0.',
+    '// Source exposure: mixed. Drafted by claude-sonnet-5-5 from local listings of the pinned image',
+    '// with types from the header beside this file.',
+    '// Bodies adapted from community sources are listed above; tools/check_origin.py reports none other above its threshold.',
+    '// 0x2e6f30 TESObjectREFR::GetScale',
+    '#include "TESObjectREFR.h"',
+    '',
+  ].join('\n');
+  const target = [{ rva: '0x22b2c0', name: 'TESObjectREFR::GetInventoryChanges', size: 18 }];
+
+  it('drops pre-existing banned/duplicate lines only when the header would exceed the budget', async () => {
+    const r = await repairAnswer([{ path: 'r/TESObjectREFR.cpp', content: `${BEFORE}\nint x();\n` }], async () => BEFORE, { codeOrigin: 'written for this reconstruction by forwarding to the extra data list', adaptedBodies: 'none' });
+    const out = r.files[0]!.content;
+    expect(out).not.toContain('Drafted by');
+    expect(out.match(/Source exposure:/g)).toHaveLength(1);
+    expect(out).toContain('// Licence: uses the GetEncounterZone'); // licence and adaptation statements stay
+    expect(out).toContain('// Bodies adapted from community sources are listed above');
+    expect(cheatScan({ path: 'r/TESObjectREFR.cpp', before: BEFORE, after: out, targets: target }).filter((f) => f.code.startsWith('CONV_'))).toEqual([]);
+    // a header already within budget keeps its old lines untouched
+    const small = '// Source exposure: mixed.\n// Code origin: written here.\n// Recipe: old.\n#include "A.h"\n';
+    expect(repairHeader('a.cpp', small.replace('#include', '// 0x1 A::B\n#include'), small).content).toContain('// Recipe: old.');
+  });
+
+  it('repairs allowed files the worker never returned but prepare changed (the .h and a stale .cpp placeholder)', async () => {
+    const hBase = '// Source exposure: mixed (binary-analysis of the pinned image, community-headers).\n#pragma once\nclass TESActorBase {};\n';
+    const hNow = hBase.replace('class TESActorBase {};', 'class TESActorBase { bool IsAutoCalc() const; };');
+    const r = await repairAnswer([{ path: 'u/Other.cpp', content: '// Code origin: written here.\nint y();\n' }], async () => null, { codeOrigin: 'written for this reconstruction from the listing', adaptedBodies: 'none' }, {
+      untouched: [
+        { path: 'u/TESActorBase.h', current: hNow, base: hBase },
+        { path: 'u/TESActorBase.cpp', current: BEFORE, base: null },
+        { path: 'u/Same.h', current: hBase, base: hBase }, // unchanged by prepare: left alone
+      ],
+    });
+    const h = r.files.find((f) => f.path === 'u/TESActorBase.h')!.content;
+    expect(originStatement(h)).toBe('written for this reconstruction from the listing');
+    const cpp = r.files.find((f) => f.path === 'u/TESActorBase.cpp')!.content;
+    expect(cpp).not.toMatch(/SKELETON_TODO/);
+    expect(r.files.some((f) => f.path === 'u/Same.h')).toBe(false);
+  });
+
+  it('subscription limits are quotas until the stated reset, not short rate limits', () => {
+    const now = new Date('2026-11-19T22:00:00Z'); // 19:00 in Sao Paulo (UTC-3)
+    expect(resetDelayMs("You've hit your weekly limit · resets 3am (America/Sao_Paulo)", now)! / 3_600_000).toBeCloseTo(8 + 1 / 60, 2);
+    expect(resetDelayMs('resets 11:30pm (UTC)', now)! / 3_600_000).toBeCloseTo(1.5 + 1 / 60, 2);
+    expect(resetDelayMs('rate limited')).toBeNull();
   });
 });
 
