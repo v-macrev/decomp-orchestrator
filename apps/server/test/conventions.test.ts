@@ -8,7 +8,7 @@ import { planCapacity } from '../src/orchestrator/capacity.js';
 import { applyEdit } from '../src/orchestrator/edits.js';
 import { allocateSlots, isFormatOnly } from '../src/orchestrator/engine.js';
 import { originStatement, repairAnswer, repairHeader } from '../src/orchestrator/headerRepair.js';
-import { resetDelayMs } from '../src/providers/cli.js';
+import { classifyCliFailure, resetDelayMs } from '../src/providers/cli.js';
 
 const SPDX = '// SPDX-License-Identifier: MIT (CommonLibSSE-NG declarations, Copyright (c) 2018 Ryan-rsm-McKenzie; full text: licenses/CommonLibSSE-NG.txt)';
 const SKELETON = [
@@ -167,6 +167,16 @@ describe('pre-existing header clutter and files changed by prepare (second real 
     expect(resetDelayMs("You've hit your weekly limit · resets 3am (America/Sao_Paulo)", now)! / 3_600_000).toBeCloseTo(8 + 1 / 60, 2);
     expect(resetDelayMs('resets 11:30pm (UTC)', now)! / 3_600_000).toBeCloseTo(1.5 + 1 / 60, 2);
     expect(resetDelayMs('rate limited')).toBeNull();
+    // The CLI's JSON result follows the message: the stated reset must not drag the JSON along.
+    const q = classifyCliFailure(`You've hit your weekly limit · resets 3am (America/Sao_Paulo) {"duration_api_ms":0,"is_error":true}`, false, false);
+    expect(q.kind).toBe('quota');
+    expect(q.message).toBe('subscription limit reached (resets 3am (America/Sao_Paulo))');
+  });
+
+  it('a model the login cannot use is a request problem, not a retryable server error', () => {
+    const e = classifyCliFailure(`{"type":"turn.failed","error":{"message":"The 'gpt-6.2-sol' model is not supported when using Codex with a ChatGPT account."}}`, false, false);
+    expect(e.kind).toBe('bad_request');
+    expect(e.message).toBe('model gpt-6.2-sol is not available on this login');
   });
 });
 

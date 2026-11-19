@@ -64,7 +64,7 @@ export function resetDelayMs(text: string, now = new Date()): number | null {
   return delta + 60_000; // a minute of slack past the reset
 }
 
-function classifyCliFailure(text: string, timedOut: boolean, aborted: boolean): ProviderError {
+export function classifyCliFailure(text: string, timedOut: boolean, aborted: boolean): ProviderError {
   const t = text.toLowerCase();
   if (aborted) return new ProviderError('aborted', 'aborted');
   // A missing binary is configuration, not a provider fault: do not retry it as a server error.
@@ -74,8 +74,13 @@ function classifyCliFailure(text: string, timedOut: boolean, aborted: boolean): 
   // the stated reset — retrying every few minutes as for a 429 just burns attempts.
   if (/usage limit|limit reached|hit your [\w ]*limit|(weekly|daily|session|5-hour) limit|quota|credit balance|billing/.test(t)) {
     const wait = resetDelayMs(text) ?? 30 * 60_000;
-    return new ProviderError('quota', `subscription limit reached${/resets[^.\n]*/i.exec(text)?.[0] ? ` (${/resets[^.\n]*/i.exec(text)![0].trim()})` : ''}`, wait);
+    const when = /resets\s[^"{}\n]*?(?:\([^)]*\))?(?=["{}\n]|$)/i.exec(text)?.[0]?.trim();
+    return new ProviderError('quota', `subscription limit reached${when ? ` (${when.slice(0, 80)})` : ''}`, wait);
   }
+  // "The 'gpt-x' model is not supported when using Codex with a ChatGPT account": this login cannot
+  // use that model at all, so retrying it (as a server error would be) only wastes attempts.
+  const unsupported = /the '([^']+)' model is not supported|model[_ ]not[_ ]found|unknown model|model .{0,40}does not exist/i.exec(text);
+  if (unsupported) return new ProviderError('bad_request', `model ${unsupported[1] ?? ''} is not available on this login`.replace(/\s+/g, ' '));
   if (/rate.?limit|429|too many requests/.test(t)) return new ProviderError('rate_limited', 'cli rate limited');
   if (/overloaded|529|503/.test(t)) return new ProviderError('overloaded', 'provider overloaded');
   if (/not logged in|please run .*login|invalid api key|unauthori[sz]ed|401|403|authentication/.test(t)) return new ProviderError('auth', 'cli profile is not authenticated');
