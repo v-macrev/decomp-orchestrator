@@ -162,7 +162,8 @@ export async function buildServer(app: App) {
   // ---------------- UI
   const web = fromRoot('apps/web/dist');
   if (existsSync(web)) {
-    await f.register(fastifyStatic, { root: web, wildcard: false });
+    // wildcard routing resolves files per request, so a rebuilt UI is served without a restart
+    await f.register(fastifyStatic, { root: web });
     f.setNotFoundHandler((req, reply) => (req.url.startsWith('/api/') ? reply.code(404).send({ error: 'not found' }) : reply.sendFile('index.html')));
   }
   return f;

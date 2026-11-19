@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "orchestrator",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "start", "-w", "@decomp/server"],
+      "port": 8787
+    }
+  ]
+}

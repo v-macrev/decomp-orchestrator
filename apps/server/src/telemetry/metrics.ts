@@ -15,7 +15,9 @@ export function runMetrics(store: Store, engine: RunEngine, pool: AccountPool, r
       WHERE t.run_id = ? AND v.decision = 'pass' AND v.created_at > ?`)
     .all(runId, now - 15 * 60_000) as Array<{ t: number; n: number }>;
   const inWindow = (ms: number) => passRows.filter((r) => r.t > now - ms).reduce((s, r) => s + r.n, 0);
-  const perMin5 = inWindow(5 * 60_000) / 5;
+  // Average over min(5 min, time since start) so early-run rates aren't diluted by an empty window.
+  const windowMin = Math.max(0.25, Math.min(5, run.startedAt ? (now - run.startedAt) / 60_000 : 5));
+  const perMin5 = inWindow(windowMin * 60_000) / windowMin;
   const totalFns = Object.values(functions).reduce((a, b) => a + b, 0);
   const open = (functions.pending ?? 0) + (functions.leased ?? 0) + (functions.gating ?? 0);
   const routes = Object.fromEntries(
