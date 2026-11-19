@@ -4,15 +4,43 @@
     {
       "name": "orchestrator",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "start", "-w", "@decomp/server"],
+      "runtimeArgs": [
+        "run",
+        "start",
+        "-w",
+        "@decomp/server"
+      ],
       "port": 8787
     },
     {
       "name": "orchestrator-demo",
       "runtimeExecutable": "npm",
-      "runtimeArgs": ["run", "start", "-w", "@decomp/server"],
-      "env": { "ORCH_CONFIG": "data/sim/phase4-demo.json", "PORT": "8788" },
+      "runtimeArgs": [
+        "run",
+        "start",
+        "-w",
+        "@decomp/server"
+      ],
+      "env": {
+        "ORCH_CONFIG": "data/sim/phase4-demo.json",
+        "PORT": "8788"
+      },
       "port": 8788
+    },
+    {
+      "name": "orchestrator-real",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": [
+        "run",
+        "start",
+        "-w",
+        "@decomp/server"
+      ],
+      "env": {
+        "ORCH_CONFIG": "config/orchestrator.json",
+        "PORT": "8789"
+      },
+      "port": 8789
     }
   ]
 }
