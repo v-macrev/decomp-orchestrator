@@ -191,3 +191,20 @@ packet to a costlier tier. Opus took 83% of the spend.
 
 The explicit header rules made the cached static prefix larger, so its budget is now 1,400 tokens
 (was 1,200).
+
+### Several subscription logins in one pool
+
+Each `cli_profile` account is one login in its own config directory, so separate subscriptions
+(and separate workspaces of one Claude account, which have separate usage limits) run side by side:
+
+- **Second Claude workspace:** sign in once into a new directory, picking the other organisation in
+  the browser, then add an account whose `auth.configDir` points at it:
+  `$env:CLAUDE_CONFIG_DIR = 'C:\Users\<you>\.claude-workspace2'; claude auth login --claudeai`.
+  `CLAUDE_CONFIG_DIR=<dir> claude auth status` shows the `orgId` to confirm it is a different one.
+- **ChatGPT plan via Codex:** a `codex_cli` account with `configDir` = the `CODEX_HOME` that holds
+  the login (`codex login status`). Workers run `codex exec --ignore-user-config --ignore-rules
+  --ephemeral -s read-only`, so the operator's own `config.toml` (sandbox mode, notify hooks,
+  computer use, MCP servers) never applies to them. The structured-output schema goes through
+  `--output-schema`. The models carry no list prices, so they do not count against a run budget.
+- A weekly or daily limit on one login parks only that account until the stated reset. The run
+  keeps going on the others, because flow nodes draw from the pool by capability tier.

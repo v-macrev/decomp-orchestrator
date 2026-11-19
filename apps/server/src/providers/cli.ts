@@ -141,17 +141,27 @@ export class CodexCliAdapter implements ProviderAdapter {
     const dir = mkdtempSync(join(tmpdir(), 'decomp-codex-'));
     try {
       const outFile = join(dir, 'last.txt');
-      const args = ['exec', '--skip-git-repo-check', '-s', 'read-only', '--json', '-m', req.model.id, '-o', outFile];
-      if (req.jsonSchema) {
+      // --ignore-user-config: the profile's config.toml (sandbox mode, notify hooks, computer use,
+      // MCP servers, trusted projects) is the operator's interactive setup and must not apply to
+      // workers; auth still comes from CODEX_HOME. --ephemeral: no session files. read-only sandbox in
+      // an empty scratch dir: the model can only answer, never write.
+      const args = [
+        'exec', '--skip-git-repo-check', '--ignore-user-config', '--ignore-rules', '--ephemeral',
+        '-s', 'read-only', '--color', 'never', '--json', '-m', req.model.id, '-o', outFile,
+        '-c', 'approval_policy="never"',
+      ];
+      if (req.jsonSchema && account.options.cliJsonSchema !== false) {
         const schemaFile = join(dir, 'schema.json');
         writeFileSync(schemaFile, JSON.stringify(req.jsonSchema));
         args.push('--output-schema', schemaFile);
       }
       const effort = req.effort ?? req.model.defaultEffort;
-      if (effort) args.push('-c', `model_reasoning_effort=${effort === 'max' || effort === 'xhigh' ? 'high' : effort}`);
+      if (effort) args.push('-c', `model_reasoning_effort="${effort}"`);
       args.push('-');
+      const cwd = join(tmpdir(), 'decomp-cli-work');
+      mkdirSync(cwd, { recursive: true });
       const r = await runBounded(resolveCliBinary(account.auth.binary ?? 'codex'), args, {
-        cwd: dir, stdin: `${req.system}\n\n${req.prompt}`, timeoutMs: req.timeoutMs, signal: req.signal, maxOutputBytes: 16 * 1024 * 1024,
+        cwd, stdin: `${req.system}\n\n${req.prompt}`, timeoutMs: req.timeoutMs, signal: req.signal, maxOutputBytes: 16 * 1024 * 1024,
         env: { CODEX_HOME: account.auth.configDir },
       });
       let text = '';
@@ -161,7 +171,7 @@ export class CodexCliAdapter implements ProviderAdapter {
         /* missing on failure */
       }
       if (r.code !== 0 || !text) throw classifyCliFailure(`${r.stderr} ${r.stdout.slice(-4000)}`, r.timedOut, r.aborted);
-      let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0;
+      let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0;
       for (const line of r.stdout.split('\n')) {
         if (!line.includes('usage')) continue;
         try {
@@ -171,12 +181,13 @@ export class CodexCliAdapter implements ProviderAdapter {
             inputTokens = u.input_tokens ?? inputTokens;
             outputTokens = u.output_tokens ?? outputTokens;
             cacheReadTokens = u.cached_input_tokens ?? cacheReadTokens;
+            cacheWriteTokens = u.cache_write_input_tokens ?? cacheWriteTokens;
           }
         } catch {
           /* non-JSON line */
         }
       }
-      return { text, stopReason: 'completed', usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens: 0 }, servedModel: req.model.id };
+      return { text, stopReason: 'completed', usage: { inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens }, servedModel: req.model.id };
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
