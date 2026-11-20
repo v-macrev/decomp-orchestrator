@@ -9,13 +9,13 @@ import { ProviderError, type CompletionRequest, type CompletionResponse, type Pr
 export class ProviderRegistry {
   private adapters = new Map<ProviderKind, ProviderAdapter>();
 
-  constructor(opts: { oracle?: SimOracle } = {}) {
+  constructor(opts: { oracle?: SimOracle; mockDraws?: { mode: 'random' | 'keyed'; salt?: string } } = {}) {
     this.register(new AnthropicAdapter());
     this.register(new OpenAIAdapter('openai'));
     this.register(new OpenAIAdapter('openai_compat'));
     this.register(new ClaudeCliAdapter());
     this.register(new CodexCliAdapter());
-    this.register(new MockAdapter(opts.oracle));
+    this.register(new MockAdapter(opts.oracle, Math.random, opts.mockDraws));
   }
 
   register(a: ProviderAdapter) {

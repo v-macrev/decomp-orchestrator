@@ -105,7 +105,13 @@ export class MockAdapter implements ProviderAdapter {
   private counts = new Map<string, number>();
   private cache = new PromptCacheSim();
 
-  constructor(private oracle?: SimOracle, private rand: () => number = Math.random) {}
+  /**
+   * draws: 'random' (default) draws each function's match from `rand`. 'keyed' makes the match a
+   * fixed function of (function, attempt number, salt): independent of timing and call order, and
+   * identical for both arms of a shadow replay, so a candidate skill is compared on the same luck
+   * as the baseline (common random numbers). Tests use it to make statistical gates reproducible.
+   */
+  constructor(private oracle?: SimOracle, private rand: () => number = Math.random, private draws: { mode: 'random' | 'keyed'; salt?: string } = { mode: 'random' }) {}
 
   async complete(account: Account, req: CompletionRequest): Promise<CompletionResponse> {
     const o = account.options as Record<string, any>;
@@ -189,16 +195,16 @@ export class MockAdapter implements ProviderAdapter {
     if (this.rand() < (o.cheatRate ?? 0)) {
       const c = CHEATS[Math.floor(this.rand() * CHEATS.length)]!(spec.functions[0]!, spec.allowedPaths);
       if (c.path) files.push({ path: c.path, content: c.body });
-      else files.push({ path: cpp, content: unit(current, spec.functions.map((f, i) => (i === 0 ? { f, body: c.body } : { f, body: this.body(f, odds(f)) }))) });
+      else files.push({ path: cpp, content: unit(current, spec.functions.map((f, i) => (i === 0 ? { f, body: c.body } : { f, body: this.body(f, odds(f), attempt) }))) });
       return JSON.stringify({ files, notes: 'sim cheat' });
     }
     if (edits) {
-      const functions = spec.functions.map((f) => ({ name: simIdent(f), code: `int ${simIdent(f)}()\n{\n${this.body(f, odds(f))}\n}` }));
+      const functions = spec.functions.map((f) => ({ name: simIdent(f), code: `int ${simIdent(f)}()\n{\n${this.body(f, odds(f), attempt)}\n}` }));
       const header = current && current.trim() ? undefined : ['// Source exposure: public (community headers).', '// Code origin: original; simulated draft', ...spec.functions.map((f) => `// ${f.rva} ${f.name ?? 'Unknown'}`)].join('\n');
       const decls = [...(header ? ['#include "Sim.h"'] : []), ...helperDecls(spec.functions)].join('\n');
       return JSON.stringify({ edits: [{ path: cpp, ...(header ? { header } : {}), ...(decls ? { declarations: decls } : {}), functions }], notes: `sim attempt ${attempt} (edits)` });
     }
-    files.push({ path: cpp, content: unit(current, spec.functions.map((f) => ({ f, body: this.body(f, odds(f)) }))) });
+    files.push({ path: cpp, content: unit(current, spec.functions.map((f) => ({ f, body: this.body(f, odds(f), attempt) }))) });
     void skill;
     return JSON.stringify({ files, notes: `sim attempt ${attempt}` });
   }
@@ -276,11 +282,18 @@ export class MockAdapter implements ProviderAdapter {
     return null;
   }
 
-  private body(f: SpecFn, skill: number): string {
+  private body(f: SpecFn, skill: number, attempt: number): string {
     const sol = this.oracle?.solution(f.rva) ?? 'return 0;';
-    if (this.rand() < skill) return `    ${sol}`;
+    if (this.draw(f, attempt) < skill) return `    ${sol}`;
     // near miss: right shape, wrong constant → partial byte credit in the fake comparator
     return `    ${sol.replace(/0x[0-9a-f]+/, (h) => `0x${(parseInt(h, 16) ^ 0x10).toString(16)}`)}`;
+  }
+
+  /** A uniform draw in [0, 1): from `rand`, or keyed on (salt, function, attempt) — see the constructor. */
+  private draw(f: SpecFn, attempt: number): number {
+    if (this.draws.mode !== 'keyed') return this.rand();
+    const h = createHash('sha256').update(`${this.draws.salt ?? ''}|${f.rva}|${attempt}`).digest();
+    return h.readUInt32BE(0) / 2 ** 32;
   }
 }
 

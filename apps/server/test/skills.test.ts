@@ -256,7 +256,9 @@ function world() {
   const events = new EventBus(store);
   const repo = new SimRepo({ slots: 10, compareLatencyMs: [1, 3], infraRate: 0, traps: true });
   const pool = new AccountPool(accounts(), store, events, { circuitBaseMs: 100, rateLimitBaseMs: 20, overloadCooldownMs: 20 });
-  const providers = new ProviderRegistry({ oracle: repo });
+  // Keyed draws: a function's match depends only on (function, attempt), never on timing, so the
+  // statistical gates below (shadow replay, mining) give the same verdict on every run.
+  const providers = new ProviderRegistry({ oracle: repo, mockDraws: { mode: 'keyed', salt: 'skills-e2e' } });
   const registry = new SkillRegistry(store, join(dir, 'skills'));
   const engine = new RunEngine({ store, pool, providers, repo, events, skills: registry }, { leaseMs: 5_000, heartbeatMs: 500, infraBackoffMs: 5, idlePollMs: 20 });
   const shadow = new ShadowEvaluator({ store, registry, repo, pool, providers, events, engine, context: engine.contextV2 });
