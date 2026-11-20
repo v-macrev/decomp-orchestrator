@@ -208,3 +208,21 @@ Each `cli_profile` account is one login in its own config directory, so separate
   `--output-schema`. The models carry no list prices, so they do not count against a run budget.
 - A weekly or daily limit on one login parks only that account until the stated reset. The run
   keeps going on the others, because flow nodes draw from the pool by capability tier.
+
+### Retries that learn from every failed attempt
+
+In the 12-function retry run the four hard packets each burned 20+ attempts without converging.
+The attempt log showed why:
+
+| Problem seen | Fix |
+|---|---|
+| A retry saw only the attempt right before it, so workers ping-ponged between two guesses (`GetInventoryChanges`: "deleted flag → nullptr", then "ActorCharacter → nullptr", then back, six times each) | `orchestrator/history.ts` gives every retry an `<history>` section: each distinct earlier candidate of the failing functions with its outcome, best first, and a line when the last attempt went backwards ("start again from #7") |
+| Rewrites that only renamed a constant were tried as new ideas | Attempts are grouped by the hash of the machine code they compiled to (`code_section_sha256` from the comparator), so the worker sees "3 different sources, identical machine code" |
+| The same code was resubmitted and compiled again | A candidate whose code (comments and spacing aside) equals an earlier one the compiler judged is refused before compiling as `REPEATED_CANDIDATE`, naming the attempt it repeats |
+| Only "bytes exact in place" was read: one wrong first byte meant 0, so every attempt scored 0, patience ran out and nobody knew which attempt was closest | The comparator's own aligned-bytes metric (`progress.aligned_matching_bytes`, a count only) is kept per function, shown to the worker and on the dashboard, and resets the no-improvement streak when it rises |
+| "Candidate failed to compile (no comparison evidence)" with no reason: `GetSkill` failed 23 times on an include the compiler could not open | The compiler's error lines from `sr compare --json` (worktree paths made repo-relative) are in the finding and the retry |
+| `#include <cstdio>` was refused 10 times with a generic message | The finding names the refused header and lists the allowed ones |
+| Stand-in headers with 100+ `virtual void Unk_NN();` lines pushed the class's real members past the unit budget | Prompts show each run of placeholder slots as one marker line; a complete file returned with the marker gets the lines back verbatim |
+
+Everything shown comes from the candidate's own compiled code or from counts; no target bytes or
+listing text reach a worker without exposure consent.

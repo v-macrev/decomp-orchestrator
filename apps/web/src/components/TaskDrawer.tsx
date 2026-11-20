@@ -125,9 +125,9 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                 <>
                   <h3>Comparator</h3>
                   <table>
-                    <thead><tr><th>RVA</th><th>Result</th><th>Reason</th><th>First mismatch</th><th>Bytes exact</th><th>Hint</th></tr></thead>
+                    <thead><tr><th>RVA</th><th>Result</th><th>Reason</th><th>First mismatch</th><th>Bytes exact</th><th title="Bytes that match the target after alignment: progress even when the first byte differs">Aligned</th><th>Hint</th></tr></thead>
                     <tbody>{verdict.compare.map((c) => (
-                      <tr key={c.rva}><td className="mono">{c.rva}</td><td><span className={`chip ${c.result === 'pass' ? 'ok' : 'error'}`}>{c.result}</span></td><td>{c.reason ?? '—'}</td><td className="mono">{c.firstMismatch ?? '—'}</td><td>{c.exactBytes ?? '?'}/{c.targetSize ?? c.totalBytes ?? '?'}</td><td className="muted">{c.hint ?? ''}</td></tr>
+                      <tr key={c.rva}><td className="mono">{c.rva}</td><td><span className={`chip ${c.result === 'pass' ? 'ok' : 'error'}`}>{c.result}</span></td><td>{c.reason ?? '—'}</td><td className="mono">{c.firstMismatch ?? '—'}</td><td>{c.exactBytes ?? '?'}/{c.targetSize ?? c.totalBytes ?? '?'}</td><td>{c.alignedBytes ?? '—'}</td><td className="muted">{c.hint ?? ''}</td></tr>
                     ))}</tbody>
                   </table>
                 </>

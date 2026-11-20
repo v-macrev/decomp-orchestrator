@@ -30,6 +30,7 @@ import { ContextBuilder } from './context.js';
 import { TaskContextBuilder, shouldCacheTaskPrefix } from './contextBuilder.js';
 import { materialise } from './edits.js';
 import { repairAnswer } from './headerRepair.js';
+import { buildHistory, findRepeat, progressScore, type HistoryEntry } from './history.js';
 import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
 import { stageRun } from './staging.js';
@@ -609,7 +610,8 @@ export class RunEngine {
       }
 
       // 2. bundle + feedback
-      const feedback = this.lastFeedback(task);
+      const history = buildHistory(store, task);
+      const feedback = this.lastFeedback(task, history);
       const n = task.attemptsTotal + 1;
       let system: string;
       let prompt: string;
@@ -721,6 +723,14 @@ export class RunEngine {
       const untouched = await Promise.all(prepared.allowedPaths.filter((p) => !mat.files.some((f) => f.path === p)).map(async (p) => ({ path: p, current: await repo.readFile(slot, p), base: await repo.baseFile(p) })));
       const fixed = await repairAnswer(mat.files, (p) => repo.readFile(slot, p), { codeOrigin: parsed.data.codeOrigin, adaptedBodies: parsed.data.adaptedBodies }, { untouched });
       mat.files = fixed.files;
+      // The exact code (comments and spacing aside) already failed in the compiler: refuse it without
+      // compiling and say which attempt it repeats, so the next try has to change the logic.
+      const repeat = findRepeat(history, mat.files);
+      if (repeat) {
+        store.updateAttempt(attempt.id, { status: 'completed', files: mat.files, finishedAt: Date.now() });
+        ev('attempt.repeated', `candidate repeats attempt #${repeat.n}; refused without compiling`, 'debug', { repeats: repeat.n });
+        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'REPEATED_CANDIDATE', `the code is identical to attempt #${repeat.n} (comments and spacing do not count), which already failed: ${repeat.outcome}. Change the logic.`), { infra: false, strike: false }, tierIdx);
+      }
       if (fixed.changes.length) ev('attempt.header_repaired', `header repaired before the Gate Keeper: ${fixed.changes.join('; ').slice(0, 600)}`, 'debug', { changes: fixed.changes });
       store.updateAttempt(attempt.id, { files: mat.files });
 
@@ -798,7 +808,12 @@ export class RunEngine {
     this.skills.recordOutcome(attempt.id, verdict);
     const attemptsTotal = task.attemptsTotal + 1;
     const attemptsAtTier = task.attemptsAtTier + 1;
-    const improved = verdict.exactBytes > task.bestExactBytes;
+    // Progress counts bytes that align with the target, not only bytes exact in place: a candidate
+    // whose first instruction is still wrong can be much closer than the last one, and resetting
+    // patience on that keeps a packet that is converging from being dead-lettered.
+    const prior = store.verdictsForTask(task.id).filter((v) => v.id !== verdict.id).map(progressScore).filter((s): s is number => s !== null);
+    const score = progressScore(verdict);
+    const improved = verdict.exactBytes > task.bestExactBytes || (score !== null && score > Math.max(task.bestExactBytes, ...prior));
     const bestExactBytes = Math.max(task.bestExactBytes, verdict.exactBytes);
     const noImprovementStreak = improved ? 0 : task.noImprovementStreak + 1;
     const cheatStrikes = task.cheatStrikes + (flags.strike ? 1 : 0);
@@ -873,11 +888,11 @@ export class RunEngine {
     events.emit('task.dead', `DEAD ${fnLabel} after ${attemptsTotal} attempts (best ${bestExactBytes} bytes exact)`, { runId, taskId: task.id, level: 'warn' });
   }
 
-  private lastFeedback(task: TaskRow): Feedback | null {
+  private lastFeedback(task: TaskRow, history: HistoryEntry[]): Feedback | null {
     if (!task.lastVerdictId) return null;
     const verdict = this.deps.store.getVerdict(task.lastVerdictId);
     const attempt = verdict ? this.deps.store.getAttempt(verdict.attemptId) : null;
-    return verdict && attempt ? { verdict, attempt } : null;
+    return verdict && attempt ? { verdict, attempt, history } : null;
   }
 
   /** Latest accepted files per path for packets of the same unit in this run. */

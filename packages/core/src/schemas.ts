@@ -416,6 +416,11 @@ export const CompareFunctionResult = z.object({
   targetSize: z.number().nullable(),
   exactBytes: z.number().nullable(),
   totalBytes: z.number().nullable(),
+  /** Bytes that match the target after alignment (the repo's diagnostic progress metric): a count only, never target content. */
+  alignedBytes: z.number().nullable().optional(),
+  alignedRegions: z.number().nullable().optional(),
+  /** sha256 of the candidate's own compiled code section: equal hashes mean the same machine code. */
+  codeSha256: z.string().nullable().optional(),
 });
 export type CompareFunctionResult = z.infer<typeof CompareFunctionResult>;
 
@@ -572,6 +577,8 @@ export const ContextSectionKind = z.enum([
   'matched_pr_lessons',
   'shared_run_discoveries',
   'retry_delta',
+  /** Every earlier distinct candidate of the packet with its outcome, best first (retries only). */
+  'attempt_history',
   /** Triggered skills whose triggers are packet-static (stable across retries → inside the per-packet cache block). */
   'dynamic_skills',
   /** Skills triggered by the previous verdict's failure codes (volatile block, after every breakpoint). */
@@ -593,6 +600,7 @@ export const ContextBudgets = z.object({
   matched_pr_lessons: SectionBudget.default({ min: 200, max: 500 }),
   shared_run_discoveries: SectionBudget.default({ min: 100, max: 400 }),
   retry_delta: SectionBudget.default({ min: 200, max: 600 }),
+  attempt_history: SectionBudget.default({ min: 0, max: 1_200 }),
   /** Top 0–2 triggered skills (each ≤ 600 tokens). */
   dynamic_skills: SectionBudget.default({ min: 0, max: 1_200 }),
   retry_skills: SectionBudget.default({ min: 0, max: 600 }),

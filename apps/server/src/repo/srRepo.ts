@@ -272,12 +272,18 @@ export class SrRepo implements RepoAdapter {
     if (run.aborted) return fail('compare aborted');
     if (run.truncated) return fail('compare output exceeded the cap');
     if (!json || infraCodes.has(run.code ?? -1)) return fail(`compare infra failure (exit ${run.code}): ${json?.error ?? (run.stderr || run.stdout).slice(0, 300)}`);
-    if (run.code === 3 || run.code === 4) return { ...base, completed: true, allPass: false, compileError: true, functions: [], infraError: null };
-    const functions: CompareFunctionResult[] = ((json.functions as any[]) ?? []).map((f) => ({
-      rva: f.rva, name: f.name ?? null, result: f.result ?? 'fail', reason: f.reason ?? null, hint: f.hint || null,
-      firstMismatch: f.first_mismatch ?? null, candidateSize: f.candidate_size ?? null, targetSize: f.target_size ?? null,
-      exactBytes: f.coverage?.code_bytes_exact ?? null, totalBytes: f.coverage?.code_bytes_total ?? null,
-    }));
+    if (run.code === 3 || run.code === 4) return { ...base, completed: true, allPass: false, compileError: true, compileErrors: compileErrorLines(json), functions: [], infraError: null };
+    const progress = (json.progress ?? {}) as Record<string, { metric?: string; value?: number; regions?: number } | null>;
+    const functions: CompareFunctionResult[] = ((json.functions as any[]) ?? []).map((f) => {
+      const p = progress[f.rva];
+      const aligned = p?.metric === 'aligned_matching_bytes' && typeof p.value === 'number' ? p : null;
+      return {
+        rva: f.rva, name: f.name ?? null, result: f.result ?? 'fail', reason: f.reason ?? null, hint: f.hint || null,
+        firstMismatch: f.first_mismatch ?? null, candidateSize: f.candidate_size ?? null, targetSize: f.target_size ?? null,
+        exactBytes: f.coverage?.code_bytes_exact ?? null, totalBytes: f.coverage?.code_bytes_total ?? null,
+        alignedBytes: aligned?.value ?? null, alignedRegions: aligned?.regions ?? null, codeSha256: f.code_section_sha256 ?? null,
+      };
+    });
     const expected = new Set(task.functions.map((f) => f.rva));
     const allPass = run.code === 0 && functions.length > 0 && functions.every((f) => f.result === 'pass') && [...expected].every((r) => functions.some((f) => f.rva === r));
     return { ...base, completed: true, allPass, compileError: false, functions, infraError: null };
@@ -561,4 +567,20 @@ function parseJsonOutput(stdout: string): any {
     }
     return null;
   }
+}
+
+/**
+ * The compiler's error lines from a failed `sr compare --json` (exit 3 COMPILE / 4 UNIT), with
+ * worktree paths made repo-relative. These describe the candidate's own source, so the Worker may
+ * see them; without them a retry only learns "it did not compile" and repeats the same mistake.
+ */
+export function compileErrorLines(json: any): string[] {
+  const raw: string[] = Array.isArray(json?.errors) ? json.errors.map(String) : [];
+  if (!raw.length && typeof json?.error === 'string' && json.error !== 'compile failed') raw.push(json.error);
+  return raw.slice(0, 8).map((l) => relativiseWorktreePaths(l).slice(0, 400));
+}
+
+/** `z:\home\me\worktrees\slot-2\reconstruction\a\B.h(13): ...` → `reconstruction/a/B.h(13): ...` */
+export function relativiseWorktreePaths(line: string): string {
+  return line.replace(/(?:[A-Za-z]:)?[\\/](?:[^\s'"<>|]*?[\\/])?slot-\d+[\\/]([^\s'"<>|(]+)/g, (_m, rest: string) => rest.replace(/\\/g, '/'));
 }

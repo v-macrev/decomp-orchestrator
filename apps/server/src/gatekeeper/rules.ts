@@ -61,6 +61,16 @@ function includeProblem(line: string, path: string): boolean {
   return !target.endsWith('.h');
 }
 
+/** Say which include was refused and what is allowed, so the retry does not try the same header again. */
+function includeMessage(line: string): string {
+  const m = INCLUDE.exec(line);
+  const shown = m ? `${m[1] === '<' ? '<' : '"'}${m[2]}${m[1] === '<' ? '>' : '"'}` : line.trim();
+  if (m?.[1] === '<') {
+    return `#include ${shown} is not an allowed standard header (allowed: ${[...STANDARD_HEADERS].map((h) => `<${h}>`).join(' ')}); remove it and declare the function or type you need yourself (e.g. extern "C" int sprintf_s(char*, std::size_t, const char*, ...);)`;
+  }
+  return `#include ${shown} must be the unit's own header ("X.h"), a reconstruction-root path ("area/Y.h") or a relative path that stays inside reconstruction/`;
+}
+
 /** Lines present in `after` but not in `before` (multiset difference), with 1-based line numbers. */
 export function addedLines(before: string | null, after: string): Array<{ line: number; text: string }> {
   const pool = new Map<string, number>();
@@ -82,7 +92,7 @@ export function leakScan(path: string, before: string | null, after: string): Fi
       if (rx.test(scanned)) findings.push({ stage: 'leak', code, severity: 'block', file: path, line, message });
     }
     if (includeProblem(text, path)) {
-      findings.push({ stage: 'leak', code: 'LEAK_INCLUDE_OUTSIDE_ROOTS', severity: 'block', file: path, line, message: 'include must be a reconstruction-root ".h" path or an allowed standard header' });
+      findings.push({ stage: 'leak', code: 'LEAK_INCLUDE_OUTSIDE_ROOTS', severity: 'block', file: path, line, message: includeMessage(text) });
     }
   }
   return findings;

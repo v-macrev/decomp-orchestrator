@@ -9,6 +9,7 @@
 //   matched_pr_lessons     lessons/recipes whose tags match this packet's patterns           ≤500
 //   shared_run_discoveries verified declarations from earlier packets of this run            ≤400
 //   retry_delta            structured verdict + failing function bodies only (retries)       ≤600
+//   attempt_history        every earlier distinct candidate + outcome, best first (retries)  ≤1.2k
 //   dynamic_skills         top triggered skills, packet-static triggers (per-packet block)   ≤1.2k
 //   retry_skills           skills triggered by the previous verdict (volatile block)         ≤600
 //
@@ -32,8 +33,9 @@ import { identifiersOf } from '../intel/knowledge.js';
 import { distillRules, type DistilledRules } from '../intel/ruleDistiller.js';
 import type { PreparedTask, RepoAdapter } from '../repo/types.js';
 import { charsFor, clipToTokens, estimateTokens } from '../util/tokens.js';
-import { elideBodies } from './edits.js';
+import { collapsePlaceholderSlots, elideBodies } from './edits.js';
 import { FINDING_GUIDANCE, failureCategory, failureSignals } from './lessons.js';
+import { bestScore, renderHistory } from './history.js';
 import { WORKER_CONTRACT_V2, buildStaticPrefix, type Feedback } from './prompts.js';
 
 export interface BuildOptionsV2 {
@@ -170,9 +172,9 @@ export class TaskContextBuilder {
         unitParts.push(`<unit title="Current ${p}" source="${p}" state="new file"></unit>`);
         continue;
       }
-      let shown = text;
+      let shown = collapsePlaceholderSlots(text);
       if (mustElide && p.endsWith('.cpp')) {
-        const e = elideBodies(text, isTarget);
+        const e = elideBodies(shown, isTarget);
         shown = e.text;
         elided.push(...e.elided);
       }
@@ -307,11 +309,15 @@ export class TaskContextBuilder {
     if (opts.feedback) {
       const r = renderRetryDelta(opts.feedback, task, B.retry_delta.max);
       add('retry_delta', `Retry: ${r.category}`, `${relevantPitfalls.length ? `<pitfalls>\n${relevantPitfalls.map((p) => `- ${p}`).join('\n')}\n</pitfalls>\n` : ''}${r.text}`, r.rawTokens, ['verdict']);
+      if (opts.feedback.history?.length) {
+        const h = renderHistory(opts.feedback.history, r.failing, B.attempt_history.max);
+        if (h) add('attempt_history', `${opts.feedback.history.length} earlier attempt(s)`, h, 0, ['attempts']);
+      }
     } else if (relevantPitfalls.length) {
       add('retry_delta', 'Common rejections in this run', `<pitfalls>\n${relevantPitfalls.map((p) => `- ${p}`).join('\n')}\n</pitfalls>`, 0, ['run']);
     }
 
-    const order: ContextSectionKind[] = ['static_system_prefix', 'function_spec', 'disassembly_slice', 'minimal_local_context', 'unit_files', 'matched_pr_lessons', 'dynamic_skills', 'shared_run_discoveries', 'retry_delta', 'retry_skills'];
+    const order: ContextSectionKind[] = ['static_system_prefix', 'function_spec', 'disassembly_slice', 'minimal_local_context', 'unit_files', 'matched_pr_lessons', 'dynamic_skills', 'shared_run_discoveries', 'retry_delta', 'attempt_history', 'retry_skills'];
     sections.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
     const canon = JSON.stringify(sections.map((s) => [s.kind, s.content]));
     const hash = createHash('sha256').update(canon).digest('hex');
@@ -382,7 +388,7 @@ export function findSignature(qualified: string, sources: string[]): string | nu
 
 
 /** Structured verdict + only the failing functions' previous bodies — never the whole previous file. */
-export function renderRetryDelta({ verdict, attempt }: Feedback, task: TaskRow, maxTokens: number): { text: string; category: string; rawTokens: number } {
+export function renderRetryDelta({ verdict, attempt, history }: Feedback, task: TaskRow, maxTokens: number): { text: string; category: string; rawTokens: number; failing: string[] } {
   const blocks = verdict.findings.filter((f) => f.severity === 'block');
   const cats = [...new Set(blocks.map((f) => failureCategory(f.code)))];
   const category = cats[0] ?? (verdict.decision === 'pass' ? 'PASS' : 'OTHER');
@@ -391,13 +397,15 @@ export function renderRetryDelta({ verdict, attempt }: Feedback, task: TaskRow, 
   const summary: string[] = [`Attempt ${attempt.n} was rejected (${cats.join(', ') || verdict.decision}).`];
   if (verdict.compare?.length) {
     summary.push(`${passes.length} of ${verdict.compare.length} function(s) matched${passes.length ? ` (${passes.map((p) => p.name ?? p.rva).join(', ')}: keep them exactly)` : ''}.`);
-    if (fails.length) summary.push(`Still wrong: ${fails.slice(0, 3).map((f) => `${f.name ?? f.rva} ${f.exactBytes ?? 0}/${f.targetSize ?? f.totalBytes ?? '?'} bytes exact${f.firstMismatch ? `, first mismatch ${f.firstMismatch}` : ''}`).join('; ')}.`);
+    if (fails.length) summary.push(`Still wrong: ${fails.slice(0, 3).map((f) => `${f.name ?? f.rva} ${f.candidateSize != null ? `${f.candidateSize}/${f.targetSize ?? '?'} B, ` : ''}${f.exactBytes ?? 0}/${f.targetSize ?? f.totalBytes ?? '?'} bytes exact${f.alignedBytes != null ? `, ${f.alignedBytes} aligned` : ''}${f.firstMismatch ? `, first mismatch ${f.firstMismatch}` : ''}`).join('; ')}.`);
+    const best = history ? bestScore(history) : null;
+    if (best && best.n !== attempt.n) summary.push(`Best so far is attempt #${best.n} (score ${best.score}); see <history>.`);
   } else if (cats.includes('ANTI_CHEAT_VIOLATION')) summary.push('The candidate was blocked before compiling; another violation is quarantined.');
-  else if (cats.includes('COMPILE_ERROR')) summary.push('It did not compile, so there is no byte evidence yet: declare every type and callee you use.');
+  else if (cats.includes('COMPILE_ERROR')) summary.push('It did not compile, so there is no byte evidence yet: fix the compiler errors below exactly.');
   const lines = [`<retry category="${category}">`, `Summary: ${summary.join(' ')}`, 'Gate Keeper findings:'];
   for (const f of blocks.slice(0, 8)) {
     const guide = FINDING_GUIDANCE[f.code];
-    lines.push(`- [${f.code}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ''} ` : ''}${f.message.slice(0, 300)}${guide ? ` → ${guide}` : ''}`);
+    lines.push(`- [${f.code}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ''} ` : ''}${f.message.slice(0, f.code === 'COMPARE_COMPILE_ERROR' ? 1_200 : 400)}${guide ? ` → ${guide}` : ''}`);
   }
   if (blocks.length > 8) lines.push(`- … ${blocks.length - 8} more finding(s)`);
   // Previous bodies of failing (or all, when nothing compiled) target functions only.
@@ -415,5 +423,6 @@ export function renderRetryDelta({ verdict, attempt }: Feedback, task: TaskRow, 
   if (prevBodies.length && room > 60) lines.push('Your previous version of the failing function(s):', clipToTokens(prevBodies.join('\n\n'), room).text);
   lines.push('</retry>');
   const rawTokens = estimateTokens(head) + (attempt.files ?? []).reduce((s, f) => s + estimateTokens(f.content.slice(0, 20_000)), 0);
-  return { text: clipToTokens(lines.join('\n'), maxTokens).text, category, rawTokens };
+  const failing = (fails.length ? fails.map((f) => f.name) : task.functions.map((f) => f.name)).filter((n): n is string => !!n);
+  return { text: clipToTokens(lines.join('\n'), maxTokens).text, category, rawTokens, failing };
 }

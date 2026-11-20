@@ -51,6 +51,8 @@ export interface CompareOutcome {
   completed: boolean;
   allPass: boolean;
   compileError: boolean;
+  /** The compiler's own error lines for the candidate (paths made repo-relative): our code, not target data. */
+  compileErrors?: string[];
   functions: CompareFunctionResult[];
   /** Tooling/infra failure (timeout, missing toolchain, crash): not the candidate's fault. */
   infraError: string | null;

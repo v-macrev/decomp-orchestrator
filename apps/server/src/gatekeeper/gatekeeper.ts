@@ -155,13 +155,17 @@ export class GateKeeper {
           return [{ stage: 'compare', code: 'INFRA_COMPARE', severity: 'block', message: r.infraError }];
         }
         if (r.compileError) {
-          return [{ stage: 'compare', code: 'COMPARE_COMPILE_ERROR', severity: 'block', message: 'candidate failed to compile (no comparison evidence)' }];
+          const errs = r.compileErrors ?? [];
+          return [{
+            stage: 'compare', code: 'COMPARE_COMPILE_ERROR', severity: 'block',
+            message: errs.length ? `candidate failed to compile:\n${errs.map((e) => `  ${e}`).join('\n')}` : 'candidate failed to compile (the compiler gave no error lines)',
+          }];
         }
         return r.functions
           .filter((fn) => fn.result !== 'pass')
           .map((fn) => ({
             stage: 'compare', code: `COMPARE_${(fn.reason ?? 'MISMATCH').toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`, severity: 'block' as const,
-            message: `${fn.rva} ${fn.name ?? ''}: ${fn.result} ${fn.reason ?? ''}${fn.firstMismatch ? ` first mismatch at ${fn.firstMismatch}` : ''}; ${fn.exactBytes ?? '?'}/${fn.targetSize ?? fn.totalBytes ?? '?'} bytes exact${fn.hint ? `. Hint: ${fn.hint}` : ''}`,
+            message: `${fn.rva} ${fn.name ?? ''}: ${fn.result} ${fn.reason ?? ''}${fn.firstMismatch ? ` first mismatch at ${fn.firstMismatch}` : ''}; ${fn.exactBytes ?? '?'}/${fn.targetSize ?? fn.totalBytes ?? '?'} bytes exact${fn.alignedBytes != null ? `, ${fn.alignedBytes} bytes align${fn.alignedRegions != null ? ` in ${fn.alignedRegions} region(s)` : ''}` : ''}${fn.hint ? `. Hint: ${fn.hint}` : ''}`,
           }));
       } finally {
         release();

@@ -19,7 +19,7 @@ export interface Materialised {
 export async function materialise(out: WorkerOutput, current: (path: string) => Promise<string | null>): Promise<Materialised> {
   const files = new Map<string, string>();
   const problems: string[] = [];
-  for (const f of out.files ?? []) files.set(f.path, f.content);
+  for (const f of out.files ?? []) files.set(f.path, expandPlaceholderSlots(f.content));
   for (const e of out.edits ?? []) {
     const base = files.get(e.path) ?? (await current(e.path)) ?? '';
     const r = applyEdit(base, e);
@@ -85,6 +85,59 @@ export function applyEdit(src: string, e: UnitEdit): { content: string; problems
   }
   if (!out.endsWith('\n')) out += '\n';
   return { content: out, problems };
+}
+
+// Stand-in classes keep compared virtual slots at the right vtable offsets with runs of
+// `virtual void Unk_3B();` placeholders — often 100+ lines that crowd the class's real members out
+// of the unit budget. Prompts show each run as one marker line; a complete file returned with the
+// marker gets the run back verbatim, so nothing the worker did not see can be lost.
+const SLOT_LINE = /^([ \t]*)virtual void Unk_([0-9A-Fa-f]+)\(\);[ \t]*$/;
+const SLOT_MARKER = /^([ \t]*)\/\/ \[placeholder slots Unk_([0-9A-Fa-f]+)\.\.Unk_([0-9A-Fa-f]+) \(\d+ lines "virtual void Unk_NN\(\);"\) elided; returned files get them back\][ \t]*$/;
+const MIN_SLOT_RUN = 6;
+
+export function collapsePlaceholderSlots(src: string): string {
+  const lines = src.split('\n');
+  const out: string[] = [];
+  for (let i = 0; i < lines.length;) {
+    const m = SLOT_LINE.exec(lines[i]!);
+    if (!m) {
+      out.push(lines[i++]!);
+      continue;
+    }
+    let j = i + 1;
+    let prev = parseInt(m[2]!, 16);
+    while (j < lines.length) {
+      const n = SLOT_LINE.exec(lines[j]!);
+      if (!n || n[1] !== m[1] || n[2]!.length !== m[2]!.length || parseInt(n[2]!, 16) !== prev + 1) break;
+      prev++;
+      j++;
+    }
+    if (j - i >= MIN_SLOT_RUN) {
+      const last = SLOT_LINE.exec(lines[j - 1]!)![2]!;
+      out.push(`${m[1]}// [placeholder slots Unk_${m[2]}..Unk_${last} (${j - i} lines "virtual void Unk_NN();") elided; returned files get them back]`);
+    } else out.push(...lines.slice(i, j));
+    i = j;
+  }
+  return out.join('\n');
+}
+
+export function expandPlaceholderSlots(src: string): string {
+  if (!src.includes('// [placeholder slots Unk_')) return src;
+  return src.split('\n').flatMap((line) => {
+    const m = SLOT_MARKER.exec(line.replace(/\r$/, ''));
+    if (!m) return [line];
+    const [, indent, a, b] = m as unknown as [string, string, string, string];
+    const from = parseInt(a, 16);
+    const to = parseInt(b, 16);
+    if (!(to >= from) || to - from > 4_096) return [line];
+    const upper = a === a.toUpperCase();
+    const out: string[] = [];
+    for (let k = from; k <= to; k++) {
+      const hex = k.toString(16).padStart(a.length, '0');
+      out.push(`${indent}virtual void Unk_${upper ? hex.toUpperCase() : hex}();`);
+    }
+    return out;
+  }).join('\n');
 }
 
 /** Replace the bodies of every function not in `keep` with the elision marker (for prompts). */
