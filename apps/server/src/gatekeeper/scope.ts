@@ -37,6 +37,8 @@ export function checkScope(
   files: Array<{ path: string; content: string }>,
   allowed: string[],
   limits: ScopeLimits = DEFAULT_SCOPE_LIMITS,
+  /** Current/base content per path: a long line already there is upstream's, not the worker's. */
+  existing?: (path: string) => string | null | undefined,
 ): { findings: Finding[]; accepted: Array<{ path: string; content: string }> } {
   const f: Finding[] = [];
   const allow = new Set(allowed);
@@ -69,7 +71,8 @@ export function checkScope(
     if (/[\0\u0001-\u0008\u000e-\u001f]/.test(file.content)) f.push({ stage: 'scope', code: 'SCOPE_BINARY_CONTENT', severity: 'block', file: p, message: 'control characters in source' });
     const lines = file.content.split('\n');
     if (lines.length > limits.maxLines) f.push({ stage: 'scope', code: 'SCOPE_TOO_MANY_LINES', severity: 'block', file: p, message: `${lines.length} lines (max ${limits.maxLines})` });
-    const long = lines.findIndex((l) => l.length > limits.maxLineChars);
+    const old = new Set((existing?.(p) ?? '').replace(/\r\n/g, '\n').split('\n'));
+    const long = lines.findIndex((l) => l.length > limits.maxLineChars && !old.has(l.replace(/\r$/, '')));
     if (long >= 0) f.push({ stage: 'scope', code: 'SCOPE_LINE_TOO_LONG', severity: 'block', file: p, line: long + 1, message: `line exceeds ${limits.maxLineChars} chars` });
     accepted.push({ path: p, content: file.content.replace(/\r\n/g, '\n') });
   }

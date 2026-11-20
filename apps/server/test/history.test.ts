@@ -157,3 +157,16 @@ describe('retrying dead packets', () => {
     expect(store.getTask('task2')!.tier).toBe(0);
   });
 });
+
+describe('scope line limit', () => {
+  it('flags only long lines the worker added, not ones already in the file', async () => {
+    const { checkScope } = await import('../src/gatekeeper/scope.js');
+    const long = `// ${'TESObjectARMO::Name, '.repeat(60)}`;
+    const base = `${long}\n#pragma once\n#include "declarations/TESForm.h"\n`;
+    const after = base.replace('"declarations/TESForm.h"', '"../../declarations/TESForm.h"');
+    const path = 'reconstruction/skyrim_shared/forms/TESObjectARMO.h';
+    expect(checkScope([{ path, content: after }], [path], undefined, () => base).findings).toEqual([]);
+    expect(checkScope([{ path, content: after }], [path]).findings.map((f) => f.code)).toEqual(['SCOPE_LINE_TOO_LONG']);
+    expect(checkScope([{ path, content: `${after}${long}x\n` }], [path], undefined, () => base).findings.map((f) => f.code)).toEqual(['SCOPE_LINE_TOO_LONG']);
+  });
+});

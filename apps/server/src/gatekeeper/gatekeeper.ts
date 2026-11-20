@@ -104,7 +104,9 @@ export class GateKeeper {
     // 1–3: static, nothing written yet --------------------------------------------------------
     let accepted: Array<{ path: string; content: string }> = [];
     if (!(await stage('scope', true, async () => {
-      const r = checkScope(input.files, input.prepared.allowedPaths, this.opts.scopeLimits);
+      const existing = new Map<string, string | null>();
+      for (const p of input.prepared.allowedPaths) existing.set(p, input.carried?.get(p) ?? (await this.repo.baseFile(p)));
+      const r = checkScope(input.files, input.prepared.allowedPaths, this.opts.scopeLimits, (p) => existing.get(p));
       accepted = r.accepted;
       return r.findings;
     }))) return rejectOrQuarantine();
