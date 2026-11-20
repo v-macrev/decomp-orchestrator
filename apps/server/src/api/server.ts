@@ -217,6 +217,20 @@ export async function buildServer(app: App) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
+  // Apply the run's flow template as it is now (or a given flow) to the run, also while it runs.
+  // Only edits that keep the worker ladder, instances, routing and LLM review are accepted.
+  f.post('/api/runs/:id/flow', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const row = store.getRun(req.params.id);
+    if (!row) return notFound(reply, 'run');
+    const body = z.object({ flow: z.unknown().optional() }).parse(req.body ?? {});
+    const flow = body.flow !== undefined ? Flow.parse(body.flow) : store.getFlow(row.flow.id);
+    if (!flow) return reply.code(404).send({ ok: false, error: `flow template ${row.flow.id} no longer exists` });
+    try {
+      return engine.updateRunFlow(req.params.id, flow);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   f.delete('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');
     try {

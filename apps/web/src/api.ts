@@ -267,6 +267,7 @@ export const api = {
   runAction: (id: string, action: 'pause' | 'resume' | 'cancel', body?: unknown) => req('POST', `/api/runs/${id}/${action}`, body ?? {}),
   tasks: (id: string, state?: string, offset = 0) => req<Task[]>('GET', `/api/runs/${id}/tasks?limit=200&offset=${offset}${state ? `&state=${state}` : ''}`),
   batches: (id: string) => req<Batch[]>('GET', `/api/runs/${id}/batches`),
+  applyRunFlow: (id: string) => req<RunSummary>('POST', `/api/runs/${id}/flow`, {}),
   updateRun: (id: string, patch: RunEdit) => req<RunSummary>('PATCH', `/api/runs/${id}`, patch),
   deleteRun: (id: string) => req<{ ok: boolean; released: number; failed?: Array<{ rva: string; error: string }> }>('DELETE', `/api/runs/${id}`),
   stageRun: (id: string) => req<{ ok: boolean; staged: number; failed: number }>('POST', `/api/runs/${id}/stage`, {}),

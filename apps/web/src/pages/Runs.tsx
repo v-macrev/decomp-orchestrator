@@ -307,6 +307,17 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
       setRetryFailedError((e as Error).message);
     }
   };
+  const applyFlow = async () => {
+    setRetryFailedError('');
+    setRetryFailedMessage('');
+    try {
+      await api.applyRunFlow(runId);
+      setRetryFailedMessage('Flow template applied: new attempts use it; attempts already running finish as they started.');
+      onChange();
+    } catch (e) {
+      setRetryFailedError((e as Error).message);
+    }
+  };
   const status = m.run.status;
   const selectionShortfall = events.find((event) => event.kind === 'run.selection_shortfall');
   const deadTasks = m.tasks.dead ?? 0;
@@ -323,6 +334,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
           <ConfirmButton onConfirm={retryFailed} disabled={!deadTasks || retryingFailed || retryUnavailable} className="primary" confirmLabel={`Retry ${deadTasks} failed task(s) where each stopped?`} title="Retries only dead packets; successful and quarantined tasks are left alone. Retries use this run's remaining budget.">{retryingFailed ? 'Retrying…' : `Retry failed tasks (${deadTasks})`}</ConfirmButton>
           <ConfirmButton onConfirm={() => act('cancel')} disabled={['completed', 'cancelled', 'failed'].includes(status)} confirmLabel="Cancel run? Open tasks stop">Cancel</ConfirmButton>
           <button onClick={() => setEditing((x) => !x)}>{editing ? 'Close edit' : 'Edit'}</button>
+          <ConfirmButton onConfirm={applyFlow} disabled={['completed', 'cancelled', 'failed'].includes(status)} confirmLabel="Apply the flow template's current models and limits to this run?" title="Re-reads this run's flow template: models, capability, attempts and checks change from the next attempt on. Worker counts, tiers and routing stay as the run started.">Apply flow changes</ConfirmButton>
           <ConfirmButton onConfirm={removeRun} disabled={m.engine.active || ['running', 'discovering'].includes(status)} confirmLabel="Delete run and its history? Claims go back" title={m.engine.active ? 'Cancel or finish the run first' : 'Deletes the run, its packets, attempts and events; local claims it still holds are released (not those in a submitted PR)'}>Delete</ConfirmButton>
         </div>
         {editing && <RunEditor runId={runId} status={status} onSaved={() => { setEditing(false); onChange(); api.metrics(runId).then(setM).catch(() => undefined); }} />}

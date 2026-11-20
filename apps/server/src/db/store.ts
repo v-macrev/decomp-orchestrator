@@ -480,6 +480,14 @@ export class Store {
     const now = Date.now();
     this.tx(() => workers.forEach((w) => stmt.run(runId, w.workerId, w.nodeId, w.tier, w.capability, maxFunctions, now)));
   }
+  /** Replace a run's flow snapshot (live-compatible edits only; the engine checks) and its workers' tier capability. */
+  setRunFlow(runId: string, flow: Flow, capabilityByTier: string[]) {
+    this.tx(() => {
+      this.db.prepare('UPDATE runs SET flow_json = ?, updated_at = ? WHERE id = ?').run(j(flow), Date.now(), runId);
+      const stmt = this.db.prepare('UPDATE run_workers SET capability = ? WHERE run_id = ? AND tier = ?');
+      capabilityByTier.forEach((c, tier) => stmt.run(c, runId, tier));
+    });
+  }
   workerStats(runId: string) {
     return this.db.prepare(`SELECT w.worker_id, w.node_id, w.tier, w.capability, w.max_functions, w.assigned_function_count, w.assigned_tasks,
         (SELECT COALESCE(SUM(json_array_length(t.functions_json)), 0) FROM tasks t WHERE t.run_id = w.run_id AND t.assigned_worker = w.worker_id AND t.state IN ('passed','staged')) passed_functions,

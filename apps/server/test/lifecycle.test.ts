@@ -351,6 +351,29 @@ describe('editing and deleting runs', () => {
   }, 60_000);
 });
 
+describe('changing the flow of a running run', () => {
+  it('applies model and attempt changes live, and refuses changes fixed at start', async () => {
+    const s = setup();
+    const run = createRun(s, 'live flow', 40, 5);
+    await s.engine.start(run.id);
+    const edited = flow();
+    const worker = edited.nodes.find((n) => n.id === 'worker')!;
+    worker.data = { ...worker.data, capability: 'frontier', maxAttempts: 9, pool: { ...worker.data.pool, capability: 'frontier' } };
+    const updated = s.engine.updateRunFlow(run.id, edited);
+    expect(updated.flow.nodes.find((n) => n.id === 'worker')!.data).toMatchObject({ capability: 'frontier', maxAttempts: 9 });
+    expect(s.store.getRun(run.id)!.flow.nodes.find((n) => n.id === 'worker')!.data.maxAttempts).toBe(9);
+    const ev = s.store.db.prepare(`SELECT msg FROM events WHERE run_id = ? AND kind = 'run.flow_updated'`).get(run.id) as { msg: string };
+    expect(ev.msg).toMatch(/while running.*capability balanced → frontier/);
+
+    const more = flow();
+    more.nodes.find((n) => n.id === 'worker')!.data.instances = 5;
+    expect(() => s.engine.updateRunFlow(run.id, more)).toThrow(/instances 4 ⇒ 5/);
+    await s.engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    expect(() => s.engine.updateRunFlow(run.id, edited)).toThrow(/completed/);
+  }, 60_000);
+});
+
 describe('carrying failed functions into a new run', () => {
   it('adds the dead functions of earlier runs to the new run\'s selection', async () => {
     const s = setup();

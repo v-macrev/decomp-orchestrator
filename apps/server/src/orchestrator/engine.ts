@@ -98,7 +98,8 @@ class ActiveRun {
   /** Slots whose worktree could not be restored: slot → when to try again. They take no work. */
   parked = new Map<number, number>();
   parkStrikes = new Map<number, number>();
-  constructor(readonly row: RunRow, readonly plan: FlowPlan, readonly gate: GateKeeper) {}
+  /** Replaced when the operator applies a live-compatible flow edit (see RunEngine.updateRunFlow). */
+  constructor(readonly row: RunRow, public plan: FlowPlan, readonly gate: GateKeeper) {}
 
   /** Idle slots that could still take new work (capped workers cannot absorb a backlog). */
   idleSlots(tier: number): number {
@@ -594,6 +595,58 @@ export class RunEngine {
       events.emit('run.deleted', `deleted run "${row.name}" (${runId}); ${released} local claim(s) released${submitted.size ? '; claims in submitted PRs kept' : ''}`, { level: 'warn', data: { runId, released } });
       return { ok: true as const, released };
     });
+  }
+
+  /**
+   * Apply a flow edit to a run, including an active one. Each attempt reads its tier's binding
+   * (models, capability, effort), attempt limits and gate checks from the plan when it starts, so
+   * those change from the next attempt on; attempts already running finish as they started. What
+   * was fixed when the run started cannot change here: the worker ladder, instances per tier
+   * (worktree slots and worker identities), difficulty routing and the LLM reviewer.
+   */
+  updateRunFlow(runId: string, next: Flow) {
+    const { store, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (['completed', 'cancelled', 'failed'].includes(row.status)) throw new Error(`run is ${row.status}; flow changes apply to runs that still have work`);
+    const errors = validateFlow(next).filter((i) => i.level === 'error');
+    if (errors.length) throw new Error(`the flow is invalid: ${errors.map((e) => e.message).join('; ')}`);
+    const before = compileFlowPlan(row.flow);
+    const after = compileFlowPlan(next);
+    const ladder = (p: FlowPlan) => p.tiers.map((t) => t.node.id).join(' → ');
+    const problems: string[] = [];
+    if (ladder(before) !== ladder(after)) problems.push(`worker tiers changed (${ladder(before)} ⇒ ${ladder(after)})`);
+    else {
+      before.tiers.forEach((t, i) => {
+        const n = after.tiers[i]!.node.data.instances;
+        if (t.node.data.instances !== n) problems.push(`${t.node.data.label || t.node.id}: instances ${t.node.data.instances} ⇒ ${n}`);
+      });
+    }
+    if (DIFFICULTIES.some((d) => before.route[d] !== after.route[d])) problems.push('difficulty routing changed');
+    const reviewer = (p: FlowPlan) => JSON.stringify(p.gatekeepers.filter((g) => g.data.gate.llmReview).map((g) => g.data.pool));
+    if (reviewer(before) !== reviewer(after)) problems.push('LLM review changed');
+    if (problems.length) {
+      throw new Error(`these changes need a new run (they are fixed when a run starts): ${problems.join('; ')}`);
+    }
+    const flow = { ...next, id: row.flow.id };
+    const changes = after.tiers.flatMap((t, i) => {
+      const a = before.tiers[i]!.node.data;
+      const b = t.node.data;
+      const out: string[] = [];
+      if (before.tiers[i]!.capability !== t.capability) out.push(`capability ${before.tiers[i]!.capability} → ${t.capability}`);
+      if (JSON.stringify(a.pool) !== JSON.stringify(b.pool)) out.push('models');
+      if (a.maxAttempts !== b.maxAttempts || a.stuckAfter !== b.stuckAfter) out.push(`attempts ${a.maxAttempts}/${a.stuckAfter} → ${b.maxAttempts}/${b.stuckAfter}`);
+      return out.length ? [`${b.label || t.node.id}: ${out.join(', ')}`] : [];
+    });
+    store.setRunFlow(runId, flow, after.tiers.map((t) => t.capability));
+    const live = this.active.get(runId);
+    if (live) {
+      Object.assign(live.row, { flow });
+      live.plan = after;
+      live.wake.notify();
+    }
+    events.emit('run.flow_updated', `flow updated${live ? ' while running' : ''}: ${changes.join('; ') || 'labels and checks only'}; attempts already running finish as they started`, { runId, level: 'warn', data: { changes } });
+    return store.getRun(runId)!;
   }
 
   listBatches(runId: string) {
