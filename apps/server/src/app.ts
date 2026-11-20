@@ -48,6 +48,8 @@ export async function createApp(cfg: ServerConfig, opts: { quiet?: boolean } = {
     sim = new SimRepo({ slots: cfg.sim.slots, compareLatencyMs: cfg.sim.compareLatencyMs, infraRate: cfg.sim.infraRate, traps: cfg.sim.traps });
     repo = sim;
   }
+  // Before init: it resets every slot and may clear stale git locks, which the operator should see.
+  repo.notice = (kind, msg) => events.emit(kind, msg, { level: 'warn' });
   await repo.init();
 
   seedAccounts(store, cfg);
