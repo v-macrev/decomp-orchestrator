@@ -8,6 +8,7 @@ import type { Store, TaskRow } from '../db/store.js';
 import type { RepoAdapter } from '../repo/types.js';
 import type { EventBus } from '../telemetry/events.js';
 import { newId } from '../util/async.js';
+import { coAuthorTrailers, draftedByText, personOf } from './attribution.js';
 
 export interface StageSummary {
   /** Batches with a verified branch (or drafts, for adapters that do not stage). */
@@ -38,6 +39,7 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
   }
   if (cur.length) batches.push(cur);
 
+  const person = personOf(store.getRun(runId)?.config.draftedBy);
   let seq = store.maxBatchSeq(runId);
   for (const tasks of batches) {
     seq++;
@@ -45,24 +47,43 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
     store.createBatch({ id, runId, seq, taskIds: tasks.map((t) => t.id) });
     const files = latestFiles(store, tasks);
     const fnCount = tasks.reduce((s, t) => s + t.functions.length, 0);
-    const message = `Reconstruct ${fnCount} function(s) across ${new Set(tasks.map((t) => t.unit)).size} unit(s)\n\n${tasks.flatMap((t) => t.functions.map((f) => `- ${f.rva} ${f.name ?? ''}`)).join('\n')}`;
+    // Attribution as contributors give it: the model that finished each packet (its accepted
+    // attempt), a "Drafted by" line for `sr submit --drafted-by`, and co-author trailers.
+    const finisher = new Map(tasks.map((t) => [t.id, finishingModel(store, t)]));
+    const models = [...new Set([...finisher.values()].filter((m): m is string => !!m))];
+    const draftedBy = models.length ? draftedByText(person, models) : null;
+    const lines = tasks.flatMap((t) => t.functions.map((f) => `- ${f.rva} ${f.name ?? ''}${finisher.get(t.id) ? ` (drafted by ${finisher.get(t.id)})` : ''}`));
+    const trailers = coAuthorTrailers(models);
+    const message = [
+      `Reconstruct ${fnCount} function(s) across ${new Set(tasks.map((t) => t.unit)).size} unit(s)`,
+      '',
+      lines.join('\n'),
+      ...(draftedBy ? ['', `Drafted by ${draftedBy}.`] : []),
+      ...(trailers.length ? ['', ...trailers] : []),
+    ].join('\n');
     if (repo.stageBatch) {
       const r = await repo.stageBatch({ runId, seq, files, tasks: tasks.map((t) => ({ id: t.id, srTaskId: t.srTaskId, functions: t.functions, task: t })), message });
       const ok = r.verified && !!r.branch;
-      store.updateBatch(id, { status: ok ? 'branch_ready' : 'failed', branch: ok ? r.branch : null, detail: { problems: r.problems, functions: fnCount } });
+      store.updateBatch(id, { status: ok ? 'branch_ready' : 'failed', branch: ok ? r.branch : null, detail: { problems: r.problems, functions: fnCount, draftedBy, models } });
       if (!ok) {
         summary.failed++;
         events.emit('batch.failed', `batch ${seq}: ${fnCount} functions NOT staged, no branch created; packets stay passed and can be staged again: ${r.problems.join('; ') || 'no branch'}`, { runId, level: 'warn', data: { seq, problems: r.problems } });
         continue;
       }
-      events.emit('batch.staged', `batch ${seq}: ${fnCount} functions → ${r.branch} (re-verified)`, { runId });
+      events.emit('batch.staged', `batch ${seq}: ${fnCount} functions → ${r.branch} (re-verified)${draftedBy ? `; submit with --drafted-by "${draftedBy}"` : ''}`, { runId, data: { draftedBy, models } });
     } else {
-      store.updateBatch(id, { status: 'draft', detail: { functions: fnCount } });
+      store.updateBatch(id, { status: 'draft', detail: { functions: fnCount, draftedBy, models } });
     }
     summary.staged++;
     store.db.prepare(`UPDATE tasks SET state = 'staged', updated_at = ? WHERE id IN (${tasks.map(() => '?').join(',')}) AND state = 'passed'`).run(Date.now(), ...tasks.map((t) => t.id));
   }
   return summary;
+}
+
+/** The model of the packet's accepted attempt. */
+function finishingModel(store: Store, t: TaskRow): string | null {
+  const v = t.lastVerdictId ? store.getVerdict(t.lastVerdictId) : null;
+  return (v ? store.getAttempt(v.attemptId)?.model : null) ?? null;
 }
 
 function latestFiles(store: Store, tasks: TaskRow[]) {

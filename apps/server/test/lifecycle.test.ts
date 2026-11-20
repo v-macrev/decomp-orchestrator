@@ -107,6 +107,28 @@ describe('staging that fails re-verification', () => {
   }, 60_000);
 });
 
+describe('staging attribution', () => {
+  it('names the model that finished each packet in the batch commit, with the run\'s person', async () => {
+    const s = setup();
+    const real = s.repo.stageBatch.bind(s.repo);
+    const messages: string[] = [];
+    s.repo.stageBatch = async (input: StageBatchInput) => {
+      messages.push(input.message);
+      return real(input);
+    };
+    const run = s.engine.createRun('attr', { flowId: 'default', selection: { source: 'synthetic', count: 6, seed: 5 }, prBatchSize: 40, draftedBy: 'v-macrev' }, flow());
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const models = s.store.db.prepare(`SELECT DISTINCT a.model FROM tasks t JOIN verdicts v ON v.id = t.last_verdict_id JOIN attempts a ON a.id = v.attempt_id WHERE t.run_id = ? AND t.state = 'staged'`).all(run.id) as Array<{ model: string }>;
+    expect(models.length).toBeGreaterThan(0);
+    expect(messages).toHaveLength(1);
+    for (const { model } of models) expect(messages[0]).toContain(`(drafted by ${model})`);
+    expect(messages[0]).toMatch(new RegExp(`\\nDrafted by v-macrev, assisted by ${models[0]!.model}`));
+    const batch = s.store.listBatches(run.id)[0]!;
+    expect((batch.detail as unknown as { draftedBy: string }).draftedBy).toMatch(/^v-macrev, assisted by /);
+  }, 60_000);
+});
+
 describe('staging and the slot lock', () => {
   it('refuses to start another run while a finished run is still staging', async () => {
     const s = setup();

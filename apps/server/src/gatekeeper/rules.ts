@@ -237,7 +237,7 @@ export function cheatScan(ctx: CheatContext): Finding[] {
     const counted = countedHeaderLines(header);
     const shrinks = prevHeader !== null && counted.every((l) => countedHeaderLines(prevHeader).includes(l));
     if (counted.length > HEADER_LIMIT && !shrinks) {
-      push(f, 'CONV_HEADER_TOO_LONG', 'block', path, 1, `header has ${counted.length} lines besides labels, sources, compared functions and SPDX; keep at most ${HEADER_LIMIT} (drop Task, Labels, Recipe, Evidence, Drafted by, disclaimers, wrapped skeleton guidance)`);
+      push(f, 'CONV_HEADER_TOO_LONG', 'block', path, 1, `header has ${counted.length} lines besides labels, sources, compared functions and SPDX; keep at most ${HEADER_LIMIT} (drop Task, Labels, Recipe, Evidence, disclaimers, wrapped skeleton guidance)`);
     }
     const origin = header.split('\n').find((l) => /^\/\/\s*Code origin:/.test(l));
     if (origin && (/<[^>]*>|TODO|\?\?\?/.test(origin) || /Code origin:\s*$/.test(origin))) {
@@ -264,7 +264,7 @@ function leadingComment(src: string): string {
 
 /** Lines counting against the budget (repo: lint_reconstruction.counted_header_lines). */
 function countedHeaderLines(header: string): string[] {
-  return header.split('\n').filter((ln) => ln.trim() && ln.trim() !== '//' && !LABEL_WORD.test(ln) && !ln.includes('Sibling source:') && !COMPARED_LINE.test(ln.trim()) && !ln.includes('SPDX-License-Identifier'));
+  return header.split('\n').filter((ln) => ln.trim() && ln.trim() !== '//' && !LABEL_WORD.test(ln) && !ln.includes('Sibling source:') && !COMPARED_LINE.test(ln.trim()) && !ln.includes('SPDX-License-Identifier') && !/^\/\/\s*Drafted by\b/i.test(ln.trim()));
 }
 
 // ---------------------------------------------------------------- classification

@@ -22,7 +22,7 @@ export const FINDING_GUIDANCE: Record<string, string> = {
   CHEAT_MATCHED_BODY_REMOVED: 'Return the whole unit including every previously accepted function.',
   LEAK_DECOMPILER_IDENT: 'Do not copy pseudo-C identifiers (param_1, local_28, iVar1, FUN_...); use meaningful names.',
   LEAK_INCLUDE_OUTSIDE_ROOTS: 'Include own header as "X.h" and shared headers by reconstruction-root path ("area/Y.h"); only the standard headers the message lists are allowed, declare anything else yourself.',
-  CONV_HEADER_TOO_LONG: 'Header: one line per key (Source exposure, Code origin, Adapted bodies, SPDX) plus one 0x<rva> line per compared function; replace placeholders instead of adding lines; no Task/Recipe/Drafted by/disclaimer lines.',
+  CONV_HEADER_TOO_LONG: 'Header: one line per key (Source exposure, Code origin, Adapted bodies, SPDX) plus one 0x<rva> line per compared function; replace placeholders instead of adding lines; no Task/Recipe/disclaimer lines ("Drafted by" is written for you).',
   CONV_STATIC_ASSERT_NO_MESSAGE: 'Every static_assert needs a message.',
   CONV_ORIGIN_PLACEHOLDER: 'Replace the SKELETON_TODO line (and its wrapped second line) with "// Code origin: <how you wrote it>" and "// Adapted bodies: none" (or the adapted bodies) — do not add a second line below it.',
   PREFLIGHT_PROBLEM: 'Every file you change needs a truthful "// Code origin:" line in its leading header — including the .h — and must keep licence notices complete.',

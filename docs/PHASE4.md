@@ -249,3 +249,21 @@ about the state once they met. Each now has a regression test in `test/lifecycle
 | A worker whose lease was lost could still insert an `accept` verdict and emit `task.passed`, even though the lease-guarded state change did nothing | Inserting the verdict and changing the state are one transaction. A lost lease files the verdict under the new route `stale`, moves nothing and emits `task.stale` |
 | Retrying failed packets of a paused run requeued them, but the slot loops stayed parked on the resume signal | Retrying resumes the run. A paused run that is not loaded (after a restart) starts as running. The response reports the stored status, not a snapshot |
 | The API token was accepted as `?token=` on every route, and URLs end up in logs and history | Bearer header everywhere, compared in constant time. The query token is accepted only on the SSE stream. A non-loopback bind without a token is refused unless `ORCH_ALLOW_UNAUTHENTICATED=1` |
+
+### Attribution: the model that finished the function
+
+The target repo asks contributors to name their actual model. Its contributor card says "name your
+actual model", its lint requires a `Drafted by` line in every unit source, and its main branch
+reads `// Drafted by gpt-6.1-terra.` or `// Drafted by <person>, assisted by claude-sonnet-5-5`.
+Claims record the model (`sr claim --model`) and tasks record a `drafter_model`, which the
+project's model-trend statistics read. The orchestrator got all three wrong, and with rotation and
+help-up a packet can pass on a different model from the one it started on.
+
+| Before | Now (`orchestrator/attribution.ts`) |
+|---|---|
+| Header repair stripped `Drafted by` as a banned line, and the gate counted it against the header budget | The orchestrator writes the line itself from the gated attempt's model: `// Drafted by <person>, assisted by <model>.` (or the model alone when the run has no person). The skeleton's placeholder is replaced, a worker's own line is dropped, and models accumulate as more packets of the unit pass. Another contributor's line is kept, with `; later functions by ...` appended. The line is not counted against the budget |
+| The claim named the flow node's label (`Workers · frontier`) as the model | Until a packet passes, the claim names the agent (`decomp-orchestrator`, or the node's pinned model). On a pass, `sr claim --model <finishing model>` rewrites the local claim, and the task's `drafter_model` is set to the same model (`recordAttribution`) |
+| Staged commits named no model | Each function line names the model that drafted it, a `Drafted by <person>, assisted by <models>.` line gives the value for `sr submit --drafted-by`, and Claude models get `Co-Authored-By` trailers in the repo's own form. The batch detail keeps `draftedBy` and `models` |
+
+The person is the run's `draftedBy` (the contributor's name or login). The schema's placeholder
+`operator` counts as no person.

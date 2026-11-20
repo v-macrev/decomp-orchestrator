@@ -5,8 +5,10 @@
 //   * `sr start` writes skeleton placeholders (`Code origin: SKELETON_TODO_CODE_ORIGIN (...)`,
 //     `Adapted bodies: SKELETON_TODO_ORIGIN (...)`, wrapped over two lines); workers wrote their own
 //     line underneath and left the placeholder → CONV_ORIGIN_PLACEHOLDER + CONV_HEADER_TOO_LONG;
-//   * workers added lines the repo's lint bans (Task, Labels, Recipe, Evidence, Drafted by,
-//     disclaimers) and second copies of single-valued keys (Source exposure, Code origin, ...);
+//   * workers added lines the repo's lint bans (Task, Labels, Recipe, Evidence, disclaimers) and
+//     second copies of single-valued keys (Source exposure, Code origin, ...);
+//   * workers wrote their own "Drafted by" lines; attribution is the orchestrator's job (the
+//     accepted attempt's model, see attribution.ts), so a worker's line is dropped and replaced;
 //   * a touched `.h` needs its own `Code origin:` line (repo preflight) and workers never add one.
 //
 // Rules, all conservative:
@@ -16,9 +18,13 @@
 //     from another file of the same answer (its .cpp), never with orchestrator text;
 //   * every change is reported, so the attempt record shows exactly what was normalised.
 
+import { setDraftedBy } from './attribution.js';
+
 const SINGLE_KEYS = ['Source exposure', 'Code origin', 'Adapted bodies', 'Adapted code', 'Licence', 'License', 'Recipe'];
 /** Lines the repo's header lint asks contributors to drop. */
-const NOISE = /^\/\/\s*(?:Task|Labels?|Recipe|Evidence|Drafted by|Disclaimer|Note to reviewers?)\b|A byte match shows|does not verify the (?:community )?(?:method )?names/i;
+const NOISE = /^\/\/\s*(?:Task|Labels?|Recipe|Evidence|Disclaimer|Note to reviewers?)\b|A byte match shows|does not verify the (?:community )?(?:method )?names/i;
+/** A "Drafted by" line: required by the repo's lint in unit sources, written by the orchestrator. */
+const DRAFTED_LINE = /^\/\/\s*Drafted by\b/i;
 const KEYED = /^\/\/\s*([A-Z][A-Za-z -]{1,40}):/;
 const COMPARED = /^\/\/\s*0x[0-9a-fA-F]+(?:\s|$)/;
 const PLACEHOLDER = /SKELETON_TODO\w*/;
@@ -26,7 +32,7 @@ const PLACEHOLDER = /SKELETON_TODO\w*/;
 const HEADER_BUDGET = 6;
 const LABEL_WORD = /(?<![A-Za-z0-9_])(?:COMMUNITY|SIBLING|GUESS|EXE_RTTI|STANDIN|OBSERVED)[A-Za-z0-9_]*/;
 function countedLines(es: Array<{ lines: string[] }>): number {
-  return es.flatMap((e) => e.lines).filter((l) => l.trim() && l.trim() !== '//' && !LABEL_WORD.test(l) && !l.includes('Sibling source:') && !COMPARED.test(l.trim()) && !l.includes('SPDX-License-Identifier')).length;
+  return es.flatMap((e) => e.lines).filter((l) => l.trim() && l.trim() !== '//' && !LABEL_WORD.test(l) && !l.includes('Sibling source:') && !COMPARED.test(l.trim()) && !l.includes('SPDX-License-Identifier') && !DRAFTED_LINE.test(l.trim())).length;
 }
 
 interface Entry {
@@ -91,8 +97,8 @@ export function repairHeader(path: string, after: string, before: string | null,
   const prev = new Set((before ? splitHeader(before).header : []).map((l) => l.trim()));
   let es = entries(header, prev);
 
-  // 1. banned lines the worker added
-  const noise = es.filter((e) => e.added && NOISE.test(e.lines.join(' ')));
+  // 1. banned lines the worker added, and attribution lines the worker wrote itself
+  const noise = es.filter((e) => e.added && (NOISE.test(e.lines.join(' ')) || DRAFTED_LINE.test(e.lines[0]!.trim())));
   if (noise.length) {
     es = es.filter((e) => !noise.includes(e));
     changes.push(`dropped ${noise.length} banned header line(s) (${noise.map((e) => e.key ?? e.lines[0]!.slice(3, 30)).join(', ')})`);
@@ -157,7 +163,11 @@ export async function repairAnswer(
   files: Array<{ path: string; content: string }>,
   current: (path: string) => Promise<string | null>,
   stated: { codeOrigin?: string; adaptedBodies?: string } = {},
-  opts: { untouched?: Array<{ path: string; current: string | null; base: string | null }> } = {},
+  opts: {
+    untouched?: Array<{ path: string; current: string | null; base: string | null }>;
+    /** Name the model of this attempt in each returned unit source's "Drafted by" line. */
+    attribution?: { person: string | null; model: string };
+  } = {},
 ): Promise<{ files: Array<{ path: string; content: string }>; changes: string[] }> {
   const order = [...files].sort((a, b) => Number(a.path.endsWith('.h')) - Number(b.path.endsWith('.h')));
   const out = new Map(files.map((f) => [f.path, f.content]));
@@ -171,6 +181,11 @@ export async function repairAnswer(
     out.set(f.path, r.content);
     changes.push(...r.changes.map((c) => `${f.path}: ${c}`));
     hint ??= originStatement(r.content);
+    if (opts.attribution && f.path.endsWith('.cpp')) {
+      const d = setDraftedBy(out.get(f.path)!, opts.attribution.person, opts.attribution.model);
+      out.set(f.path, d.content);
+      if (d.change) changes.push(`${f.path}: ${d.change}`);
+    }
   }
   // Files the worker did not return but `prepare` changed (skeleton headers/declarations): the
   // repo's preflight checks them too. Compare against the base revision; add them only if repaired.

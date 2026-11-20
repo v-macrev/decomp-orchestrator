@@ -31,6 +31,7 @@ import { TaskContextBuilder, shouldCacheTaskPrefix } from './contextBuilder.js';
 import { materialise } from './edits.js';
 import { repairAnswer } from './headerRepair.js';
 import { buildHistory, findRepeat, progressScore, type HistoryEntry } from './history.js';
+import { draftedByText, personOf } from './attribution.js';
 import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
 import { stageRun, type StageSummary } from './staging.js';
@@ -624,7 +625,10 @@ export class RunEngine {
       await repo.reset(slot);
       const carried = this.carriedFiles(runId, task.unit);
       if (carried.length) await repo.writeFiles(slot, carried);
-      const modelHint = node.data.pool.model ?? node.data.label;
+      // The claim must name a model or the agent, never a guess: the model is chosen per attempt
+      // (rotation, help-up), so until a packet passes the claim names the orchestrator, and on a
+      // pass recordAttribution rewrites it with the model that finished the packet.
+      const modelHint = node.data.pool.model ?? 'decomp-orchestrator';
       let prepared: PreparedTask;
       try {
         prepared = await repo.prepare(slot, task, { draftedBy: cfg.draftedBy, model: modelHint, signal });
@@ -777,7 +781,9 @@ export class RunEngine {
       }
       // Deterministic header repair (skeleton placeholders, duplicate keys, banned lines, origin in .h).
       const untouched = await Promise.all(prepared.allowedPaths.filter((p) => !mat.files.some((f) => f.path === p)).map(async (p) => ({ path: p, current: await repo.readFile(slot, p), base: await repo.baseFile(p) })));
-      const fixed = await repairAnswer(mat.files, (p) => repo.readFile(slot, p), { codeOrigin: parsed.data.codeOrigin, adaptedBodies: parsed.data.adaptedBodies }, { untouched });
+      const fixed = await repairAnswer(mat.files, (p) => repo.readFile(slot, p), { codeOrigin: parsed.data.codeOrigin, adaptedBodies: parsed.data.adaptedBodies }, {
+        untouched, attribution: { person: personOf(cfg.draftedBy), model: lease.model.id },
+      });
       mat.files = fixed.files;
       // The exact code (comments and spacing aside) already failed in the compiler: refuse it without
       // compiling and say which attempt it repeats, so the next try has to change the logic.
@@ -801,7 +807,13 @@ export class RunEngine {
       const written = gate.written.length ? gate.written : mat.files;
       store.updateAttempt(attempt.id, { status: 'completed', files: written, finishedAt: Date.now() });
       if (gate.verdict.decision === 'pass') await this.learn(run, task, written, carriedMap).catch((e) => ev('knowledge.failed', `knowledge extraction failed: ${(e as Error).message}`, 'warn'));
-      return this.route(run, task, leaseId, attempt, gate.verdict, { infra: gate.infra, strike: gate.strike }, tierIdx, prepared.srTaskId);
+      this.route(run, task, leaseId, attempt, gate.verdict, { infra: gate.infra, strike: gate.strike }, tierIdx, prepared.srTaskId);
+      if (gate.verdict.decision === 'pass' && prepared.srTaskId && repo.recordAttribution && store.getTask(task.id)?.lastVerdictId === gate.verdict.id) {
+        const draftedBy = draftedByText(personOf(cfg.draftedBy), [lease.model.id]);
+        const r = await repo.recordAttribution({ task, srTaskId: prepared.srTaskId, model: lease.model.id, draftedBy }).catch((e: Error) => ({ ok: false, problems: [e.message] }));
+        ev(r.ok ? 'task.attributed' : 'task.attribution_failed', r.ok ? `claim and task attributed to ${lease.model.id} (drafted by ${draftedBy})` : `could not record ${lease.model.id} as the finishing model: ${r.problems.join('; ').slice(0, 300)}`, r.ok ? 'debug' : 'warn', { model: lease.model.id });
+      }
+      return;
     } catch (e) {
       if (e instanceof AbortedError || signal.aborted) {
         if (attempt) store.updateAttempt(attempt.id, { status: 'abandoned', error: lost.signal.aborted ? 'lease lost' : 'aborted', finishedAt: Date.now() });

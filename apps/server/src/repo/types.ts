@@ -122,6 +122,11 @@ export interface RepoAdapter {
    * re-verify every packet against the combined result, and commit. Never pushes or opens a PR.
    */
   stageBatch?(input: StageBatchInput): Promise<StageBatchResult>;
+  /**
+   * Record who finished a packet the way contributors do: the claim's model (`sr claim --model`)
+   * and the task's `drafter_model`, set to the model of the accepted attempt.
+   */
+  recordAttribution?(input: { task: TaskRow; srTaskId: string; model: string; draftedBy: string }): Promise<{ ok: boolean; problems: string[] }>;
 }
 
 export interface StageBatchInput {

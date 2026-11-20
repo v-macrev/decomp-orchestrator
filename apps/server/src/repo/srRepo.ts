@@ -206,6 +206,28 @@ export class SrRepo implements RepoAdapter {
     return out;
   }
 
+  async recordAttribution(input: { task: TaskRow; srTaskId: string; model: string; draftedBy: string }) {
+    const problems: string[] = [];
+    const rvas = input.task.functions.map((f) => f.rva);
+    await this.srMutex.run('sr-local', async () => {
+      // Re-claiming one's own local claim only rewrites its record, now with the finishing model.
+      const claim = await this.sr(this.cfg.repoPath, ['claim', ...rvas, '--offline-ok', '--model', input.model, '--drafted-by', input.draftedBy], { timeoutMs: 120_000 });
+      if (claim.run.code !== 0 || claim.json?.ok === false) problems.push(`claim: ${claim.json?.error ?? (claim.run.stderr || claim.run.stdout).trim().slice(-200)}`);
+      if (!/^[A-Za-z0-9._-]+$/.test(input.srTaskId)) {
+        problems.push(`task id ${input.srTaskId} is not a plain name`);
+        return;
+      }
+      const file = this.host.fsPath(this.p.join(this.cfg.localDir, 'contrib', 'tasks', input.srTaskId, 'task.json'));
+      try {
+        const task = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown>;
+        if (task.drafter_model !== input.model) writeFileSync(file, `${JSON.stringify({ ...task, drafter_model: input.model }, null, 2)}\n`, 'utf8');
+      } catch (e) {
+        problems.push(`task.json: ${(e as Error).message.slice(0, 200)}`);
+      }
+    });
+    return { ok: problems.length === 0, problems };
+  }
+
   async baseFile(path: string) {
     if (this.baseCache.has(path)) return this.baseCache.get(path)!;
     const r = await this.git(this.cfg.repoPath, ['show', `${this.sha}:${path}`]);
