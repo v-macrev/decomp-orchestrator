@@ -810,7 +810,9 @@ export class RunEngine {
         await repo.reset(slot);
       } catch (e) {
         if (e instanceof AbortedError || signal.aborted) throw e;
-        this.parkSlot(run, slot, (e as Error).message);
+        // The finally-block retries reset once; only park if that recovery attempt also fails.
+        // Parking here would double-count a single fault and leave a successfully restored slot
+        // unavailable until the back-off expires.
         this.infraFailure(run, task, leaseId, `slot ${slot} could not be restored`, undefined, { slotFault: true });
         return;
       }
