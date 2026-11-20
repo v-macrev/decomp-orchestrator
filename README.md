@@ -94,10 +94,14 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
 4. `npm run dev`, then start a run with source **sr next**. Leave *exposure consent* off unless you,
    as the owner of the game copy, agree to send locally made listings to your AI providers.
 5. Accepted units are staged on local branches (`decomp/<run>-b<n>`), re-verified as a whole.
-   Review them and submit with the repo's own `./sr submit`; nothing is pushed automatically.
+   A batch that fails re-verification gets no branch and its packets stay `passed`; stage them
+   again with `POST /api/runs/:id/stage`. Review the branches and submit with the repo's own
+   `./sr submit`; nothing is pushed automatically.
 
-Set `ORCH_API_TOKEN` to require a bearer token on the API (the UI asks for it). The server binds
-to `127.0.0.1` by default.
+Set `ORCH_API_TOKEN` to require a bearer token on the API (the UI asks for it). Only the event
+stream also takes it as `?token=`, because browsers cannot send headers to an EventSource. The
+server binds to `127.0.0.1` by default and refuses any other address without a token, unless
+`ORCH_ALLOW_UNAUTHENTICATED=1` says the network is trusted.
 
 ## Layout
 

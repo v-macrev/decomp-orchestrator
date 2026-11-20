@@ -210,7 +210,7 @@ export class SimRepo implements RepoAdapter, SimOracle {
       const r = this.evaluate(files.get(t.task.unit) ?? '', t.task);
       if (!r.allPass) problems.push(`${t.id}: ${r.functions.filter((f) => f.result !== 'pass').map((f) => f.rva).join(',') || 'compile error'}`);
     }
-    return { branch: `sim/${input.runId}-b${input.seq}`, verified: problems.length === 0, problems };
+    return { branch: problems.length ? null : `sim/${input.runId}-b${input.seq}`, verified: problems.length === 0, problems };
   }
 
   async preflight(slot: number, task: TaskRow): Promise<PreflightOutcome> {

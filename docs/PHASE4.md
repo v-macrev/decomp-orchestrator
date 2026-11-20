@@ -236,3 +236,16 @@ listing text reach a worker without exposure consent.
 | On a large unit (edits mode) the worker could not change an `#include` in the header: complete files were forbidden | A complete `.h` is allowed in every mode; only a complete `.cpp` is refused in edits mode, because its accepted bodies are elided |
 | A shared header (`reconstruction/declarations/TESForm.h`) cannot compile with the pinned compile, and the packet may not edit it | When a compiler error points into a file outside the packet, the finding says so and tells the worker to stop including it and declare minimal STANDIN types in the unit's own header |
 | One model (free to the scheduler, so always picked first) made every last attempt at a stalled packet, cycling its own ideas | Model rotation: after two attempts without progress, the accounts that made them are deprioritised (soft: still used when nothing else is free), so another model gets the next turn |
+
+### Lifecycle boundaries
+
+An outside review of the source found places where parts that each work alone could disagree
+about the state once they met. Each now has a regression test in `test/lifecycle.test.ts`.
+
+| Problem | Fix |
+|---|---|
+| A batch that failed its final re-verification was still committed to a branch, and its packets were marked `staged` | No commit without verification: the staging worktree is reset, the batch is recorded `failed` with its problems, and its packets stay `passed`. `POST /api/runs/:id/stage` (or `engine.restage`) stages them again under the slot lock |
+| A finished run left `active` before staging ended, so another run could start and reset the shared staging worktree mid-commit | The slot lock (`exclusiveHolder`) is held from the moment a run leaves `active` until staging is over. `waitFor()` waits for staging too, and skill curation starts only after the lock is released |
+| A worker whose lease was lost could still insert an `accept` verdict and emit `task.passed`, even though the lease-guarded state change did nothing | Inserting the verdict and changing the state are one transaction. A lost lease files the verdict under the new route `stale`, moves nothing and emits `task.stale` |
+| Retrying failed packets of a paused run requeued them, but the slot loops stayed parked on the resume signal | Retrying resumes the run. A paused run that is not loaded (after a restart) starts as running. The response reports the stored status, not a snapshot |
+| The API token was accepted as `?token=` on every route, and URLs end up in logs and history | Bearer header everywhere, compared in constant time. The query token is accepted only on the SSE stream. A non-loopback bind without a token is refused unless `ORCH_ALLOW_UNAUTHENTICATED=1` |

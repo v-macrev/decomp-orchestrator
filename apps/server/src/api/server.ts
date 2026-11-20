@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // REST + SSE API for the UI. Binds to localhost by default; set ORCH_API_TOKEN to require a bearer
 // token (the UI forwards it). Secrets are never returned: accounts only carry secret references.
+import { timingSafeEqual } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
@@ -23,10 +24,17 @@ export async function buildServer(app: App) {
 
   const token = process.env.ORCH_API_TOKEN;
   if (token) {
+    const expected = Buffer.from(`Bearer ${token}`);
+    const same = (got: string | undefined) => {
+      const b = Buffer.from(got ?? '');
+      return b.length === expected.length && timingSafeEqual(b, expected);
+    };
     f.addHook('onRequest', async (req, reply) => {
       if (!req.url.startsWith('/api/')) return;
-      const q = (req.query as Record<string, string> | undefined)?.token;
-      if (req.headers.authorization !== `Bearer ${token}` && q !== token) return reply.code(401).send({ error: 'unauthorized' });
+      // Bearer header everywhere. The query-string token is accepted only on the SSE stream, which
+      // EventSource cannot send headers to; URLs end up in history and logs, so nothing else takes it.
+      const q = req.method === 'GET' && req.url.startsWith('/api/stream') ? (req.query as Record<string, string> | undefined)?.token : undefined;
+      if (!same(req.headers.authorization) && !(q !== undefined && same(`Bearer ${q}`))) return reply.code(401).send({ error: 'unauthorized' });
     });
   }
   f.setErrorHandler((err: Error & { statusCode?: number }, _req, reply) => {
@@ -147,6 +155,15 @@ export async function buildServer(app: App) {
     const from = (req.body as { from?: unknown } | undefined)?.from === 'fast' ? 'fast' : 'last';
     const result = await engine.retryFailedTasks(req.params.id, { from });
     return result.ok ? result : reply.code(result.reason === 'run not found' ? 404 : 409).send(result);
+  });
+  // Stage a completed run's packets that are still 'passed' (a batch failed re-verification, or staging was interrupted).
+  f.post('/api/runs/:id/stage', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.restage(req.params.id)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, reason: (e as Error).message });
+    }
   });
   f.get('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const r = store.getRun(req.params.id);

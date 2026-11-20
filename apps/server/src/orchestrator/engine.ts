@@ -11,7 +11,7 @@
 // most the in-flight attempts abandoned (and not counted against any task's budget).
 import {
   CAPABILITY_RANK, DIFFICULTIES, DIFFICULTY_RANK, Flow, RunConfig, WorkerOutput, compileFlowPlan, harder, promote, stealSources, tierFor, validateFlow,
-  type Attempt, type CapabilityTier, type Difficulty, type FlowPlan, type PoolBinding, type SkillSelection, type Verdict,
+  type Attempt, type CapabilityTier, type Difficulty, type FlowPlan, type PoolBinding, type Route, type SkillSelection, type TaskState, type Verdict,
 } from '@decomp/core';
 import { createHash } from 'node:crypto';
 import type { RunRow, Store, TaskRow } from '../db/store.js';
@@ -22,7 +22,7 @@ import { extractKnowledge } from '../intel/knowledge.js';
 import { NoEligibleAccountError, type AccountPool } from '../pool/scheduler.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { ProviderError, costUsd, type PromptBlock } from '../providers/types.js';
-import { TaskQueue, type StealSource } from '../queue/taskQueue.js';
+import { TaskQueue, type StealSource, type TaskPatch } from '../queue/taskQueue.js';
 import type { DiscoveredFunction, RepoAdapter, PreparedTask } from '../repo/types.js';
 import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
@@ -33,7 +33,7 @@ import { repairAnswer } from './headerRepair.js';
 import { buildHistory, findRepeat, progressScore, type HistoryEntry } from './history.js';
 import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
-import { stageRun } from './staging.js';
+import { stageRun, type StageSummary } from './staging.js';
 import { SkillRegistry } from '../skills/registry.js';
 import { FunctionGatherer } from '../intel/gatherer.js';
 import { planCapacity } from './capacity.js';
@@ -115,6 +115,8 @@ export class RunEngine {
   afterRun: ((runId: string) => void) | null = null;
   /** Held by work that needs the worktree slots outside a run (shadow evaluation). */
   private exclusiveHolder: string | null = null;
+  /** Runs that left `active` and are still staging: waitFor() resolves only once staging is over. */
+  private finishing = new Map<string, Promise<void>>();
   private reaper: NodeJS.Timeout;
 
   constructor(private deps: EngineDeps, opts: Partial<EngineOptions> = {}) {
@@ -309,14 +311,18 @@ export class RunEngine {
     events.emit('run.retry_failed', `requeued ${requeued} dead packet(s) at ${tierLabel}`, {
       runId, level: 'warn', data: { requeued, tier, tierLabel },
     });
-    if (active) {
+    // Retrying is asking for the work to happen: a paused run resumes (its slot loops wait on the
+    // resume signal, not on the queue), and a run that is not loaded starts as running, not paused.
+    if (active?.paused) {
+      await this.resumeRun(runId);
+    } else if (active) {
       active.capacityStalled = false;
       active.wake.notify();
     } else {
-      if (row.status === 'completed') store.setRunStatus(runId, 'running', ['completed']);
+      if (row.status !== 'running') store.setRunStatus(runId, 'running', ['completed', 'paused']);
       await this.start(runId);
     }
-    return { ok: true, requeued, tier, tierLabel, status: active?.row.status ?? 'running' };
+    return { ok: true, requeued, tier, tierLabel, status: store.getRun(runId)?.status ?? 'running' };
   }
 
   private async resumeRun(runId: string) {
@@ -398,6 +404,23 @@ export class RunEngine {
 
   close() {
     clearInterval(this.reaper);
+  }
+
+  /**
+   * Stage a completed run's packets that are still 'passed' (a batch failed re-verification, or
+   * staging was interrupted), under the slot lock: never alongside a run or another staging.
+   */
+  async restage(runId: string): Promise<StageSummary> {
+    const { store, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run can be staged again`);
+    if (row.config.staging === 'off') throw new Error('this run has staging off: nothing from it is committed');
+    return this.exclusive(`staging ${runId}`, async () => {
+      const r = await stageRun(store, this.deps.repo, events, runId, row.config.prBatchSize);
+      events.emit('run.restaged', `staged again: ${r.staged} batch(es) staged, ${r.failed} failed`, { runId, level: r.failed ? 'warn' : 'info', data: { ...r } });
+      return r;
+    });
   }
 
   /** Run `fn` with exclusive use of the worktree slots (refused while a run is active). */
@@ -489,7 +512,7 @@ export class RunEngine {
   }
 
   waitFor(runId: string): Promise<void> {
-    return this.active.get(runId)?.finished ?? Promise.resolve();
+    return this.active.get(runId)?.finished ?? this.finishing.get(runId) ?? Promise.resolve();
   }
 
   // ---------------------------------------------------------------- slot loop
@@ -825,11 +848,31 @@ export class RunEngine {
     }
   }
 
+  /**
+   * Persist the verdict and move the task in one transaction, guarded by the lease. When the lease
+   * was lost (reclaimed after a stall, or the run was reset) the task is left alone, the verdict is
+   * filed as 'stale' and the caller emits nothing: a stale worker must never record an acceptance
+   * or announce one.
+   */
+  private settle(run: ActiveRun, task: TaskRow, leaseId: string, to: TaskState, patch: TaskPatch, verdict: Verdict, route: Route): boolean {
+    const { store, events } = this.deps;
+    const moved = store.tx(() => {
+      const ok = this.queue.transition(task.id, leaseId, ['leased', 'gating'], to, patch);
+      store.insertVerdict({ ...verdict, route: ok ? route : 'stale' });
+      return ok;
+    });
+    if (!moved) {
+      events.emit('task.stale', `lease lost before routing ${task.functions.map((f) => f.name ?? f.rva).join(', ')}: verdict (${verdict.decision}) kept as stale, task not moved`, {
+        runId: run.row.id, taskId: task.id, level: 'warn', data: { decision: verdict.decision, wanted: route },
+      });
+    }
+    return moved;
+  }
+
   /** Final routing: persists the verdict with its effective route and moves the task. */
   private route(run: ActiveRun, task: TaskRow, leaseId: string, attempt: Attempt, verdict: Verdict, flags: { infra: boolean; strike: boolean }, tierIdx: number, srTaskId?: string | null) {
     const { store, events } = this.deps;
     const runId = run.row.id;
-    const from: Array<'leased' | 'gating'> = ['leased', 'gating'];
     const tierNode = run.plan.tiers[tierIdx]!;
     const common = { lastVerdictId: verdict.id, ...(srTaskId ? { srTaskId } : {}) };
     const fnLabel = task.functions.map((f) => f.name ?? f.rva).join(', ');
@@ -852,15 +895,11 @@ export class RunEngine {
     const cheatStrikes = task.cheatStrikes + (flags.strike ? 1 : 0);
 
     if (verdict.decision === 'pass') {
-      store.insertVerdict({ ...verdict, route: 'accept' });
-      this.queue.transition(task.id, leaseId, from, 'passed', { ...common, attemptsTotal, attemptsAtTier, bestExactBytes, noImprovementStreak: 0 });
-      events.emit('task.passed', `PASS ${fnLabel} (attempt ${attempt.n}, tier ${tierIdx})`, { runId, taskId: task.id, data: { attempt: attempt.n, tier: tierIdx } });
+      if (this.settle(run, task, leaseId, 'passed', { ...common, attemptsTotal, attemptsAtTier, bestExactBytes, noImprovementStreak: 0 }, verdict, 'accept')) events.emit('task.passed', `PASS ${fnLabel} (attempt ${attempt.n}, tier ${tierIdx})`, { runId, taskId: task.id, data: { attempt: attempt.n, tier: tierIdx } });
       return;
     }
     if (verdict.decision === 'quarantine') {
-      store.insertVerdict({ ...verdict, route: 'quarantine' });
-      this.queue.transition(task.id, leaseId, from, 'quarantined', { ...common, attemptsTotal, attemptsAtTier, cheatStrikes, bestExactBytes });
-      events.emit('task.quarantined', `QUARANTINE ${fnLabel}: ${verdict.findings.filter((f) => f.severity === 'block').map((f) => f.code).join(', ')}`, { runId, taskId: task.id, level: 'error' });
+      if (this.settle(run, task, leaseId, 'quarantined', { ...common, attemptsTotal, attemptsAtTier, cheatStrikes, bestExactBytes }, verdict, 'quarantine')) events.emit('task.quarantined', `QUARANTINE ${fnLabel}: ${verdict.findings.filter((f) => f.severity === 'block').map((f) => f.code).join(', ')}`, { runId, taskId: task.id, level: 'error' });
       return;
     }
     const limit = tierNode.node.data;
@@ -870,9 +909,7 @@ export class RunEngine {
     // say nothing about how hard the function is: retry on the same tier without counting toward
     // promotion or escalation — at most FORMAT_RETRIES times per packet, then normal rules apply.
     if (isFormatOnly(verdict) && store.verdictsForTask(task.id).filter((v) => v.route === 'retry' && isFormatOnly(v)).length < FORMAT_RETRIES) {
-      store.insertVerdict({ ...verdict, route: 'retry' });
-      this.queue.transition(task.id, leaseId, from, 'pending', { ...common, attemptsTotal, bestExactBytes, cheatStrikes, notBefore: 0 });
-      events.emit('task.retry', `retry ${fnLabel} on the same tier (format only, not counted toward escalation): ${summarise(verdict)}`, { runId, taskId: task.id, level: 'debug' });
+      if (this.settle(run, task, leaseId, 'pending', { ...common, attemptsTotal, bestExactBytes, cheatStrikes, notBefore: 0 }, verdict, 'retry')) events.emit('task.retry', `retry ${fnLabel} on the same tier (format only, not counted toward escalation): ${summarise(verdict)}`, { runId, taskId: task.id, level: 'debug' });
       return;
     }
     const attemptsAtDifficulty = task.attemptsAtDifficulty + 1;
@@ -886,12 +923,11 @@ export class RunEngine {
       const moved = to > tierIdx;
       const stillHere = !moved && attemptsAtTier < limit.maxAttempts && tierNode.retryLoop;
       if (moved || stillHere) {
-        store.insertVerdict({ ...verdict, route: moved ? 'escalate' : 'retry' });
-        this.queue.transition(task.id, leaseId, from, 'pending', {
+        const settled = this.settle(run, task, leaseId, 'pending', {
           ...common, difficulty, attemptsAtDifficulty: 0, attemptsTotal, bestExactBytes, cheatStrikes, notBefore: 0,
           ...(moved ? { tier: to, attemptsAtTier: 0, noImprovementStreak: 0 } : { attemptsAtTier, noImprovementStreak }),
-        });
-        events.emit('task.promoted', `promote ${fnLabel}: ${task.difficulty} → ${difficulty} after ${attemptsAtDifficulty} failed attempt(s)${moved ? `; → ${label(to)}` : ` (stays on ${label(tierIdx)})`}: ${summarise(verdict)}`, {
+        }, verdict, moved ? 'escalate' : 'retry');
+        if (settled) events.emit('task.promoted', `promote ${fnLabel}: ${task.difficulty} → ${difficulty} after ${attemptsAtDifficulty} failed attempt(s)${moved ? `; → ${label(to)}` : ` (stays on ${label(tierIdx)})`}: ${summarise(verdict)}`, {
           runId, taskId: task.id, level: 'info', data: { from: task.difficulty, to: difficulty, tierFrom: tierIdx, tierTo: to },
         });
         run.wake.notify();
@@ -901,24 +937,18 @@ export class RunEngine {
 
     const exhausted = attemptsAtTier >= limit.maxAttempts || noImprovementStreak >= limit.stuckAfter || !tierNode.retryLoop;
     if (!exhausted) {
-      store.insertVerdict({ ...verdict, route: 'retry' });
-      this.queue.transition(task.id, leaseId, from, 'pending', { ...common, attemptsTotal, attemptsAtTier, attemptsAtDifficulty, bestExactBytes, noImprovementStreak, cheatStrikes, notBefore: 0 });
-      events.emit('task.retry', `retry ${fnLabel}: ${summarise(verdict)}`, { runId, taskId: task.id, level: 'debug' });
+      if (this.settle(run, task, leaseId, 'pending', { ...common, attemptsTotal, attemptsAtTier, attemptsAtDifficulty, bestExactBytes, noImprovementStreak, cheatStrikes, notBefore: 0 }, verdict, 'retry')) events.emit('task.retry', `retry ${fnLabel}: ${summarise(verdict)}`, { runId, taskId: task.id, level: 'debug' });
       return;
     }
     if (tierIdx + 1 < run.plan.tiers.length) {
       const next = run.plan.tiers[tierIdx + 1]!;
       // Climbing the ladder proves the packet is at least as hard as the next tier is meant for.
       const difficulty = routing.enabled ? harder(task.difficulty, CAPABILITY_DIFFICULTY[next.capability]) : task.difficulty;
-      store.insertVerdict({ ...verdict, route: 'escalate' });
-      this.queue.transition(task.id, leaseId, from, 'pending', { ...common, tier: tierIdx + 1, difficulty, attemptsAtDifficulty: difficulty === task.difficulty ? attemptsAtDifficulty : 0, attemptsTotal, attemptsAtTier: 0, bestExactBytes, noImprovementStreak: 0, cheatStrikes, notBefore: 0 });
-      events.emit('task.escalated', `escalate ${fnLabel} → tier ${tierIdx + 1} (${label(tierIdx + 1)})`, { runId, taskId: task.id, level: 'info' });
+      if (this.settle(run, task, leaseId, 'pending', { ...common, tier: tierIdx + 1, difficulty, attemptsAtDifficulty: difficulty === task.difficulty ? attemptsAtDifficulty : 0, attemptsTotal, attemptsAtTier: 0, bestExactBytes, noImprovementStreak: 0, cheatStrikes, notBefore: 0 }, verdict, 'escalate')) events.emit('task.escalated', `escalate ${fnLabel} → tier ${tierIdx + 1} (${label(tierIdx + 1)})`, { runId, taskId: task.id, level: 'info' });
       run.wake.notify();
       return;
     }
-    store.insertVerdict({ ...verdict, route: 'dead_letter' });
-    this.queue.transition(task.id, leaseId, from, 'dead', { ...common, attemptsTotal, attemptsAtTier, bestExactBytes, noImprovementStreak, cheatStrikes });
-    events.emit('task.dead', `DEAD ${fnLabel} after ${attemptsTotal} attempts (best ${bestExactBytes} bytes exact)`, { runId, taskId: task.id, level: 'warn' });
+    if (this.settle(run, task, leaseId, 'dead', { ...common, attemptsTotal, attemptsAtTier, bestExactBytes, noImprovementStreak, cheatStrikes }, verdict, 'dead_letter')) events.emit('task.dead', `DEAD ${fnLabel} after ${attemptsTotal} attempts (best ${bestExactBytes} bytes exact)`, { runId, taskId: task.id, level: 'warn' });
   }
 
   private lastFeedback(task: TaskRow, history: HistoryEntry[]): Feedback | null {
@@ -940,21 +970,43 @@ export class RunEngine {
   }
 
   private async finish(run: ActiveRun) {
+    const { store } = this.deps;
+    const runId = run.row.id;
+    // Staging uses the dedicated staging worktree and the claims; hold the slot lock from the
+    // moment the run leaves `active` until staging is over, so no other run (or shadow evaluation,
+    // or retry) can start and stage over the same worktree in between.
+    const stages = !run.cancel.signal.aborted && !this.queue.hasOpenWork(runId);
+    if (!stages) {
+      this.active.delete(runId);
+      return; // cancelled, or paused/hard-stopped with work left
+    }
+    this.exclusiveHolder = `finishing ${runId}`;
+    const staging = this.finishStaging(run);
+    this.finishing.set(runId, staging.catch(() => undefined));
+    this.active.delete(runId);
+    try {
+      await staging;
+    } finally {
+      this.finishing.delete(runId);
+      this.exclusiveHolder = null;
+    }
+    // Curation runs shadow evaluations on the slots: only once the slot lock is released.
+    if (store.getRun(runId)?.status === 'completed' && run.row.config.skills.enabled && run.row.config.skills.autoCurate) queueMicrotask(() => this.afterRun?.(runId));
+  }
+
+  private async finishStaging(run: ActiveRun) {
     const { store, events } = this.deps;
     const runId = run.row.id;
-    this.active.delete(runId);
-    if (run.cancel.signal.aborted) return;
-    if (this.queue.hasOpenWork(runId)) return; // paused/hard-stopped with work left
     const stagingOff = run.row.config.staging === 'off';
     // Staging off: nothing will be submitted from this run, so every claim it took goes back.
     await this.releaseUnsubmitted(runId, stagingOff ? 'test run with staging off: nothing is submitted' : 'not matched in this run', stagingOff);
     try {
       if (stagingOff) events.emit('run.staging', 'staging off: nothing committed in the target repository; accepted files stay in this run\'s attempts', { runId });
-      const batches = stagingOff ? 0 : await stageRun(store, this.deps.repo, events, runId, run.row.config.prBatchSize);
+      const batches = stagingOff ? { staged: 0, failed: 0 } : await stageRun(store, this.deps.repo, events, runId, run.row.config.prBatchSize);
       store.setRunStatus(runId, 'completed', ['running', 'paused']);
       const fc = store.functionCounts(runId);
-      events.emit('run.completed', `completed: ${(fc.passed ?? 0) + (fc.staged ?? 0)} functions matched, ${fc.dead ?? 0} dead-lettered, ${fc.quarantined ?? 0} quarantined; ${batches} PR batch(es) staged`, { runId, data: fc });
-      if (run.row.config.skills.enabled && run.row.config.skills.autoCurate) queueMicrotask(() => this.afterRun?.(runId));
+      const failed = batches.failed ? `, ${batches.failed} batch(es) failed re-verification (packets stay passed; stage again from the run)` : '';
+      events.emit('run.completed', `completed: ${(fc.passed ?? 0) + (fc.staged ?? 0)} functions matched, ${fc.dead ?? 0} dead-lettered, ${fc.quarantined ?? 0} quarantined; ${batches.staged} PR batch(es) staged${failed}`, { runId, level: batches.failed ? 'warn' : 'info', data: { ...fc, batches } });
     } catch (e) {
       store.setRunStatus(runId, 'failed', undefined, { error: (e as Error).message });
       events.emit('run.failed', `staging failed: ${(e as Error).message}`, { runId, level: 'error' });

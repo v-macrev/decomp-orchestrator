@@ -425,7 +425,9 @@ export const CompareFunctionResult = z.object({
 export type CompareFunctionResult = z.infer<typeof CompareFunctionResult>;
 
 export const Decision = z.enum(['pass', 'reject', 'quarantine']);
-export const Route = z.enum(['accept', 'retry', 'escalate', 'quarantine', 'dead_letter']);
+/** 'stale': the attempt's lease was lost before routing, so its verdict moved nothing. */
+export const Route = z.enum(['accept', 'retry', 'escalate', 'quarantine', 'dead_letter', 'stale']);
+export type Route = z.infer<typeof Route>;
 export const Verdict = z.object({
   id: z.string(),
   taskId: z.string(),

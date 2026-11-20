@@ -344,12 +344,21 @@ export class SrRepo implements RepoAdapter {
       const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: ac.signal, timeoutMs: 600_000 });
       if (!r.allPass) problems.push(`${t.id}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
     }
+    // A batch that does not re-verify is never committed: a branch is a claim that its code
+    // matches. Put the staging worktree back so nothing unverified lingers there either.
+    if (problems.length) {
+      await this.reset(slot).catch(() => undefined);
+      return { branch: null, verified: false, problems };
+    }
     const branch = `decomp/${input.runId}-b${input.seq}`;
     const co = await this.git(p, ['checkout', '-q', '-B', branch]);
-    const add = await this.git(p, ['add', '--', ...input.files.map((f) => f.path)]);
-    const commit = await this.git(p, ['commit', '-q', '-m', input.message]);
-    if (co.code !== 0 || add.code !== 0 || commit.code !== 0) problems.push(`git: ${(co.stderr + add.stderr + commit.stderr).slice(0, 300)}`);
-    return { branch: commit.code === 0 ? branch : null, verified: problems.length === 0, problems };
+    const add = co.code === 0 ? await this.git(p, ['add', '--', ...input.files.map((f) => f.path)]) : co;
+    const commit = add.code === 0 ? await this.git(p, ['commit', '-q', '-m', input.message]) : add;
+    if (commit.code !== 0) {
+      await this.reset(slot).catch(() => undefined);
+      return { branch: null, verified: false, problems: [`git: ${(commit.stderr || commit.stdout).slice(0, 300)}`] };
+    }
+    return { branch, verified: true, problems };
   }
 
   // ---------------------------------------------------------------- context
