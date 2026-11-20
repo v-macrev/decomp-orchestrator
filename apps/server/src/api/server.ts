@@ -6,7 +6,7 @@ import { existsSync } from 'node:fs';
 import Fastify, { type FastifyReply, type FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import fastifyStatic from '@fastify/static';
-import { Account, ComplexityThresholds, Flow, GatherFilter, RunConfig, classify, compileFlowPlan, scoreFeatures, sizeOnlyFeatures, validateFlow, type TelemetryEvent } from '@decomp/core';
+import { Account, ComplexityThresholds, Flow, GatherFilter, RunConfig, SelectionSpec, classify, compileFlowPlan, scoreFeatures, sizeOnlyFeatures, validateFlow, type TelemetryEvent } from '@decomp/core';
 import { planCapacity } from '../orchestrator/capacity.js';
 import { allocateSlots } from '../orchestrator/engine.js';
 import { z } from 'zod';
@@ -15,6 +15,7 @@ import { fromRoot } from '../config.js';
 import { ingestGithubReviews, seedRepoLessons } from '../orchestrator/lessons.js';
 import { runMetrics } from '../telemetry/metrics.js';
 import { flowAssignments } from '../pool/assignments.js';
+import { readCodexUsage } from '../providers/codexUsage.js';
 
 const CreateRun = z.object({ name: z.string().min(1).max(120), flowId: z.string(), config: z.record(z.string(), z.unknown()) });
 
@@ -50,6 +51,11 @@ export async function buildServer(app: App) {
   // ---------------- accounts
   f.get('/api/accounts', async () => store.listAccounts());
   f.get('/api/accounts/runtime', async () => pool.view());
+  f.get('/api/accounts/:id/subscription-usage', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const account = store.getAccount(req.params.id);
+    if (!account) return notFound(reply, 'account');
+    return { buckets: await readCodexUsage(account) };
+  });
   f.put('/api/accounts/:id', async (req: FastifyRequest<{ Params: { id: string } }>) => {
     const acc = Account.parse({ ...(req.body as object), id: req.params.id });
     const saved = store.upsertAccount(acc);
@@ -117,6 +123,12 @@ export async function buildServer(app: App) {
   });
 
   // ---------------- function gathering (preview what a `gather` run would select; no run is created)
+  f.post('/api/selection/preview', async (req, reply) => {
+    const selection = SelectionSpec.parse(req.body);
+    if (selection.source !== 'sr_next') return reply.code(400).send({ error: 'this preview requires sr next selection' });
+    const found = await app.repo.discover(selection, { exclude: store.rvasInFlight(null) });
+    return { requested: selection.count, selected: found.length, units: new Set(found.map((fn) => fn.unit)).size };
+  });
   f.post('/api/gather/preview', async (req) => {
     const filter = GatherFilter.parse(req.body ?? {});
     const report = await engine.gatherer.gather(filter);
@@ -148,6 +160,8 @@ export async function buildServer(app: App) {
     const flow = store.getFlow(body.flowId);
     if (!flow) return notFound(reply, 'flow');
     const config: Record<string, unknown> = { ...body.config, flowId: body.flowId };
+    const defaults = flow.runDefaults;
+    if (defaults && config.maxFunctionsPerWorker === undefined) config.maxFunctionsPerWorker = defaults.maxFunctionsPerWorker;
     if (config.draftedBy === undefined && app.cfg.runDefaults.draftedBy) config.draftedBy = app.cfg.runDefaults.draftedBy;
     // "Carry the failed functions": the dead packets of the chosen earlier runs join this run's selection.
     const carry = z.object({ fromRuns: z.array(z.string()).max(50).default([]) }).optional().parse(config.carry);
@@ -162,7 +176,16 @@ export async function buildServer(app: App) {
         config.carry = { fromRuns: carry.fromRuns, rvas: [] };
       } else config.carry = { fromRuns: carry.fromRuns, rvas: dead.map((d) => d.rva) };
     }
-    const run = engine.createRun(body.name, config, flow);
+    if (defaults && config.selection === undefined) {
+      config.selection = app.cfg.mode === 'sim'
+        ? { source: 'synthetic', count: defaults.functionCount }
+        : { source: 'sr_next', count: defaults.functionCount, maxSize: defaults.maxSizeBytes ?? 64 };
+    }
+    const resolved = RunConfig.parse(config);
+    if (app.cfg.mode === 'repo' && resolved.selection.source === 'synthetic') {
+      return reply.code(400).send({ error: 'Synthetic selection is only available in simulator mode. Refresh the page and select a repository backlog source.' });
+    }
+    const run = engine.createRun(body.name, resolved, flow);
     engine.start(run.id).catch((e) => events.emit('run.failed', `start failed: ${(e as Error).message}`, { runId: run.id, level: 'error' }));
     return run;
   });
@@ -197,7 +220,12 @@ export async function buildServer(app: App) {
   f.delete('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');
     try {
-      return { ok: true, ...(await engine.deleteRun(req.params.id)) };
+      const result = await engine.deleteRun(req.params.id);
+      if (result.ok) return result;
+      return reply.code(409).send({
+        ...result,
+        error: `The run was kept because ${result.failed.length} claim(s) could not be released. Retry deletion after resolving these errors. ${result.failed.slice(0, 10).map(({ rva, error }) => `${rva}: ${error}`).join('; ')}${result.failed.length > 10 ? `; and ${result.failed.length - 10} more (see the run's events)` : ''}`,
+      });
     } catch (e) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
@@ -205,13 +233,30 @@ export async function buildServer(app: App) {
   // Open the batch's pull request with `sr submit`. Defaults to a dry run; a real submission pushes
   // to the operator's fork and opens a PR upstream, so it needs { dryRun: false, confirm: true }.
   f.post('/api/runs/:id/batches/:batchId/submit', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
-    const body = z.object({ dryRun: z.boolean().default(true), confirm: z.boolean().optional() }).parse(req.body ?? {});
+    const body = z.object({ dryRun: z.boolean().default(true), confirm: z.boolean().optional(), allowUncheckedClaims: z.boolean().default(false) }).parse(req.body ?? {});
     if (!body.dryRun && body.confirm !== true) return reply.code(400).send({ ok: false, error: 'a real submission needs confirm: true' });
+    if (body.dryRun && body.allowUncheckedClaims) return reply.code(400).send({ ok: false, error: 'a dry run must check claims for every task' });
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');
     try {
-      return await engine.submitBatch(req.params.id, req.params.batchId, { dryRun: body.dryRun });
+      return await engine.submitBatch(req.params.id, req.params.batchId, body);
     } catch (e) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  f.post('/api/runs/:id/batches/:batchId/cancel-dry-run', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    try {
+      engine.cancelBatchDryRun(req.params.id, req.params.batchId);
+      return { ok: true };
+    } catch (e) {
+      return reply.code(409).send({ error: (e as Error).message });
+    }
+  });
+  f.delete('/api/runs/:id/batches/:batchId/branches', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    const { scope } = z.object({ scope: z.enum(['preview', 'batch']) }).parse(req.body);
+    try {
+      return await engine.clearBatchBranches(req.params.id, req.params.batchId, scope);
+    } catch (e) {
+      return reply.code(409).send({ error: (e as Error).message });
     }
   });
   f.get('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
@@ -235,7 +280,7 @@ export async function buildServer(app: App) {
     const q = req.query;
     return store.listTasks(req.params.id, { state: q.state as never, limit: Math.min(1000, Number(q.limit ?? 200)), offset: Number(q.offset ?? 0) });
   });
-  f.get('/api/runs/:id/batches', async (req: FastifyRequest<{ Params: { id: string } }>) => store.listBatches(req.params.id));
+  f.get('/api/runs/:id/batches', async (req: FastifyRequest<{ Params: { id: string } }>) => engine.listBatches(req.params.id));
   f.get('/api/runs/:id/knowledge', async (req: FastifyRequest<{ Params: { id: string }; Querystring: { limit?: string } }>) =>
     store.listKnowledge(req.params.id, Math.min(1000, Number(req.query.limit ?? 200))));
 

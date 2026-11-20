@@ -11,6 +11,8 @@ export interface RunOptions {
   maxOutputBytes?: number;
   stdin?: string;
   signal?: AbortSignal;
+  /** Keep stdin open and send a newline on abort so a wrapper can stop its own child. */
+  cancelOnStdin?: boolean;
   /** Pass the full parent env (only for trusted, non-repo commands such as git). */
   inheritEnv?: boolean;
 }
@@ -74,6 +76,7 @@ export function runBounded(cmd: string, args: string[], opts: RunOptions): Promi
     let truncated = false;
     let timedOut = false;
     let aborted = false;
+    let abortTimer: ReturnType<typeof setTimeout> | undefined;
     const take = (which: 'out' | 'err') => (chunk: Buffer) => {
       if (truncated) return;
       bytes += chunk.length;
@@ -93,18 +96,25 @@ export function runBounded(cmd: string, args: string[], opts: RunOptions): Promi
     }, opts.timeoutMs);
     const onAbort = () => {
       aborted = true;
-      if (child.pid) killTree(child.pid);
+      if (opts.cancelOnStdin) {
+        child.stdin.end('\n');
+        abortTimer = setTimeout(() => { if (child.pid) killTree(child.pid); }, 15_000);
+      } else if (child.pid) {
+        killTree(child.pid);
+      }
     };
-    opts.signal?.addEventListener('abort', onAbort, { once: true });
     child.on('error', (err) => {
       stderr += `\n[spawn error] ${err.message}`;
     });
     child.on('close', (code) => {
       clearTimeout(timer);
+      clearTimeout(abortTimer);
       opts.signal?.removeEventListener('abort', onAbort);
       resolve({ code, stdout, stderr, timedOut, aborted, truncated, durationMs: Date.now() - started });
     });
-    if (opts.stdin !== undefined) child.stdin.end(opts.stdin);
-    else child.stdin.end();
+    child.stdin.on('error', () => { /* Child may exit before accepting stdin. */ });
+    if (!opts.cancelOnStdin) child.stdin.end(opts.stdin);
+    opts.signal?.addEventListener('abort', onAbort, { once: true });
+    if (opts.signal?.aborted) onAbort();
   });
 }

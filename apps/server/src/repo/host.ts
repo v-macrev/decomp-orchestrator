@@ -64,10 +64,13 @@ export class WslHost implements Host {
   run(cmd: string, args: string[], o: HostRunOptions) {
     const secs = Math.max(1, Math.ceil(o.timeoutMs / 1000));
     const env = Object.entries(o.env ?? {}).map(([k, v]) => `${k}=${v}`);
-    // `timeout -k` inside Linux is the backstop: killing wsl.exe alone may not stop a Wine compile.
-    const wslArgs = ['-d', this.distro, '--cd', o.cwd, '--exec', 'env', ...env, 'timeout', '-k', '10', String(secs), cmd, ...args];
+    // Have Linux stop its own command group before the orchestrator reuses the worktree.
+    const cancelOnStdin = !!o.signal && o.stdin === undefined;
+    const command = ['timeout', '-k', '10', String(secs), cmd, ...args];
+    const wslArgs = ['-d', this.distro, '--cd', o.cwd, '--exec', 'env', ...env,
+      ...(cancelOnStdin ? ['bash', '-c', CANCEL_WSL_COMMAND, 'orch-wsl', ...command] : command)];
     return runBounded('wsl.exe', wslArgs, {
-      cwd: process.cwd(), stdin: o.stdin, signal: o.signal, maxOutputBytes: o.maxOutputBytes,
+      cwd: process.cwd(), stdin: o.stdin, signal: o.signal, maxOutputBytes: o.maxOutputBytes, cancelOnStdin,
       timeoutMs: o.timeoutMs + 20_000,
     });
   }
@@ -87,3 +90,16 @@ export class WslHost implements Host {
     return r.stdout.trim();
   }
 }
+
+const CANCEL_WSL_COMMAND = `
+"$@" </dev/null &
+command_pid=$!
+exec 3<&0
+(if IFS= read -r <&3; then kill -TERM "$command_pid" 2>/dev/null; fi) &
+watcher_pid=$!
+wait "$command_pid"
+status=$?
+kill "$watcher_pid" 2>/dev/null
+wait "$watcher_pid" 2>/dev/null
+exit "$status"
+`;

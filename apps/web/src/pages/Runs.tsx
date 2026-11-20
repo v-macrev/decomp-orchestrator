@@ -64,14 +64,22 @@ function StackBar({ counts, total }: { counts: Record<string, number>; total: nu
   );
 }
 
+function flowRunDefaults(flow: Flow | undefined) {
+  return {
+    count: flow?.runDefaults?.functionCount ?? 500,
+    capPerWorker: flow?.runDefaults?.maxFunctionsPerWorker ?? 60,
+    maxSize: flow?.runDefaults?.maxSizeBytes ?? 64,
+  };
+}
+
 function NewRun({ mode, runs, onCreated }: { mode: string; runs: RunSummary[]; onCreated: (id: string) => void }) {
   const [flows, setFlows] = useState<Flow[]>([]);
   const [f, setF] = useState({
     name: `run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, flowId: 'default', source: mode === 'sim' ? 'synthetic' : 'sr_next',
-    count: 500, maxSize: 64, rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: true, draftedBy: 'operator',
+    ...flowRunDefaults(undefined), rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: true, draftedBy: 'operator',
     routing: true, llmTieBreak: false, promoteAfter: 2, workStealing: true, contextMode: 'budgeted',
     skills: true, autoCurate: false, staging: mode === 'sim' ? 'branches' : 'off',
-    capPerWorker: 60, gMaxSize: 256, gNamespaces: '', gModules: '', gRange: '', gExcludeGuess: false, gExcludeDrafted: false,
+    gMaxSize: 256, gNamespaces: '', gModules: '', gRange: '', gExcludeGuess: false, gExcludeDrafted: false,
   });
   const [err, setErr] = useState('');
   // "Carry the failed functions": earlier runs whose dead packets join this run.
@@ -84,6 +92,8 @@ function NewRun({ mode, runs, onCreated }: { mode: string; runs: RunSummary[]; o
   const [capacity, setCapacity] = useState<CapacityPlan | null>(null);
   const [preview, setPreview] = useState<GatherPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  const [availability, setAvailability] = useState<{ requested: number; selected: number; units: number; maxSize: number } | null>(null);
+  const [checkingAvailability, setCheckingAvailability] = useState(false);
   const list = (s: string) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean);
   const gatherFilter = () => ({
     maxFunctions: f.count, maxSize: f.gMaxSize, namespaces: list(f.gNamespaces), modules: list(f.gModules),
@@ -102,10 +112,31 @@ function NewRun({ mode, runs, onCreated }: { mode: string; runs: RunSummary[]; o
   useEffect(() => {
     api.flows().then((x) => {
       setFlows(x);
-      if (x[0] && !x.some((y) => y.id === f.flowId)) setF((p) => ({ ...p, flowId: x[0]!.id }));
+      setF((p) => {
+        const flow = x.find((y) => y.id === p.flowId) ?? x[0];
+        return flow ? { ...p, flowId: flow.id, ...(flow.runDefaults ? flowRunDefaults(flow) : {}) } : p;
+      });
     });
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
   const set = (k: keyof typeof f, v: unknown) => setF((p) => ({ ...p, [k]: v }));
+  const selectFlow = (id: string) => {
+    const flow = flows.find((x) => x.id === id);
+    const leavingPreset = flows.find((x) => x.id === f.flowId)?.runDefaults;
+    setF((p) => ({ ...p, flowId: id, ...(flow?.runDefaults || leavingPreset ? flowRunDefaults(flow) : {}) }));
+  };
+  const checkAvailability = async () => {
+    setErr('');
+    setAvailability(null);
+    setCheckingAvailability(true);
+    try {
+      const result = await api.selectionPreview(f.count, f.maxSize);
+      setAvailability({ ...result, maxSize: f.maxSize });
+    } catch (error) {
+      setErr((error as Error).message);
+    } finally {
+      setCheckingAvailability(false);
+    }
+  };
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setErr('');
@@ -130,7 +161,7 @@ function NewRun({ mode, runs, onCreated }: { mode: string; runs: RunSummary[]; o
       <h2>New bulk run</h2>
       <div className="row">
         <label className="grow">Name<input value={f.name} onChange={(e) => set('name', e.target.value)} /></label>
-        <label>Flow preset<select value={f.flowId} onChange={(e) => set('flowId', e.target.value)}>{flows.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+        <label>Flow preset<select value={f.flowId} onChange={(e) => selectFlow(e.target.value)}>{flows.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
       </div>
       <div className="row">
         <label>Backlog source
@@ -142,7 +173,13 @@ function NewRun({ mode, runs, onCreated }: { mode: string; runs: RunSummary[]; o
         </label>
         {!['rva_list', 'carry'].includes(f.source) && <label>Functions<input type="number" min={1} value={f.count} onChange={(e) => set('count', Number(e.target.value))} style={{ width: 90 }} /></label>}
         {f.source === 'sr_next' && <label>Max size (B)<input type="number" value={f.maxSize} onChange={(e) => set('maxSize', Number(e.target.value))} style={{ width: 90 }} /></label>}
+        {f.source === 'sr_next' && <button type="button" onClick={checkAvailability} disabled={checkingAvailability}>{checkingAvailability ? 'Checking upstream…' : 'Check availability'}</button>}
       </div>
+      {f.source === 'sr_next' && availability?.requested === f.count && availability.maxSize === f.maxSize && (
+        <div role="status" className={availability.selected < f.count ? 'lvl-warn' : 'muted'}>
+          {availability.selected} of {availability.requested} requested functions eligible across {availability.units} source units after checking upstream.
+        </div>
+      )}
       {f.source === 'rva_list' && <label>RVAs (hex, comma/space separated)<textarea rows={3} value={f.rvas} onChange={(e) => set('rvas', e.target.value)} /></label>}
       {f.source === 'gather' && (
         <div style={{ display: 'grid', gap: 8, border: '1px dashed var(--border)', borderRadius: 8, padding: 10 }}>
@@ -271,6 +308,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
     }
   };
   const status = m.run.status;
+  const selectionShortfall = events.find((event) => event.kind === 'run.selection_shortfall');
   const deadTasks = m.tasks.dead ?? 0;
   const retryUnavailable = ['cancelled', 'failed', 'created', 'discovering'].includes(status)
     || (m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd);
@@ -292,6 +330,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
         {retryFailedMessage && <div className="muted" role="status">{retryFailedMessage}</div>}
         {deadTasks > 0 && <div className="muted" style={{ fontSize: 12 }}>Retrying starts dead packets at the fast tier. Passed packets remain complete; quarantined packets still need individual review.</div>}
         {m.run.error && <div className="lvl-error">{m.run.error}</div>}
+        {selectionShortfall && <div className="lvl-warn" role="status">{selectionShortfall.msg}</div>}
         {status === 'paused' && m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd && <BudgetPausedBanner m={m} onChange={onChange} />}
         <StackBar counts={f} total={m.totalFunctions} />
         <div className="kpis" style={{ marginTop: 12 }}>
@@ -431,6 +470,7 @@ function RunEditor({ runId, status, onSaved }: { runId: string; status: string; 
  */
 function BatchesPanel({ runId, status, passed, batches, reload }: { runId: string; status: string; passed: number; batches: Batch[]; reload: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<string | null>(null);
   const [msg, setMsg] = useState('');
   const [err, setErr] = useState('');
   const run = async (key: string, fn: () => Promise<string>) => {
@@ -450,16 +490,36 @@ function BatchesPanel({ runId, status, passed, batches, reload }: { runId: strin
     const r = await api.stageRun(runId);
     return `${r.staged} batch(es) staged${r.failed ? `, ${r.failed} failed re-verification (their packets stay passed)` : ''}.`;
   });
-  const submit = (b: Batch, real: boolean) => run(`${real ? 'submit' : 'dry'}-${b.id}`, async () => {
-    const r = await api.submitBatch(runId, b.id, real);
+  const submit = (b: Batch, real: boolean, allowUncheckedClaims = false) => run(`${real ? 'submit' : 'dry'}-${b.id}`, async () => {
+    const r = await api.submitBatch(runId, b.id, real, allowUncheckedClaims);
+    if (r.cancelled) return `Dry run of batch ${b.seq} cancelled.`;
     if (real) return r.ok ? `Batch ${b.seq} submitted: ${r.pullRequest ?? r.link ?? 'see the events'}` : `Batch ${b.seq} was not submitted: ${r.error ?? r.blockers.join('; ')}`;
-    return r.ok ? `Dry run of batch ${b.seq} is clean: Submit PR is now available.` : `Dry run of batch ${b.seq} found problems (below).`;
+    if (r.ok) return `Dry run of batch ${b.seq} is clean: Submit PR is now available.`;
+    if (r.uncheckedClaims?.length && !r.blockers.length && !r.problems.length) return `Dry run of batch ${b.seq}: claims of ${r.uncheckedClaims.length} task(s) could not be checked. Run it again, or explicitly submit the batch unchecked.`;
+    return `Dry run of batch ${b.seq} found problems (below).`;
   });
+  const cancel = async (b: Batch) => {
+    setCancelling(b.id);
+    setErr('');
+    try {
+      await api.cancelBatchDryRun(runId, b.id);
+      reload();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setCancelling(null);
+    }
+  };
+  const clear = (b: Batch, scope: 'preview' | 'batch') => run(`clear-${b.id}`, async () => {
+    await api.clearBatchBranches(runId, b.id, scope);
+    return scope === 'preview' ? `Dry run of batch ${b.seq} cleared.` : `Branch for batch ${b.seq} deleted. Its packets are available to batch again.`;
+  });
+  const busyBatch = batches.some((b) => b.dryRunState);
   return (
     <div className="panel">
       <div className="row">
         <h2 className="grow" style={{ margin: 0 }}>PR batches</h2>
-        {status === 'completed' && passed > 0 && <button className="primary" disabled={!!busy} onClick={stage} title="Group passed packets into batches (whole units, up to the run's functions per PR), re-verify each in a clean tree and commit it to a local branch">{busy === 'stage' ? 'Batching…' : `Batch passed functions (${passed} packet${passed === 1 ? '' : 's'})`}</button>}
+        {status === 'completed' && passed > 0 && <button className="primary" disabled={!!busy || busyBatch} onClick={stage} title="Group passed packets into batches (whole units, up to the run's functions per PR), re-verify each in a clean tree and commit it to a local branch">{busy === 'stage' ? 'Batching…' : `Batch passed functions (${passed} packet${passed === 1 ? '' : 's'})`}</button>}
       </div>
       <p className="muted" style={{ marginTop: 6 }}>
         Each batch is re-verified in a clean tree and committed to a local branch. <b>Dry run</b> rebuilds the batch from the base, re-verifies it and runs <span className="mono">sr submit --dry-run</span>; nothing is pushed.
@@ -474,8 +534,14 @@ function BatchesPanel({ runId, status, passed, batches, reload }: { runId: strin
             {batches.map((b) => {
               const d = b.detail;
               const last = d?.lastSubmit;
-              const cleanDry = !!last && last.dryRun && last.ok;
-              const findings = last ? [...last.problems.map((x) => `re-verify: ${x}`), ...last.blockers.map((x) => `blocked: ${x}`), ...(last.error && !last.ok ? [last.error] : [])] : [];
+              // The server holds the prerequisite: a dry run of exactly this batch state.
+              const unchecked = d?.dryRunUncheckedClaims ?? [];
+              const cleanDry = !!d?.dryRunFingerprint && !unchecked.length;
+              const canOverride = !!d?.dryRunFingerprint && unchecked.length > 0;
+              const dryRunning = !!b.dryRunState || busy === `dry-${b.id}`;
+              const canClear = b.branch?.startsWith('decomp/') && !d?.pr && !d?.link
+                && (last?.dryRun !== false || last.submissionStarted === false);
+              const findings = last ? [...last.problems.map((x) => `re-verify: ${x}`), ...last.blockers.map((x) => `blocked: ${x}`), ...(last.uncheckedClaims ?? []), ...(last.error && !last.ok ? [last.error] : [])] : [];
               return (
                 <tr key={b.id}>
                   <td>{b.seq}</td>
@@ -488,7 +554,7 @@ function BatchesPanel({ runId, status, passed, batches, reload }: { runId: strin
                     {d?.problems?.length ? <div className="muted">{d.problems.join('; ')}</div> : null}
                     {last && !d?.pr && (
                       <div className={last.ok ? 'muted' : 'lvl-warn'}>
-                        {last.dryRun ? 'dry run' : 'submit'} {new Date(last.at).toLocaleString()}: {last.ok ? 'clean' : 'problems'}
+                        {last.dryRun ? 'dry run' : 'submit'} {new Date(last.at).toLocaleString()}: {last.cancelled ? 'cancelled' : last.ok ? 'clean' : 'problems'}
                         {findings.length > 0 && <ul style={{ margin: '2px 0 0 16px', padding: 0 }}>{findings.slice(0, 8).map((x) => <li key={x}>{x}</li>)}</ul>}
                         {last.warnings.length > 0 && <details><summary>{last.warnings.length} warning(s)</summary><ul style={{ margin: 0, paddingLeft: 16 }}>{last.warnings.map((x) => <li key={x}>{x}</li>)}</ul></details>}
                         {last.plan.length > 0 && <details><summary>plan</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>{last.plan.join('\n')}</pre></details>}
@@ -498,8 +564,27 @@ function BatchesPanel({ runId, status, passed, batches, reload }: { runId: strin
                   <td style={{ whiteSpace: 'nowrap' }}>
                     {b.status === 'branch_ready' && (
                       <>
-                        <button disabled={!!busy} onClick={() => submit(b, false)}>{busy === `dry-${b.id}` ? 'Checking…' : 'Dry run'}</button>{' '}
-                        <ConfirmButton className="primary" disabled={!!busy || !cleanDry} onConfirm={() => submit(b, true)} confirmLabel="Push to your fork and open the PR?" title={cleanDry ? 'Runs sr submit: pushes the branch to your fork and opens one pull request upstream' : 'Run a clean dry run first'}>{busy === `submit-${b.id}` ? 'Submitting…' : 'Submit PR'}</ConfirmButton>
+                        {dryRunning ? (
+                          <button disabled={b.dryRunState !== 'running' || cancelling === b.id} onClick={() => cancel(b)}>
+                            {b.dryRunState === 'cancelling' || cancelling === b.id ? 'Cancelling…' : 'Cancel dry run'}
+                          </button>
+                        ) : (
+                          <>
+                            <button disabled={!!busy || busyBatch} onClick={() => submit(b, false)}>Dry run</button>{' '}
+                            <ConfirmButton className="primary" disabled={!!busy || busyBatch || !cleanDry} onConfirm={() => submit(b, true)} confirmLabel="Push to your fork and open the PR?" title={cleanDry ? 'Runs sr submit: pushes the branch to your fork and opens one pull request upstream' : 'Run a clean dry run first'}>{busy === `submit-${b.id}` ? 'Submitting…' : 'Submit PR'}</ConfirmButton>
+                            {canOverride && (
+                              <div style={{ marginTop: 4 }}>
+                                <ConfirmButton disabled={!!busy || busyBatch} onConfirm={() => submit(b, true, true)} confirmLabel={`Claims of ${unchecked.length} task(s) could not be checked against GitHub. Submit anyway?`} title={`Not checked: ${unchecked.join('; ')}. The submission probes again and still refuses any known collision.`}>Submit with unchecked claims</ConfirmButton>
+                              </div>
+                            )}
+                            {canClear && (
+                              <div className="row" style={{ marginTop: 4 }}>
+                                {(last?.dryRun || cleanDry) && <ConfirmButton disabled={!!busy || busyBatch} onConfirm={() => clear(b, 'preview')} confirmLabel="Clear check and delete preview branch?">Clear dry run</ConfirmButton>}
+                                <ConfirmButton disabled={!!busy || busyBatch} onConfirm={() => clear(b, 'batch')} confirmLabel="Delete local batch and preview branches?">Delete staged branch</ConfirmButton>
+                              </div>
+                            )}
+                          </>
+                        )}
                       </>
                     )}
                   </td>
@@ -539,7 +624,17 @@ export function AccountsTable({ accounts, usage }: { accounts: AccountView[]; us
                 ))}
               </td>
               <td>{a.rateLimitedTotal} / {a.failuresTotal}</td>
-              <td className="muted" style={{ fontSize: 12 }}>{u.map((x) => <div key={x.model}>{x.model}: {x.attempts} att · ${Number(x.cost_usd ?? 0).toFixed(2)} · cache {Math.round(Number(x.cache_hit_rate ?? 0) * 100)}%</div>)}</td>
+              <td className="muted" style={{ fontSize: 12 }}>
+                {u.map((x) => (
+                  <div key={x.model}>
+                    <div>{x.model}: {x.attempts} att · ${Number(x.cost_usd ?? 0).toFixed(2)} · cache {Math.round(Number(x.cache_hit_rate ?? 0) * 100)}%</div>
+                    <div>
+                      {(x.input_tokens ?? 0).toLocaleString()} input · {(x.output_tokens ?? 0).toLocaleString()} output tokens
+                      {' · '}{(x.cached_input_tokens ?? 0).toLocaleString()} cached input
+                    </div>
+                  </div>
+                ))}
+              </td>
             </tr>
           );
         })}

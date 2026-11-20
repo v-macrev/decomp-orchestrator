@@ -38,6 +38,24 @@ const PRESETS: Partial<Record<Provider, Model[]>> = {
 };
 PRESETS.anthropic = PRESETS.claude_cli;
 
+// Additional choices from the Codex CLI catalog. Keep them separate from the
+// defaults so creating an account does not assign the whole catalog to it.
+const CODEX_CATALOG = [
+  base({ id: 'gpt-6.2-sol', contextTokens: 500_000, defaultEffort: 'low' }),
+  base({ id: 'gpt-6.2-astra', contextTokens: 272_000, defaultEffort: 'low' }),
+  base({ id: 'gpt-6-astra', contextTokens: 272_000, defaultEffort: 'low' }),
+  base({ id: 'gpt-6.1-sol', contextTokens: 500_000, defaultEffort: 'low' }),
+  base({ id: 'gpt-6.1-terra', contextTokens: 500_000, defaultEffort: 'low' }),
+  base({ id: 'gpt-6-sol', contextTokens: 272_000, defaultEffort: 'medium' }),
+  base({ id: 'gpt-5.6-sol', contextTokens: 272_000, defaultEffort: 'low' }),
+  base({ id: 'gpt-5.6-luna', contextTokens: 272_000, defaultEffort: 'medium' }),
+  base({ id: 'gpt-5.5', contextTokens: 272_000, defaultEffort: 'medium' }),
+];
+const EXTRA_CHOICES: Partial<Record<Provider, Model[]>> = {
+  codex_cli: CODEX_CATALOG,
+  openai: [base({ id: 'gpt-5', capability: 'balanced', defaultEffort: 'medium' })],
+};
+
 export function blankAccount(provider: Provider = 'claude_cli'): Account {
   return {
     id: '', label: '', provider, auth: CLI(provider) ? { type: 'cli_profile', configDir: '' } : provider === 'mock' ? { type: 'none' } : { type: 'api_key', secretRef: 'env:' },
@@ -58,10 +76,11 @@ export function duplicateAccount(a: Account, taken: string[]): Account {
 
 const num = (v: string) => (v === '' ? undefined : Number(v));
 
-export function AccountEditor({ initial, isNew, taken, onSave, onCancel }: {
+export function AccountEditor({ initial, isNew, taken, accounts, onSave, onCancel }: {
   initial: Account;
   isNew: boolean;
   taken: string[];
+  accounts: Account[];
   onSave: (a: Account) => Promise<void>;
   onCancel: () => void;
 }) {
@@ -70,7 +89,25 @@ export function AccountEditor({ initial, isNew, taken, onSave, onCancel }: {
   const [msg, setMsg] = useState('');
   const set = (p: Partial<Account>) => setA((x) => ({ ...x, ...p }));
   const setModel = (i: number, p: Partial<Model>) => set({ models: a.models.map((m, j) => (j === i ? { ...m, ...p } : m)) });
-  const presets = PRESETS[a.provider] ?? [];
+  const choices = new Map<string, Model>();
+  for (const model of [...(PRESETS[a.provider] ?? []), ...(EXTRA_CHOICES[a.provider] ?? [])]) {
+    choices.set(model.id, model);
+  }
+  for (const account of accounts) {
+    if (account.provider !== a.provider || (account.baseUrl || '') !== (a.baseUrl || '')) continue;
+    for (const model of account.models) {
+      if (!choices.has(model.id)) choices.set(model.id, model);
+    }
+  }
+  const modelIds = new Set(a.models.map((model) => model.id.trim()));
+  const addChoices = [...choices.keys()].filter((id) => !modelIds.has(id)).sort();
+  const addModel = (id: string) => {
+    const model = choices.get(id) ?? base({ id });
+    setA((current) => ({
+      ...current,
+      models: [...current.models, { ...model, roles: [...model.roles] }],
+    }));
+  };
 
   const setProvider = (provider: Provider) => {
     const auth: Account['auth'] = CLI(provider)
@@ -80,7 +117,7 @@ export function AccountEditor({ initial, isNew, taken, onSave, onCancel }: {
     set({ provider, auth, ...(isNew ? { models: (PRESETS[provider] ?? [base({ id: '' })]).map((m) => ({ ...m, roles: [...m.roles] })) } : {}) });
   };
   const pickModelId = (i: number, id: string) => {
-    const p = presets.find((x) => x.id === id);
+    const p = choices.get(id);
     const cur = a.models[i]!;
     // A known id fills the rest only while the row is still blank (prices untouched).
     if (p && !cur.priceInPerMTok && !cur.priceOutPerMTok) setModel(i, { ...p, roles: [...p.roles] });
@@ -181,9 +218,12 @@ export function AccountEditor({ initial, isNew, taken, onSave, onCancel }: {
 
           <div className="row" style={{ marginTop: 6 }}>
             <h3 className="grow" style={{ margin: 0 }}>Models</h3>
-            <button onClick={() => set({ models: [...a.models, base({ id: '' })] })}>Add model</button>
+            <select aria-label="Add model by ID" value="" disabled={!addChoices.length} onChange={(e) => addModel(e.target.value)}>
+              <option value="" disabled>{addChoices.length ? 'Add model by ID…' : 'No more suggested models'}</option>
+              {addChoices.map((id) => <option key={id} value={id}>{id}</option>)}
+            </select>
+            <button onClick={() => addModel('')}>Add custom model</button>
           </div>
-          <datalist id={`presets-${a.provider}`}>{presets.map((p) => <option key={p.id} value={p.id} />)}</datalist>
           <div style={{ overflowX: 'auto' }}>
             <table className="models">
               <thead>
@@ -195,7 +235,7 @@ export function AccountEditor({ initial, isNew, taken, onSave, onCancel }: {
               <tbody>
                 {a.models.map((m, i) => (
                   <tr key={i}>
-                    <td><input className="mono" list={`presets-${a.provider}`} value={m.id} placeholder="model id" onChange={(e) => pickModelId(i, e.target.value)} style={{ width: 170 }} /></td>
+                    <td><input className="mono" value={m.id} placeholder="model id" onChange={(e) => pickModelId(i, e.target.value)} style={{ width: 170 }} /></td>
                     <td>
                       <select value={m.capability ?? ''} onChange={(e) => setModel(i, { capability: (e.target.value || undefined) as CapabilityTier | undefined })}>
                         <option value="">none</option>

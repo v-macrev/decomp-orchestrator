@@ -53,6 +53,15 @@ export interface AccountView {
   models: string[];
 }
 
+export interface SubscriptionUsage {
+  buckets: Array<{
+    id: string;
+    label: string;
+    plan: string | null;
+    windows: Array<{ usedPercent: number; windowDurationMins?: number | null; resetsAt?: number | null }>;
+  }>;
+}
+
 /** Which account·model serves each node of a flow (the scheduler's own matching). */
 export interface NodeAssignment {
   nodeId: string;
@@ -201,18 +210,24 @@ export interface Batch {
   status: string;
   taskIds: string[];
   branch: string | null;
+  dryRunState: 'running' | 'cancelling' | null;
   detail: {
     functions?: number; problems?: string[]; draftedBy?: string | null; models?: string[];
     pr?: string | null; link?: string | null; prBranch?: string; submittedAt?: number;
-    lastSubmit?: { at: number; dryRun: boolean; ok: boolean; problems: string[]; blockers: string[]; warnings: string[]; plan: string[]; error: string | null; branch: string };
+    dryRunFingerprint?: string;
+    /** Tasks whose claims the last dry run could not check: a real submission must accept them explicitly. */
+    dryRunUncheckedClaims?: string[];
+    lastSubmit?: { at: number; dryRun: boolean; ok: boolean; cancelled?: boolean; submissionStarted?: boolean; problems: string[]; blockers: string[]; uncheckedClaims?: string[]; warnings: string[]; plan: string[]; error: string | null; branch: string };
   } | null;
 }
 
 export interface SubmitResult {
   ok: boolean;
   dryRun: boolean;
+  cancelled?: boolean;
   problems: string[];
   blockers: string[];
+  uncheckedClaims?: string[];
   warnings: string[];
   plan: string[];
   pullRequest: string | null;
@@ -229,9 +244,11 @@ export interface RunEdit {
 }
 
 export const api = {
+  selectionPreview: (count: number, maxSize: number) => req<{ requested: number; selected: number; units: number }>('POST', '/api/selection/preview', { source: 'sr_next', count, maxSize }),
   health: () => req<{ ok: boolean; mode: string; repo: string; slots: number; runDefaults?: { draftedBy?: string } }>('GET', '/api/health'),
   accounts: () => req<Account[]>('GET', '/api/accounts'),
   accountRuntime: () => req<AccountView[]>('GET', '/api/accounts/runtime'),
+  subscriptionUsage: (id: string) => req<SubscriptionUsage>('GET', `/api/accounts/${encodeURIComponent(id)}/subscription-usage`),
   saveAccount: (a: Account) => req<Account>('PUT', `/api/accounts/${encodeURIComponent(a.id)}`, a),
   deleteAccount: (id: string) => req('DELETE', `/api/accounts/${encodeURIComponent(id)}`),
   accountAction: (id: string, action: 'enable' | 'disable') => req('POST', `/api/accounts/${encodeURIComponent(id)}/${action}`),
@@ -251,9 +268,11 @@ export const api = {
   tasks: (id: string, state?: string, offset = 0) => req<Task[]>('GET', `/api/runs/${id}/tasks?limit=200&offset=${offset}${state ? `&state=${state}` : ''}`),
   batches: (id: string) => req<Batch[]>('GET', `/api/runs/${id}/batches`),
   updateRun: (id: string, patch: RunEdit) => req<RunSummary>('PATCH', `/api/runs/${id}`, patch),
-  deleteRun: (id: string) => req<{ ok: boolean; released: number }>('DELETE', `/api/runs/${id}`),
+  deleteRun: (id: string) => req<{ ok: boolean; released: number; failed?: Array<{ rva: string; error: string }> }>('DELETE', `/api/runs/${id}`),
   stageRun: (id: string) => req<{ ok: boolean; staged: number; failed: number }>('POST', `/api/runs/${id}/stage`, {}),
-  submitBatch: (id: string, batchId: string, real: boolean) => req<SubmitResult>('POST', `/api/runs/${id}/batches/${batchId}/submit`, real ? { dryRun: false, confirm: true } : { dryRun: true }),
+  submitBatch: (id: string, batchId: string, real: boolean, allowUncheckedClaims = false) => req<SubmitResult>('POST', `/api/runs/${id}/batches/${batchId}/submit`, real ? { dryRun: false, confirm: true, allowUncheckedClaims } : { dryRun: true }),
+  cancelBatchDryRun: (id: string, batchId: string) => req<{ ok: true }>('POST', `/api/runs/${id}/batches/${batchId}/cancel-dry-run`, {}),
+  clearBatchBranches: (id: string, batchId: string, scope: 'preview' | 'batch') => req<{ deleted: string[] }>('DELETE', `/api/runs/${id}/batches/${batchId}/branches`, { scope }),
   knowledge: (id: string) => req<KnowledgeEntry[]>('GET', `/api/runs/${id}/knowledge`),
   bundle: (hash: string) => req<TaskContextBundle | { sections: Array<{ id: string; title: string; content: string }>; approxTokens: number }>('GET', `/api/bundles/${hash}`),
   task: (id: string) => req<TaskDetail>('GET', `/api/tasks/${id}`),

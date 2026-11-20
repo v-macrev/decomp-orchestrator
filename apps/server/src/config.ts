@@ -18,6 +18,12 @@ export const ServerConfig = z.object({
     .object({
       path: z.string(),
       baseRef: z.string().default('origin/main'),
+      /**
+       * GitHub repository whose issues (claims) and pull requests are checked, and where PRs open
+       * (`SR_UPSTREAM`). The project moved from awarebayes/skyrim_decomp to the organisation; set
+       * explicitly so a pinned checkout older than that move still talks to the right repository.
+       */
+      upstream: z.string().regex(/^[A-Za-z0-9-]+\/[A-Za-z0-9_.-]+$/).default('Mudcrab-Team/skyrim_decomp'),
       worktreeRoot: z.string().default('data/worktrees'),
       localDir: z.string(),
       python: z.string().default(process.platform === 'win32' ? 'python' : 'python3'),

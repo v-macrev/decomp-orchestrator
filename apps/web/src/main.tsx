@@ -49,7 +49,9 @@ function App() {
           </span>
         )}
       </header>
-      {tab === 'flow' ? <FlowBuilder /> : tab === 'accounts' ? <Accounts /> : tab === 'skills' ? <Skills /> : <Runs mode={health?.mode ?? 'sim'} />}
+      {tab === 'flow' ? <FlowBuilder /> : tab === 'accounts' ? <Accounts /> : tab === 'skills' ? <Skills />
+        : health ? <Runs key={health.mode} mode={health.mode} />
+          : <main className="page muted" role="status">{err ? 'Cannot load runs until the server connects.' : 'Connecting to the server…'}</main>}
     </div>
   );
 }

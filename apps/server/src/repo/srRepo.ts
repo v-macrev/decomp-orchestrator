@@ -27,10 +27,34 @@ import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
 import type { Backlog, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult } from './types.js';
 
+interface ProgressInventory {
+  target_build_id?: string;
+  functions: Array<{ rva: number; size: number; name?: string | null; name_origin?: string | null; status: string; build_id?: string }>;
+}
+
+interface SrCandidate {
+  rva: string;
+  size: number;
+  name?: string | null;
+  name_origin?: string | null;
+  startable: boolean;
+  unit: string;
+  build_id?: string;
+  readiness_rank?: number;
+  cautions?: unknown[];
+}
+
+const rvaHex = (rva: number) => `0x${rva.toString(16)}`;
+
+/** The project's repository since it moved to the organisation (tools/repo_slug.py upstream). */
+export const DEFAULT_UPSTREAM = 'Mudcrab-Team/skyrim_decomp';
+
 export interface SrRepoConfig {
   /** Paths are on the repository host: Windows/POSIX paths for `local`, Linux paths for `wsl`. */
   repoPath: string;
   baseRef: string;
+  /** GitHub `owner/name` of the project (SR_UPSTREAM): claims, open PRs, and where PRs open. */
+  upstream?: string;
   worktreeRoot: string;
   /** Shared private storage (absolute). Must already be set up with `./sr setup`. */
   localDir: string;
@@ -101,7 +125,12 @@ export class SrRepo implements RepoAdapter {
   }
 
   private srEnv() {
-    return { SR_LOCAL_DIR: this.cfg.localDir, SR_CONTRIB_OFFLINE: '1', SR_NO_SIBLING_NAMES: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
+    return { SR_LOCAL_DIR: this.cfg.localDir, SR_CONTRIB_OFFLINE: '1', SR_NO_SIBLING_NAMES: '1', SR_UPSTREAM: this.upstream, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
+  }
+
+  /** The project's GitHub repository (claims are its open issues; PRs open there). */
+  get upstream() {
+    return this.cfg.upstream ?? DEFAULT_UPSTREAM;
   }
 
   /** Run `python tools/contrib.py --json <args>` in a slot (or the main checkout) under the sandbox. */
@@ -114,7 +143,7 @@ export class SrRepo implements RepoAdapter {
         'run', '--rm', '--network', 'none', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges',
         '--pids-limit', '512', '--cpus', String(sb.cpus ?? 2), '--memory', sb.memory ?? '4g', '--read-only', '--tmpfs', '/tmp',
         '-v', `${cwd}:/repo`, '-v', `${this.cfg.localDir}:/local`, '-w', '/repo',
-        '-e', 'SR_LOCAL_DIR=/local', '-e', 'SR_CONTRIB_OFFLINE=1', '-e', 'SR_NO_SIBLING_NAMES=1',
+        '-e', 'SR_LOCAL_DIR=/local', '-e', 'SR_CONTRIB_OFFLINE=1', '-e', 'SR_NO_SIBLING_NAMES=1', '-e', `SR_UPSTREAM=${this.upstream}`,
         sb.image, 'python3', ...base,
       ];
       run = await this.host.run('docker', dockerArgs, { cwd, timeoutMs: opts.timeoutMs, signal: opts.signal, maxOutputBytes: 8 * 1024 * 1024 });
@@ -185,7 +214,8 @@ export class SrRepo implements RepoAdapter {
   /** null when the slot is clean at the pinned revision, else what went wrong. */
   private async tryReset(slot: number): Promise<string | null> {
     const p = this.wt(slot);
-    const a = await this.git(p, ['reset', '--hard', '-q', this.sha], 300_000);
+    // A staging slot can be on a batch branch. Detach without moving its ref.
+    const a = await this.git(p, ['checkout', '--detach', '-f', '-q', this.sha], 300_000);
     const b = await this.git(p, ['clean', '-ffdxq'], 300_000);
     const s = await this.git(p, ['status', '--porcelain=v1', '--untracked-files=all']);
     return a.code !== 0 || b.code !== 0 || s.stdout.trim() ? (a.stderr + b.stderr + s.stdout).slice(0, 300) : null;
@@ -220,38 +250,124 @@ export class SrRepo implements RepoAdapter {
 
   // ---------------------------------------------------------------- discovery
 
-  async discover(sel: SelectionSpec): Promise<DiscoveredFunction[]> {
+  private get claimWorktree() {
+    return this.wt(0);
+  }
+
+  /** Fetch the configured upstream branch into an app-owned ref, leaving the compiler base pinned. */
+  private async syncedInventory() {
+    const { repoPath, baseRef } = this.cfg;
+    const tracking = baseRef.replace(/^refs\/remotes\//, '');
+    const remotes = await this.git(repoPath, ['remote']);
+    if (remotes.code !== 0) throw new InfraError('could not read the repository remotes');
+    const remote = remotes.stdout.trim().split(/\r?\n/).filter(Boolean)
+      .sort((a, b) => b.length - a.length).find((name) => tracking.startsWith(`${name}/`));
+    let revision = this.sha;
+    if (remote) {
+      const branch = tracking.slice(remote.length + 1);
+      const ref = `refs/decomp/claim-base/${tracking}`;
+      const fetched = await this.git(repoPath, ['fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--refmap=', '--', remote, `+refs/heads/${branch}:${ref}`], 120_000);
+      if (fetched.code !== 0) throw new InfraError(`could not sync ${tracking}: ${fetched.stderr.trim().slice(0, 300)}`);
+      const head = await this.git(repoPath, ['rev-parse', '--verify', `${ref}^{commit}`]);
+      if (head.code !== 0) throw new InfraError(`could not resolve synced ${tracking}`);
+      revision = head.stdout.trim();
+    }
+    const result = await this.git(repoPath, ['show', `${revision}:data/progress.json`]);
+    if (result.code !== 0) throw new InfraError('could not read the synced progress inventory');
+    const progress = parseJsonOutput(result.stdout) as ProgressInventory | null;
+    if (!Array.isArray(progress?.functions)) throw new InfraError('the synced progress inventory is invalid');
+    return { revision, progress };
+  }
+
+  private async syncedBacklog(maxSize: number) {
+    return this.srMutex.run('claim-sync', async () => {
+      const { revision, progress } = await this.syncedInventory();
+      const pinned = revision === this.sha ? progress : parseJsonOutput((await this.baseFile('data/progress.json')) ?? '') as ProgressInventory | null;
+      if (!pinned || pinned.target_build_id !== progress.target_build_id || !Array.isArray(pinned.functions)) {
+        throw new InfraError('upstream target build differs from the pinned checkout or its inventory is unreadable');
+      }
+      // sr next reads local reservations and GitHub issues/PRs, but does not publish a claim.
+      const { SR_CONTRIB_OFFLINE: _, ...env } = this.srEnv();
+      const run = await this.host.run(this.cfg.python, ['tools/contrib.py', '--json', 'next', '--count', '100000', '--max-size', String(maxSize)], {
+        cwd: this.claimWorktree, env, timeoutMs: 600_000, maxOutputBytes: 32 * 1024 * 1024,
+      });
+      const result = parseJsonOutput(run.stdout);
+      if (run.code !== 0 || !Array.isArray(result?.candidates)) {
+        throw new InfraError(`sr next failed (exit ${run.code}): ${result?.error ?? run.stderr.trim().slice(0, 300)}`);
+      }
+      if (result.claims_checked !== true) throw new InfraError('GitHub claims could not be checked. Restore GitHub access and try again.');
+      const entries = new Map(progress.functions.map((entry) => [rvaHex(entry.rva), entry]));
+      // Candidates must be startable in the pinned build and not matched upstream since the pin.
+      // A function of the published target-hash list has no inventory entry until the bot records
+      // its match (`next`/`claim`/`start` offer it), so no upstream entry means still unmatched.
+      const candidates: DiscoveredFunction[] = result.candidates
+        .filter((c: SrCandidate) => {
+          if (!c.startable || !c.unit) return false;
+          const upstream = entries.get(c.rva);
+          if (!upstream) return true;
+          return upstream.status === 'mapped' && upstream.size === c.size && (!upstream.build_id || !c.build_id || upstream.build_id === c.build_id);
+        })
+        .map((c: SrCandidate) => ({
+          rva: c.rva, name: c.name ?? null, size: c.size, nameOrigin: c.name_origin ?? null, unit: c.unit.replace(/\\/g, '/'),
+          readiness: c.readiness_rank, cautions: c.cautions?.length ?? 0,
+        }));
+      return { candidates, revision, progress };
+    });
+  }
+
+  async discover(sel: SelectionSpec, opts?: { exclude?: ReadonlySet<string> }): Promise<DiscoveredFunction[]> {
     if (sel.source === 'synthetic') throw new Error('synthetic selection is only for the simulator');
-    const count = sel.source === 'sr_next' ? sel.count : 100_000;
-    const maxSize = sel.source === 'sr_next' ? sel.maxSize : 1_000_000;
-    // Discover from a pristine slot at the base revision, not the operator's own checkout/branch.
-    const cwd = this.host.exists(this.p.join(this.wt(0), '.git')) ? this.wt(0) : this.cfg.repoPath;
-    const { run, json } = await this.sr(cwd, ['next', '--count', String(count), '--max-size', String(maxSize)], { timeoutMs: 600_000 });
-    if (!json?.candidates) throw new InfraError(`sr next failed (exit ${run.code}): ${json?.error ?? (run.stderr || run.stdout).slice(0, 500)}`);
-    const want = sel.source === 'rva_list' ? new Set(sel.rvas.map((r) => `0x${parseInt(r, 16).toString(16)}`)) : null;
-    return (json.candidates as any[])
-      .filter((c) => c.startable && c.unit && (!want || want.has(c.rva)))
-      .map((c) => ({
-        rva: c.rva, name: c.name ?? null, size: c.size, nameOrigin: c.name_origin ?? null, unit: String(c.unit).replace(/\\/g, '/'),
-        readiness: c.readiness_rank, cautions: Array.isArray(c.cautions) ? c.cautions.length : 0,
-      }));
+    const { candidates } = await this.syncedBacklog(sel.source === 'sr_next' ? sel.maxSize : 1_000_000);
+    const want = sel.source === 'rva_list' ? new Set(sel.rvas.map((r) => rvaHex(parseInt(r, 16)))) : null;
+    return candidates.filter((c) => !opts?.exclude?.has(c.rva) && (!want || want.has(c.rva)))
+      .slice(0, sel.source === 'sr_next' ? sel.count : undefined);
   }
 
   // ---------------------------------------------------------------- per-task
+
+  private localClaims(): Record<string, { status?: string; url?: string | null }> {
+    const path = this.host.fsPath(this.p.join(this.cfg.localDir, 'contrib', 'claims.json'));
+    try {
+      const claims = parseJsonOutput(readFileSync(path, 'utf8'));
+      if (!claims || typeof claims !== 'object' || Array.isArray(claims)) throw new InfraError('the local claims file is invalid');
+      return claims;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+      throw error;
+    }
+  }
 
   async prepare(slot: number, task: TaskRow, opts: { draftedBy: string; model: string; signal: AbortSignal }): Promise<PreparedTask> {
     const cwd = this.wt(slot);
     const rvas = task.functions.map((f) => f.rva);
     // claim/start write shared state under SR_LOCAL_DIR: serialise them across slots
-    const started = await this.srMutex.run('sr-local', async () => {
-      const claim = await this.sr(cwd, ['claim', ...rvas, '--offline-ok', '--model', opts.model, '--drafted-by', opts.draftedBy], { timeoutMs: 120_000, signal: opts.signal });
-      if (claim.run.code !== 0) {
-        throw new InfraError(`sr claim failed (exit ${claim.run.code}): ${claim.json?.error ?? (claim.run.stderr || claim.run.stdout).slice(0, 300)}`);
+    const j = await this.srMutex.run('sr-local', async () => {
+      const existing = this.localClaims();
+      const missing = rvas.filter((rva) => !Object.hasOwn(existing, rva));
+      try {
+        opts.signal.throwIfAborted();
+        if (missing.length) {
+          const claim = await this.sr(cwd, ['claim', ...missing, '--offline-ok', '--model', opts.model, '--drafted-by', opts.draftedBy], { timeoutMs: 120_000, signal: opts.signal });
+          const recorded = this.localClaims();
+          if (claim.run.code !== 0 || claim.json?.claim !== 'unpublished' || missing.some((rva) => recorded[rva]?.status !== 'unpublished')) {
+            throw new InfraError(`sr local claim failed (exit ${claim.run.code}): ${claim.json?.error ?? (claim.run.stderr || claim.run.stdout).slice(0, 300)}`);
+          }
+        }
+        opts.signal.throwIfAborted();
+        const started = await this.sr(cwd, ['start', ...rvas, '--no-branch', '--drafted-by', opts.draftedBy, '--model', opts.model], { timeoutMs: 600_000, signal: opts.signal });
+        if (started.run.code !== 0 || !started.json?.task) {
+          throw new InfraError(`sr start failed (exit ${started.run.code}): ${started.json?.error ?? (started.run.stderr || started.run.stdout).slice(0, 300)}`);
+        }
+        return started.json;
+      } catch (error) {
+        const current = this.localClaims();
+        for (const rva of missing.filter((id) => current[id]?.status === 'unpublished')) {
+          const result = await this.sr(cwd, ['release', rva, '--reason', 'decomp-orchestrator: preparation failed'], { timeoutMs: 120_000 }).catch(() => null);
+          if (result?.run.code !== 0 || result.json?.rva !== rva) this.notice?.('claims.release_failed', `could not roll back local claim ${rva} after preparation failed`);
+        }
+        throw error;
       }
-      return this.sr(cwd, ['start', ...rvas, '--no-branch', '--drafted-by', opts.draftedBy, '--model', opts.model], { timeoutMs: 600_000, signal: opts.signal });
     });
-    const j = started.json;
-    if (started.run.code !== 0 || !j?.task) throw new InfraError(`sr start failed (exit ${started.run.code}): ${j?.error ?? (started.run.stderr || started.run.stdout).slice(0, 300)}`);
     const unit = (j.unit as string[]).map((p) => p.replace(/\\/g, '/'));
     const toolingChanges = (await this.changedPaths(slot)).filter((p) => !unit.includes(p));
     return { srTaskId: j.task, allowedPaths: unit, packs: (j.packs as string[]) ?? [], toolingChanges };
@@ -264,20 +380,29 @@ export class SrRepo implements RepoAdapter {
   async releaseClaims(rvas: string[], reason: string) {
     const out: Array<{ rva: string; ok: boolean; error: string | null }> = [];
     for (const rva of rvas) {
-      const r = await this.srMutex.run('sr-local', () => this.sr(this.cfg.repoPath, ['release', rva, '--reason', reason], { timeoutMs: 120_000 }));
-      const ok = r.run.code === 0 && r.json?.ok !== false;
-      out.push({ rva, ok, error: ok ? null : (r.json?.error ?? `exit ${r.run.code}: ${(r.run.stderr || r.run.stdout).trim().slice(-300)}`) });
+      try {
+        const r = await this.srMutex.run('sr-local', () => this.sr(this.cfg.repoPath, ['release', rva, '--reason', reason], { timeoutMs: 120_000 }));
+        const ok = r.run.code === 0 && r.json?.ok !== false && r.json?.rva === rva;
+        const error = r.json?.error ?? (r.run.code === 0 ? 'sr release did not confirm this RVA' : `exit ${r.run.code}: ${(r.run.stderr || r.run.stdout).trim().slice(-300)}`);
+        out.push({ rva, ok, error: ok ? null : error });
+      } catch (error) {
+        out.push({ rva, ok: false, error: String(error) });
+      }
     }
     return out;
   }
 
-  async recordAttribution(input: { task: TaskRow; srTaskId: string; model: string; draftedBy: string }) {
+  async recordAttribution(input: { task: TaskRow; srTaskId: string; model: string; draftedBy: string; slot?: number }) {
     const problems: string[] = [];
     const rvas = input.task.functions.map((f) => f.rva);
     await this.srMutex.run('sr-local', async () => {
       // Re-claiming one's own local claim only rewrites its record, now with the finishing model.
-      const claim = await this.sr(this.cfg.repoPath, ['claim', ...rvas, '--offline-ok', '--model', input.model, '--drafted-by', input.draftedBy], { timeoutMs: 120_000 });
-      if (claim.run.code !== 0 || claim.json?.ok === false) problems.push(`claim: ${claim.json?.error ?? (claim.run.stderr || claim.run.stdout).trim().slice(-200)}`);
+      const existing = this.localClaims();
+      const local = rvas.filter((rva) => existing[rva]?.status !== 'published' && !existing[rva]?.url);
+      if (local.length) {
+        const claim = await this.sr(this.wt(input.slot ?? 0), ['claim', ...local, '--offline-ok', '--model', input.model, '--drafted-by', input.draftedBy], { timeoutMs: 120_000 });
+        if (claim.run.code !== 0 || claim.json?.claim !== 'unpublished') problems.push(`claim: ${claim.json?.error ?? (claim.run.stderr || claim.run.stdout).trim().slice(-200)}`);
+      }
       if (!/^[A-Za-z0-9._-]+$/.test(input.srTaskId)) {
         problems.push(`task id ${input.srTaskId} is not a plain name`);
         return;
@@ -412,6 +537,25 @@ export class SrRepo implements RepoAdapter {
 
   // ---------------------------------------------------------------- staging
 
+  async deleteBatchBranch(branch: string): Promise<boolean> {
+    if (!/^decomp\/run_[a-z0-9]+-b[1-9]\d*(?:-pr)?$/.test(branch)) throw new Error('invalid local batch branch');
+    const ref = `refs/heads/${branch}`;
+    const found = await this.git(this.cfg.repoPath, ['show-ref', '--verify', '--quiet', ref]);
+    if (found.code === 1) return false;
+    if (found.code !== 0) throw new Error('could not look up the local batch branch');
+    const staging = this.wt(this.slotCount);
+    if (this.host.exists(this.p.join(staging, '.git'))) {
+      const head = await this.git(staging, ['symbolic-ref', '--quiet', 'HEAD']);
+      if (head.code === 0 && head.stdout.trim() === ref) {
+        const detached = await this.git(staging, ['checkout', '--detach', '-q', 'HEAD']);
+        if (detached.code !== 0) throw new Error(`could not detach the staging worktree: ${detached.stderr.trim().slice(0, 300)}`);
+      }
+    }
+    const deleted = await this.git(this.cfg.repoPath, ['branch', '-D', '--', branch]);
+    if (deleted.code !== 0) throw new Error(`could not delete ${branch}: ${deleted.stderr.trim().slice(0, 300)}`);
+    return true;
+  }
+
   async stageBatch(input: StageBatchInput): Promise<StageBatchResult> {
     const slot = this.slotCount; // dedicated staging worktree after the worker slots
     const p = this.wt(slot);
@@ -451,7 +595,9 @@ export class SrRepo implements RepoAdapter {
   async submitBatch(input: SubmitBatchInput): Promise<SubmitBatchResult> {
     const slot = this.slotCount;
     const p = this.wt(slot);
-    const out: SubmitBatchResult = { ok: false, dryRun: input.dryRun, problems: [], blockers: [], warnings: [], plan: [], pullRequest: null, link: null, error: null };
+    const out: SubmitBatchResult = { ok: false, dryRun: input.dryRun, submissionStarted: false, problems: [], blockers: [], warnings: [], plan: [], pullRequest: null, link: null, error: null };
+    const signal = input.signal ?? new AbortController().signal;
+    if (signal.aborted) return out;
     const last = input.tasks.at(-1);
     if (!last?.srTaskId || !/^[A-Za-z0-9._-]+$/.test(last.srTaskId)) return { ...out, problems: ['the batch has no submittable sr task'] };
     if (!/^[A-Za-z0-9._/-]+$/.test(input.branch)) return { ...out, problems: [`branch name ${input.branch} is not plain`] };
@@ -472,18 +618,20 @@ export class SrRepo implements RepoAdapter {
     try {
       // The same tree the PR will carry, from the base, re-verified packet by packet: this also
       // writes each task's last-compare.json, which `sr submit` checks against the unit's digest.
+      signal.throwIfAborted();
       await this.writeFiles(slot, input.files);
-      const ac = new AbortController();
       for (const t of input.tasks) {
+        signal.throwIfAborted();
         if (!t.srTaskId) {
           out.problems.push(`${t.id}: no sr task id`);
           continue;
         }
-        const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: ac.signal, timeoutMs: 600_000 });
+        const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal, timeoutMs: 600_000 });
         if (!r.allPass) out.problems.push(`${t.id}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
       }
       if (out.problems.length) return out;
       const git = async (args: string[]) => {
+        signal.throwIfAborted();
         const r = await this.git(p, args);
         if (r.code !== 0) throw new Error(`git ${args[0]}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
         return r.stdout;
@@ -496,32 +644,48 @@ export class SrRepo implements RepoAdapter {
       }
       // `sr submit` needs the network (claims check, push, gh) and the operator's own git/gh
       // credentials: it runs on the host, never in the sandbox, and without SR_CONTRIB_OFFLINE.
-      const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_NO_SIBLING_NAMES: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', GIT_TERMINAL_PROMPT: '0' };
+      const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_NO_SIBLING_NAMES: '1', SR_UPSTREAM: this.upstream, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', GIT_TERMINAL_PROMPT: '0' };
       const list = (v: unknown) => (Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x)).slice(0, 400)) : []);
-      // `sr submit` checks other people's open claims and PRs only for the task it runs on: ask it
-      // (dry run, which changes nothing) about every other task of the batch too.
-      const collisions: string[] = [];
-      for (const id of new Set(input.tasks.slice(0, -1).map((t) => t.srTaskId).filter((x): x is string => !!x && x !== last.srTaskId && /^[A-Za-z0-9._-]+$/.test(x)))) {
-        const probe = await this.host.run(this.cfg.python, ['tools/contrib.py', '--json', 'submit', id, '--drafted-by', input.draftedBy, '--dry-run'], { cwd: p, env, timeoutMs: 300_000, maxOutputBytes: 8 * 1024 * 1024 });
-        const pj = parseJsonOutput(probe.stdout) as Record<string, unknown> | null;
-        if (!pj) out.warnings.push(`${id}: claims check did not run (exit ${probe.code})`);
-        collisions.push(...list(pj?.blockers).filter((b) => /another open claim or pull request/i.test(b)).map((b) => `${id}: ${b}`));
-        out.warnings.push(...list(pj?.warnings).filter((w) => /GitHub claims not checked/i.test(w)).map((w) => `${id}: ${w}`));
+      // Probe every task before the mutating command. The final task also supplies the dry-run plan.
+      const ids = new Set(input.tasks.slice(0, -1).map((t) => t.srTaskId).filter((id) => id !== last.srTaskId));
+      ids.add(last.srTaskId);
+      const args = ['tools/contrib.py', '--json', 'submit'];
+      const attribution = ['--drafted-by', input.draftedBy];
+      const unchecked: string[] = [];
+      for (const id of ids) {
+        signal.throwIfAborted();
+        if (!id || !/^[A-Za-z0-9._-]+$/.test(id)) {
+          unchecked.push(`${id ?? 'unknown task'}: invalid sr task ID for claims check`);
+          continue;
+        }
+        const probe = await this.host.run(this.cfg.python, [...args, id, ...attribution, '--dry-run'], { cwd: p, env, signal, timeoutMs: 300_000, maxOutputBytes: 8 * 1024 * 1024 });
+        const check = submitClaimsCheck(probe);
+        unchecked.push(...check.unchecked.map((issue) => `${id}: ${issue}`));
+        if (id === last.srTaskId) {
+          out.blockers.push(...check.blockers);
+          out.warnings.push(...check.warnings);
+          out.plan = check.plan;
+        } else {
+          out.blockers.push(...check.blockers.filter((b) => /another open claim or pull request/i.test(b)).map((b) => `${id}: ${b}`));
+        }
       }
-      if (collisions.length && !input.dryRun) {
-        out.blockers = collisions;
-        out.error = 'other contributors have open claims or pull requests on functions in this batch; nothing was submitted';
+      out.uncheckedClaims = unchecked;
+      if (out.blockers.length || (unchecked.length && (input.dryRun || !input.allowUncheckedClaims))) {
+        out.error = out.blockers.length ? 'Submission preflight found blockers' : 'Claims checks could not be completed for the entire batch';
         return out;
       }
-      const args = ['tools/contrib.py', '--json', 'submit', last.srTaskId, '--drafted-by', input.draftedBy, ...(input.dryRun ? ['--dry-run'] : [])];
-      const run = await this.host.run(this.cfg.python, args, { cwd: p, env, timeoutMs: 900_000, maxOutputBytes: 8 * 1024 * 1024 });
+      if (input.dryRun) return { ...out, ok: true };
+      if (unchecked.length) out.warnings.push(...unchecked.map((issue) => `Unchecked claims accepted by operator: ${issue}`));
+      signal.throwIfAborted();
+      out.submissionStarted = true;
+      const run = await this.host.run(this.cfg.python, [...args, last.srTaskId, ...attribution], { cwd: p, env, signal, timeoutMs: 900_000, maxOutputBytes: 8 * 1024 * 1024 });
       const j = parseJsonOutput(run.stdout) as Record<string, unknown> | null;
-      out.blockers = [...collisions, ...list(j?.blockers)];
+      out.blockers = list(j?.blockers);
       out.warnings = [...out.warnings, ...list(j?.warnings)];
       out.plan = list(j?.plan);
       out.pullRequest = typeof j?.pull_request === 'string' ? j.pull_request : null;
       out.link = typeof j?.link === 'string' ? j.link : null;
-      out.ok = run.code === 0 && j?.ok !== false && !out.blockers.length;
+      out.ok = run.code === 0 && !!j && j.ok !== false && !out.blockers.length;
       if (!out.ok) out.error = String(j?.error ?? (run.timedOut ? 'sr submit timed out' : `sr submit exit ${run.code}: ${(run.stderr || run.stdout).trim().slice(-300)}`));
       if (out.ok && !input.dryRun) {
         const branch = input.branch;
@@ -577,33 +741,12 @@ export class SrRepo implements RepoAdapter {
    * claims, and the optional function table.
    */
   async backlog(opts: { maxSize: number }): Promise<Backlog> {
-    const text = (await this.baseFile('data/progress.json')) ?? (await this.readHostFile(this.p.join(this.cfg.repoPath, 'data/progress.json')));
-    if (!text) throw new InfraError('data/progress.json not found in the checkout');
-    const prog = JSON.parse(text) as { functions: Array<{ rva: number; size: number; name?: string | null; name_origin?: string | null; status: string }> };
-    const inventory: InventoryEntry[] = prog.functions.map((f) => ({ rva: `0x${f.rva.toString(16)}`, name: f.name ?? null, size: f.size, nameOrigin: f.name_origin ?? null, status: f.status }));
-    const cwd = this.host.exists(this.p.join(this.wt(0), '.git')) ? this.wt(0) : this.cfg.repoPath;
-    const { run, json } = await this.sr(cwd, ['next', '--count', '100000', '--max-size', String(opts.maxSize)], { timeoutMs: 600_000 });
-    if (!json?.candidates) throw new InfraError(`sr next failed (exit ${run.code}): ${json?.error ?? (run.stderr || run.stdout).slice(0, 500)}`);
-    const candidates: DiscoveredFunction[] = (json.candidates as any[])
-      .filter((c) => c.startable && c.unit)
-      .map((c) => ({
-        rva: c.rva, name: c.name ?? null, size: c.size, nameOrigin: c.name_origin ?? null, unit: String(c.unit).replace(/\\/g, '/'),
-        readiness: c.readiness_rank, cautions: Array.isArray(c.cautions) ? c.cautions.length : 0,
-      }));
-    let claimed: string[] = [];
-    const claims = await this.readHostFile(this.p.join(this.cfg.localDir, 'contrib', 'claims.json'));
-    if (claims) {
-      try {
-        const obj = JSON.parse(claims) as Record<string, unknown>;
-        const keys = Array.isArray(obj) ? (obj as Array<{ rva?: string }>).map((x) => x.rva ?? '') : Object.keys((obj.claims as object | undefined) ?? obj);
-        claimed = keys.filter((k) => /^(0x)?[0-9a-f]+$/i.test(k)).map((k) => `0x${parseInt(k, 16).toString(16)}`);
-      } catch {
-        /* unreadable claims file: sr next has already excluded what it knows */
-      }
-    }
+    const { candidates, revision, progress } = await this.syncedBacklog(opts.maxSize);
+    const inventory: InventoryEntry[] = progress.functions.map((f) => ({ rva: rvaHex(f.rva), name: f.name ?? null, size: f.size, nameOrigin: f.name_origin ?? null, status: f.status }));
+    const claimed = Object.keys(this.localClaims());
     return {
-      source: `data/progress.json@${this.sha.slice(0, 12)} + sr next${this.cfg.functionTable ? ' + function table' : ''}`,
-      inventory, candidates, claimed, claimsChecked: json.claims_checked !== false, functionTable: await this.functionTable(),
+      source: `upstream progress@${revision.slice(0, 12)} + pinned sr next@${this.sha.slice(0, 12)}${this.cfg.functionTable ? ' + function table' : ''}`,
+      inventory, candidates, claimed, claimsChecked: true, functionTable: await this.functionTable(),
     };
   }
 
@@ -757,6 +900,26 @@ export function clipMiddle(text: string, maxChars: number): string {
     j--;
   }
   return [...head, `[… ${j - i + 1} line(s) elided to fit the context budget …]`, ...tail].join('\n');
+}
+
+/** A collision is evidence even when the probe did not complete cleanly. */
+export function submitClaimsCheck(run: RunResult) {
+  const result = parseJsonOutput(run.stdout);
+  const strings = (value: unknown): string[] => Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string').map((entry) => entry.slice(0, 400))
+    : [];
+  const blockers = strings(result?.blockers);
+  const warnings = strings(result?.warnings);
+  const unchecked = warnings.filter((warning) => /GitHub claims not checked/i.test(warning));
+  // Exit 1 is expected when a valid dry-run report contains blockers.
+  const valid = result?.dry_run === true && Array.isArray(result.blockers) && Array.isArray(result.warnings)
+    && blockers.length === result.blockers.length && warnings.length === result.warnings.length
+    && (result.ok !== false || blockers.length > 0)
+    && (run.code === 0 || (run.code === 1 && blockers.length > 0));
+  if (!valid || run.timedOut || run.aborted || run.truncated || result?.claims_checked === false) {
+    unchecked.push(run.timedOut ? 'claims check timed out' : `claims check did not complete (exit ${run.code})`);
+  }
+  return { blockers, warnings, unchecked, plan: strings(result?.plan) };
 }
 
 function parseJsonOutput(stdout: string): any {

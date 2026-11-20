@@ -3,11 +3,62 @@
 // Accounts are edited in a form; which model serves which flow node is set in the assignment grid.
 import { useCallback, useEffect, useState } from 'react';
 import type { Account, Flow } from '@decomp/core';
-import { api, stream, type AccountView } from '../api';
+import { api, stream, type AccountView, type SubscriptionUsage } from '../api';
 import { AccountEditor, blankAccount, duplicateAccount } from '../components/AccountEditor';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { ModelAssignment } from '../components/ModelAssignment';
 import { AccountsTable } from './Runs';
+
+function windowLabel(minutes?: number | null) {
+  if (!minutes) return 'Usage window';
+  if (minutes === 10_080) return 'Weekly';
+  if (minutes % 1_440 === 0) return `${minutes / 1_440}-day`;
+  if (minutes % 60 === 0) return `${minutes / 60}-hour`;
+  return `${minutes}-minute`;
+}
+
+function CodexSubscription({ accountId }: { accountId: string }) {
+  const [usage, setUsage] = useState<SubscriptionUsage | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+
+  const refresh = async () => {
+    setLoading(true);
+    setError('');
+    setUsage(null);
+    try {
+      setUsage(await api.subscriptionUsage(accountId));
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  };
+  const buckets = usage?.buckets.filter((bucket) => bucket.windows.length > 0);
+
+  return (
+    <div style={{ marginTop: 6 }}>
+      <button type="button" onClick={refresh} disabled={loading}>
+        {loading ? 'Reading usage…' : usage ? 'Refresh subscription usage' : 'Check subscription usage'}
+      </button>
+      <div role="status">
+        {error && <div className="lvl-error">{error}</div>}
+        {buckets?.length === 0 && <div>Codex returned no subscription windows.</div>}
+        {buckets?.map((bucket) => (
+          <div key={bucket.id} style={{ marginTop: 6 }}>
+            <strong>{bucket.label}{bucket.plan ? ` · ${bucket.plan}` : ''}</strong>
+            {bucket.windows.map((window, index) => (
+              <div key={index}>
+                {windowLabel(window.windowDurationMins)} · {window.usedPercent}% used
+                {window.resetsAt ? ` · resets ${new Date(window.resetsAt * 1_000).toLocaleString()}` : ''}
+              </div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export default function Accounts() {
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -71,6 +122,7 @@ export default function Accounts() {
           initial={editing.account}
           isNew={editing.isNew}
           taken={accounts.map((a) => a.id)}
+          accounts={accounts}
           onSave={saveOne}
           onCancel={() => setEditing(null)}
         />
@@ -105,7 +157,12 @@ export default function Accounts() {
                   ))}
                 </td>
                 <td>{a.tags.map((t) => <span key={t} className="chip" style={{ marginRight: 4 }}>#{t}</span>)}</td>
-                <td className="muted" style={{ fontSize: 12 }}>{a.limits.requestsPerMinute} rpm · ×{a.limits.maxConcurrency}{a.limits.dailyBudgetUsd ? ` · $${a.limits.dailyBudgetUsd}/day` : ''}</td>
+                <td className="muted" style={{ fontSize: 12 }}>
+                  {a.limits.requestsPerMinute} rpm · ×{a.limits.maxConcurrency}{a.limits.dailyBudgetUsd ? ` · $${a.limits.dailyBudgetUsd}/day` : ''}
+                  {a.provider === 'codex_cli' && a.auth.type === 'cli_profile' && (
+                    <CodexSubscription key={`${a.auth.configDir}:${a.auth.binary ?? ''}`} accountId={a.id} />
+                  )}
+                </td>
                 <td className="row">
                   <button onClick={() => startEdit(a, false)}>Edit</button>
                   <button onClick={() => startEdit(duplicateAccount(a, accounts.map((x) => x.id)), true)} title="Copy this account for another login of the same kind, e.g. another workspace">Duplicate</button>

@@ -75,10 +75,11 @@ export interface DocSection {
 
 export interface RepoAdapter {
   readonly name: string;
+  readonly baseSha?: string;
   /** Worktree slots available (one per concurrent worker slot). */
   readonly slotCount: number;
   init(): Promise<void>;
-  discover(sel: SelectionSpec): Promise<DiscoveredFunction[]>;
+  discover(sel: SelectionSpec, opts?: { exclude?: ReadonlySet<string> }): Promise<DiscoveredFunction[]>;
   prepare(slot: number, task: TaskRow, opts: { draftedBy: string; model: string; signal: AbortSignal }): Promise<PreparedTask>;
   /** Content at the base revision (previously accepted source), or null if the file is new. */
   baseFile(path: string): Promise<string | null>;
@@ -128,7 +129,7 @@ export interface RepoAdapter {
    * Record who finished a packet the way contributors do: the claim's model (`sr claim --model`)
    * and the task's `drafter_model`, set to the model of the accepted attempt.
    */
-  recordAttribution?(input: { task: TaskRow; srTaskId: string; model: string; draftedBy: string }): Promise<{ ok: boolean; problems: string[] }>;
+  recordAttribution?(input: { task: TaskRow; srTaskId: string; model: string; draftedBy: string; slot?: number }): Promise<{ ok: boolean; problems: string[] }>;
   /**
    * Open one pull request for a staged batch with the repository's own `sr submit`: rebuild the
    * batch on a fresh branch from the base, re-verify every packet, commit every unit but the last,
@@ -136,6 +137,8 @@ export interface RepoAdapter {
    * `dryRun` runs `sr submit --dry-run`: nothing is committed for the submitted unit or pushed.
    */
   submitBatch?(input: SubmitBatchInput): Promise<SubmitBatchResult>;
+  /** Delete an orchestrator-owned local batch ref. */
+  deleteBatchBranch?(branch: string): Promise<boolean>;
 }
 
 export interface SubmitBatchInput {
@@ -153,15 +156,21 @@ export interface SubmitBatchInput {
   title: string | null;
   extraBody: string | null;
   dryRun: boolean;
+  allowUncheckedClaims?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface SubmitBatchResult {
   ok: boolean;
   dryRun: boolean;
+  cancelled?: boolean;
+  /** Whether the mutating sr submit command was started. */
+  submissionStarted?: boolean;
   /** Re-verification or git problems found before `sr submit` ran. */
   problems: string[];
   /** `sr submit`'s own blockers and warnings. */
   blockers: string[];
+  uncheckedClaims?: string[];
   warnings: string[];
   plan: string[];
   pullRequest: string | null;

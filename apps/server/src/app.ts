@@ -90,7 +90,7 @@ export function srRepoConfig(cfg: ServerConfig): SrRepoConfig {
   // WSL paths are Linux paths inside the distribution: never resolve them against this checkout.
   const at = (p: string) => (wsl ? p : fromRoot(p));
   return {
-    repoPath: at(r.path), baseRef: r.baseRef, worktreeRoot: at(r.worktreeRoot), localDir: at(r.localDir),
+    repoPath: at(r.path), baseRef: r.baseRef, upstream: r.upstream, worktreeRoot: at(r.worktreeRoot), localDir: at(r.localDir),
     python: wsl && r.python === 'python' ? 'python3' : r.python, slots: r.slots, host: r.host, sandbox: r.sandbox, ...(r.functionTable ? { functionTable: at(r.functionTable) } : {}),
   };
 }

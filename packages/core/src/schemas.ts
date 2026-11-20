@@ -219,6 +219,12 @@ export const Flow = z.object({
   name: z.string().min(1),
   nodes: z.array(FlowNode),
   edges: z.array(FlowEdge),
+  /** Defaults for a new run using this preset. The operator can override them. */
+  runDefaults: z.object({
+    functionCount: z.number().int().min(1).max(5_000),
+    maxFunctionsPerWorker: z.number().int().min(1).max(5_000),
+    maxSizeBytes: z.number().int().positive().optional(),
+  }).optional(),
   updatedAt: z.number().optional(),
 });
 export type Flow = z.infer<typeof Flow>;

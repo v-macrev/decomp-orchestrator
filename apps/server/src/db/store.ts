@@ -405,6 +405,14 @@ export class Store {
     const runId = (this.db.prepare('SELECT run_id FROM pr_batches WHERE id = ?').get(id) as Raw | undefined)?.run_id as string | undefined;
     return runId ? (this.listBatches(runId).find((b) => b.id === id) ?? null) : null;
   }
+  unstageBatch(batch: NonNullable<ReturnType<Store['getBatch']>>, detail: unknown) {
+    this.tx(() => {
+      this.db.prepare("UPDATE pr_batches SET status = 'branch_deleted', branch = NULL, detail_json = ? WHERE id = ?")
+        .run(j(detail), batch.id);
+      const unstage = this.db.prepare("UPDATE tasks SET state = 'passed', updated_at = ? WHERE id = ? AND run_id = ? AND state = 'staged'");
+      for (const id of batch.taskIds) unstage.run(Date.now(), id, batch.runId);
+    });
+  }
   /** Rename a run and/or replace its config (already validated by the caller). */
   updateRun(id: string, patch: { name?: string; config?: RunConfig }) {
     return this.db.prepare('UPDATE runs SET name = COALESCE(@name, name), config_json = COALESCE(@config, config_json), updated_at = @now WHERE id = @id')

@@ -1,0 +1,106 @@
+{
+  "id": "bulk-500",
+  "name": "Bulk 500 functions",
+  "nodes": [
+    {
+      "id": "orchestrator",
+      "type": "orchestrator",
+      "position": { "x": 440, "y": -190 },
+      "data": {
+        "label": "Orchestrator",
+        "instances": 1,
+        "pool": { "strategy": "pool", "accountIds": [], "tags": ["orchestrator"], "effort": "medium" },
+        "maxAttempts": 6,
+        "stuckAfter": 3,
+        "gate": { "scope": true, "leak": true, "cheat": true, "integrity": true, "repoCompare": true, "repoPreflight": true, "llmReview": false },
+        "notes": "Routes packets by difficulty: easy → fast, medium → balanced, hard → frontier. Only used by an LLM tie-break when the run enables it.",
+        "stealDown": true
+      }
+    },
+    {
+      "id": "worker-fast",
+      "type": "worker",
+      "position": { "x": 800, "y": -20 },
+      "data": {
+        "label": "Workers · fast",
+        "instances": 3,
+        "pool": { "strategy": "pool", "accountIds": [], "tags": [], "capability": "fast" },
+        "maxAttempts": 4,
+        "stuckAfter": 2,
+        "gate": { "scope": true, "leak": true, "cheat": true, "integrity": true, "repoCompare": true, "repoPreflight": true, "llmReview": false },
+        "notes": "Most of a 500-function selection: readiness order puts small functions (<=64 B) first. Cheap models, short leash: escalate instead of burning attempts.",
+        "capability": "fast",
+        "costWeight": 1,
+        "stealDown": true
+      }
+    },
+    {
+      "id": "worker-balanced",
+      "type": "worker",
+      "position": { "x": 440, "y": -20 },
+      "data": {
+        "label": "Workers · balanced",
+        "instances": 2,
+        "pool": { "strategy": "pool", "accountIds": [], "tags": [], "capability": "balanced" },
+        "maxAttempts": 6,
+        "stuckAfter": 3,
+        "gate": { "scope": true, "leak": true, "cheat": true, "integrity": true, "repoCompare": true, "repoPreflight": true, "llmReview": false },
+        "notes": "Medium packets and everything the fast tier escalates; steals fast-tier backlog when idle.",
+        "capability": "balanced",
+        "costWeight": 4,
+        "stealDown": true
+      }
+    },
+    {
+      "id": "worker-frontier",
+      "type": "worker",
+      "position": { "x": 80, "y": -20 },
+      "data": {
+        "label": "Workers · frontier",
+        "instances": 1,
+        "pool": { "strategy": "pool", "accountIds": [], "tags": [], "capability": "frontier" },
+        "maxAttempts": 10,
+        "stuckAfter": 4,
+        "gate": { "scope": true, "leak": true, "cheat": true, "integrity": true, "repoCompare": true, "repoPreflight": true, "llmReview": false },
+        "notes": "Hard packets and the last escalation step. One dedicated slot; idle lower slots help up with frontier models at the tail of the run.",
+        "capability": "frontier",
+        "costWeight": 10,
+        "stealDown": true
+      }
+    },
+    {
+      "id": "gate",
+      "type": "gatekeeper",
+      "position": { "x": 440, "y": 340 },
+      "data": {
+        "label": "Gate Keeper",
+        "instances": 1,
+        "pool": { "strategy": "pool", "accountIds": [], "tags": [], "capability": "frontier" },
+        "maxAttempts": 6,
+        "stuckAfter": 3,
+        "gate": { "scope": true, "leak": true, "cheat": true, "integrity": true, "repoCompare": true, "repoPreflight": true, "llmReview": false },
+        "notes": "Deterministic checks only (scope, leakgrep, cheat, integrity, sr compare, preflight). Compare parallelism is the run's gate concurrency.",
+        "stealDown": true
+      }
+    }
+  ],
+  "edges": [
+    { "id": "e-dispatch-fast", "source": "orchestrator", "target": "worker-fast", "kind": "dispatch", "sourceHandle": "b", "targetHandle": "t", "difficulties": ["easy"] },
+    { "id": "e-dispatch-balanced", "source": "orchestrator", "target": "worker-balanced", "kind": "dispatch", "sourceHandle": "b", "targetHandle": "t", "difficulties": ["medium"] },
+    { "id": "e-dispatch-frontier", "source": "orchestrator", "target": "worker-frontier", "kind": "dispatch", "sourceHandle": "b", "targetHandle": "t", "difficulties": ["hard"] },
+    { "id": "e-escalate-fast-balanced", "source": "worker-fast", "target": "worker-balanced", "kind": "escalate", "sourceHandle": "l", "targetHandle": "r" },
+    { "id": "e-escalate-balanced-frontier", "source": "worker-balanced", "target": "worker-frontier", "kind": "escalate", "sourceHandle": "l", "targetHandle": "r" },
+    { "id": "e-submit-fast", "source": "worker-fast", "target": "gate", "kind": "submit", "sourceHandle": "b", "targetHandle": "t" },
+    { "id": "e-submit-balanced", "source": "worker-balanced", "target": "gate", "kind": "submit", "sourceHandle": "b", "targetHandle": "t" },
+    { "id": "e-submit-frontier", "source": "worker-frontier", "target": "gate", "kind": "submit", "sourceHandle": "b", "targetHandle": "t" },
+    { "id": "e-retry-fast", "source": "gate", "target": "worker-fast", "kind": "reject_retry", "sourceHandle": "t", "targetHandle": "b" },
+    { "id": "e-retry-balanced", "source": "gate", "target": "worker-balanced", "kind": "reject_retry", "sourceHandle": "t", "targetHandle": "b" },
+    { "id": "e-retry-frontier", "source": "gate", "target": "worker-frontier", "kind": "reject_retry", "sourceHandle": "t", "targetHandle": "b" },
+    { "id": "e-report", "source": "gate", "target": "orchestrator", "kind": "report", "sourceHandle": "b", "targetHandle": "t" }
+  ],
+  "runDefaults": {
+    "functionCount": 500,
+    "maxFunctionsPerWorker": 200,
+    "maxSizeBytes": 128
+  }
+}

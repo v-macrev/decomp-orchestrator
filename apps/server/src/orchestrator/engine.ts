@@ -23,7 +23,7 @@ import { NoEligibleAccountError, type AccountPool } from '../pool/scheduler.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { ProviderError, costUsd, type PromptBlock } from '../providers/types.js';
 import { TaskQueue, type StealSource, type TaskPatch } from '../queue/taskQueue.js';
-import type { DiscoveredFunction, RepoAdapter, PreparedTask } from '../repo/types.js';
+import type { DiscoveredFunction, RepoAdapter, PreparedTask, SubmitBatchInput } from '../repo/types.js';
 import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
 import { ContextBuilder } from './context.js';
@@ -122,6 +122,9 @@ export class RunEngine {
   afterRun: ((runId: string) => void) | null = null;
   /** Held by work that needs the worktree slots outside a run (shadow evaluation). */
   private exclusiveHolder: string | null = null;
+  private discovering: string | null = null;
+  private dryRuns = new Map<string, AbortController>();
+  private editingAttribution = new Set<string>();
   /** Runs that left `active` and are still staging: waitFor() resolves only once staging is over. */
   private finishing = new Map<string, Promise<void>>();
   private reaper: NodeJS.Timeout;
@@ -158,6 +161,8 @@ export class RunEngine {
   async start(runId: string): Promise<void> {
     const { store, events } = this.deps;
     if (this.active.has(runId)) return;
+    if (this.discovering === runId) return;
+    if (this.discovering) throw new Error('another run is already discovering its backlog');
     if (this.active.size > 0) throw new Error('another run is active; worktree slots are exclusive to one run at a time');
     if (this.exclusiveHolder) throw new Error(`worktree slots are busy (${this.exclusiveHolder}); start the run when it finishes`);
     const row = store.getRun(runId);
@@ -166,12 +171,16 @@ export class RunEngine {
     const plan = compileFlowPlan(row.flow);
 
     if (row.status === 'created' || row.status === 'discovering') {
+      this.discovering = runId;
       store.setRunStatus(runId, 'discovering');
       events.emit('run.discovering', `discovering backlog (${row.config.selection.source})`, { runId });
       try {
+        const selection = row.config.selection;
+        const exclude = store.rvasInFlight(runId);
         let found: DiscoveredFunction[];
-        if (row.config.selection.source === 'gather') {
-          const report = await this.gatherer.gather(row.config.selection.filter, { runId });
+        if (selection.source === 'gather') {
+          const report = await this.gatherer.gather(selection.filter, { runId });
+          if (store.getRun(runId)?.status === 'cancelled') return;
           store.putGathered(runId, report.functions);
           store.setRunJson(runId, 'gather_json', { ...report, functions: undefined });
           const ex = Object.entries(report.excluded).filter(([k, n]) => n && k !== 'matched').map(([k, n]) => `${n} ${k.replace('_', ' ')}`).join(', ');
@@ -179,19 +188,36 @@ export class RunEngine {
             runId, data: { selected: report.selected, excluded: report.excluded, withPack: report.withPackFeatures, withTable: report.withTableFacts },
           });
           found = report.functions;
-        } else found = await this.deps.repo.discover(row.config.selection);
+        } else found = await this.deps.repo.discover(selection, { exclude });
+        if (store.getRun(runId)?.status === 'cancelled') return;
         // Dead functions carried over from earlier runs join whatever the selection found.
         const carried = row.config.carry.rvas.filter((r) => !found.some((f) => f.rva === r.toLowerCase()));
         if (carried.length) {
-          const extra = await this.deps.repo.discover({ source: 'rva_list', rvas: carried });
-          found = [...found, ...extra.filter((e) => !found.some((f) => f.rva === e.rva))];
-          events.emit('run.carried', `carried over ${extra.length} dead function(s) from ${row.config.carry.fromRuns.length} earlier run(s)${extra.length < carried.length ? ` (${carried.length - extra.length} no longer in the backlog)` : ''}`, {
-            runId, data: { carried: extra.length, asked: carried.length, fromRuns: row.config.carry.fromRuns },
+          const extra = await this.deps.repo.discover({ source: 'rva_list', rvas: carried }, { exclude });
+          if (store.getRun(runId)?.status === 'cancelled') return;
+          // Give explicitly carried functions priority inside a capped repository selection.
+          const limit = selection.source === 'sr_next' ? selection.count : selection.source === 'gather' ? selection.filter.maxFunctions : Infinity;
+          const added = extra.filter((e) => !found.some((f) => f.rva === e.rva)).slice(0, limit);
+          found = Number.isFinite(limit) ? [...added, ...found].slice(0, limit) : [...found, ...added];
+          events.emit('run.carried', `carried over ${added.length} dead function(s) from ${row.config.carry.fromRuns.length} earlier run(s)`, {
+            runId, data: { carried: added.length, asked: carried.length, eligible: extra.length, fromRuns: row.config.carry.fromRuns },
           });
+        }
+        const requested = selection.source === 'gather' ? selection.filter.maxFunctions : selection.source === 'rva_list' ? new Set(selection.rvas.map((rva) => rva.toLowerCase())).size : selection.count;
+        if (found.length < requested) {
+          events.emit('run.selection_shortfall', `Found ${found.length} eligible functions out of ${requested} requested. This run will use the available functions.`, {
+            runId, level: 'warn', data: { selected: found.length, requested },
+          });
+        }
+        if (!found.length) {
+          store.setRunStatus(runId, 'completed', ['discovering']);
+          events.emit('run.completed', 'No eligible functions were available', { runId });
+          return;
         }
         const routing = row.config.routing;
         if (routing.enabled) {
           const packets = await this.classifier.plan(runId, found, row.config, plan);
+          if (store.getRun(runId)?.status === 'cancelled') return;
           const inserted = store.insertTasks(runId, packets.map((p) => ({ ...p, id: newId('task'), tier: tierFor(plan, p.difficulty) })));
           const by = (d: Difficulty) => packets.filter((p) => p.difficulty === d);
           const summary = DIFFICULTIES.map((d) => `${d} ${by(d).reduce((s, p) => s + p.functions.length, 0)} fn/${by(d).length} pk → ${plan.tiers[plan.route[d]]!.node.data.label || plan.tiers[plan.route[d]]!.node.id}`).join(' · ');
@@ -204,9 +230,12 @@ export class RunEngine {
           events.emit('run.enqueued', `${found.length} functions → ${packets.length} packets (${inserted} new)`, { runId, data: { functions: found.length, packets: packets.length } });
         }
       } catch (e) {
+        if (store.getRun(runId)?.status === 'cancelled') return;
         store.setRunStatus(runId, 'failed', undefined, { error: (e as Error).message });
         events.emit('run.failed', `discovery failed: ${(e as Error).message}`, { runId, level: 'error' });
         throw e;
+      } finally {
+        this.discovering = null;
       }
     }
     store.setRunStatus(runId, row.status === 'paused' ? 'paused' : 'running');
@@ -444,12 +473,13 @@ export class RunEngine {
   }
 
   /** Re-record each packet's claim and drafter (`sr claim`), with the finishing model and the run's current person. */
-  private async reclaim(runId: string, tasks: TaskRow[]) {
+  private async reclaim(runId: string, tasks: TaskRow[], signal?: AbortSignal) {
     const { store, repo, events } = this.deps;
     if (!repo.recordAttribution) return;
     const person = personOf(store.getRun(runId)?.config.draftedBy);
     const failed: string[] = [];
     for (const t of tasks) {
+      if (signal?.aborted) return;
       const model = finishingModel(store, t);
       if (!t.srTaskId || !model) continue;
       const r = await repo.recordAttribution({ task: t, srTaskId: t.srTaskId, model, draftedBy: draftedByText(person, [model]) }).catch((e) => ({ ok: false, problems: [String(e)] }));
@@ -487,6 +517,7 @@ export class RunEngine {
     const newPerson = patch.draftedBy?.replace(/\s+/g, ' ').trim();
     const renamed = newPerson && newPerson !== cfg.draftedBy;
     if (renamed) {
+      if (this.editingAttribution.has(runId) || this.exclusiveHolder?.includes(runId)) throw new Error('wait for the current batch or attribution operation before editing attribution');
       changes.push(`drafted by "${cfg.draftedBy}" → "${newPerson}"`);
       cfg.formerDraftedBy = [...new Set([...cfg.formerDraftedBy, cfg.draftedBy])].filter((x) => x !== newPerson);
       cfg.draftedBy = newPerson;
@@ -500,10 +531,25 @@ export class RunEngine {
     if (live) Object.assign(live.row, { ...(name ? { name } : {}), config });
     events.emit('run.edited', changes.join('; '), { runId, data: { changes } });
     if (renamed) {
+      for (const batch of store.listBatches(runId)) {
+        if (batch.status !== 'branch_ready') continue;
+        const detail = { ...(batch.detail as Record<string, unknown> | null) };
+        if (detail.dryRunFingerprint === undefined) continue;
+        delete detail.dryRunFingerprint;
+        delete detail.dryRunUncheckedClaims;
+        store.updateBatch(batch.id, { detail });
+      }
       // Claims and task drafters follow the new name now; held claims only (finished staging-off runs gave theirs back).
       const held = row.status === 'completed' && cfg.staging === 'off' ? ['staged'] : ['passed', 'staged'];
       const tasks = held.flatMap((s) => store.listTasks(runId, { state: s as TaskState, limit: 100_000 }));
-      if (tasks.length) void this.reclaim(runId, tasks);
+      if (tasks.length) {
+        this.editingAttribution.add(runId);
+        try {
+          await this.reclaim(runId, tasks);
+        } finally {
+          this.editingAttribution.delete(runId);
+        }
+      }
     }
     return store.getRun(runId)!;
   }
@@ -512,45 +558,109 @@ export class RunEngine {
    * Delete a run that is not loaded, with everything recorded under it. Local claims it still holds
    * go back, except functions in a submitted PR and functions another run is working on.
    */
-  async deleteRun(runId: string): Promise<{ released: number }> {
+  async deleteRun(runId: string) {
     const { store, events, repo } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
     if (this.active.has(runId) || this.finishing.has(runId) || this.exclusiveHolder?.includes(runId)) throw new Error('the run is loaded or staging: cancel it (or wait) before deleting it');
+    if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish before deleting the run');
     if (['running', 'discovering'].includes(row.status)) throw new Error(`run is ${row.status}: cancel it before deleting it`);
-    const submitted = new Set(store.listBatches(runId).filter((b) => b.status === 'submitted').flatMap((b) => b.taskIds));
-    const elsewhere = store.rvasInFlight(runId);
-    const rvas = [...new Set(store.listTasks(runId, { limit: 100_000 }).filter((t) => t.srTaskId && !submitted.has(t.id)).flatMap((t) => t.functions.map((f) => f.rva)))].filter((r) => !elsewhere.has(r));
-    let released = 0;
-    if (rvas.length && repo.releaseClaims) {
-      const res = await repo.releaseClaims(rvas, 'decomp-orchestrator: run deleted').catch(() => []);
-      released = res.filter((r) => r.ok).length;
+    if (store.db.prepare("SELECT 1 FROM runs WHERE status = 'discovering' LIMIT 1").get()) throw new Error('wait for discovery to finish before deleting a run');
+    return this.exclusive(`deleting ${runId}`, async () => {
+      const submitted = new Set(store.listBatches(runId).filter((b) => b.status === 'submitted').flatMap((b) => b.taskIds));
+      const elsewhere = store.rvasInFlight(runId);
+      const tasks = store.listTasks(runId, { limit: 100_000 });
+      for (const task of tasks) {
+        if (submitted.has(task.id)) for (const fn of task.functions) elsewhere.add(fn.rva);
+      }
+      const rvas = [...new Set(tasks.filter((t) => t.srTaskId).flatMap((t) => t.functions.map((f) => f.rva)))].filter((r) => !elsewhere.has(r));
+      let released = 0;
+      if (rvas.length && repo.releaseClaims) {
+        // sr release is idempotent, including when a previous deletion attempt released the claim.
+        const results = await repo.releaseClaims(rvas, 'decomp-orchestrator: run deleted')
+          .catch((e) => rvas.map((rva) => ({ rva, ok: false, error: String(e) })));
+        const byRva = new Map(results.map((result) => [result.rva, result]));
+        const failed = rvas.flatMap((rva) => {
+          const result = byRva.get(rva);
+          return result?.ok ? [] : [{ rva, error: result?.error || 'Claim release did not report success' }];
+        });
+        released = rvas.length - failed.length;
+        if (failed.length) {
+          events.emit('run.delete_claims_failed', `could not release ${failed.length} local claim(s); run kept`, { runId, level: 'warn', data: { released, failed } });
+          return { ok: false as const, released, failed };
+        }
+      }
+      store.deleteRun(runId);
+      events.emit('run.deleted', `deleted run "${row.name}" (${runId}); ${released} local claim(s) released${submitted.size ? '; claims in submitted PRs kept' : ''}`, { level: 'warn', data: { runId, released } });
+      return { ok: true as const, released };
+    });
+  }
+
+  listBatches(runId: string) {
+    return this.deps.store.listBatches(runId).map((batch) => {
+      const dryRun = this.dryRuns.get(batch.id);
+      return { ...batch, dryRunState: dryRun ? (dryRun.signal.aborted ? 'cancelling' : 'running') : null };
+    });
+  }
+
+  cancelBatchDryRun(runId: string, batchId: string) {
+    const batch = this.deps.store.getBatch(batchId);
+    const dryRun = this.dryRuns.get(batchId);
+    if (batch?.runId !== runId || !dryRun) throw new Error('this batch has no running dry run');
+    dryRun.abort();
+  }
+
+  async clearBatchBranches(runId: string, batchId: string, scope: 'preview' | 'batch') {
+    const { store, repo, events } = this.deps;
+    const batch = store.getBatch(batchId);
+    if (!batch || batch.runId !== runId) throw new Error('batch not found');
+    const detail = { ...(batch.detail as { lastSubmit?: { dryRun: boolean; submissionStarted?: boolean }; dryRunFingerprint?: string; dryRunUncheckedClaims?: string[]; pr?: string; link?: string } | null) };
+    const realAttempt = detail.lastSubmit?.dryRun === false && detail.lastSubmit.submissionStarted !== false;
+    if (batch.status !== 'branch_ready' || detail.pr || detail.link || realAttempt) {
+      throw new Error('only unsubmitted batches can be cleared here');
     }
-    store.deleteRun(runId);
-    events.emit('run.deleted', `deleted run "${row.name}" (${runId}); ${released} local claim(s) released${submitted.size ? '; claims in submitted PRs kept' : ''}`, { level: 'warn', data: { runId, released } });
-    return { released };
+    if (!repo.deleteBatchBranch) throw new Error('this repository adapter does not manage local batch branches');
+    const branch = `decomp/${runId}-b${batch.seq}`;
+    if (batch.branch !== branch) throw new Error('the batch does not own the expected local branch');
+    return this.exclusive(`clearing ${runId} b${batch.seq}`, async () => {
+      const deleted: string[] = [];
+      const preview = `${branch}-pr`;
+      if (await repo.deleteBatchBranch!(preview)) deleted.push(preview);
+      delete detail.lastSubmit;
+      delete detail.dryRunFingerprint;
+      delete detail.dryRunUncheckedClaims;
+      store.updateBatch(batchId, { detail });
+      if (scope === 'batch') {
+        if (await repo.deleteBatchBranch!(branch)) deleted.push(branch);
+        store.unstageBatch(batch, detail);
+      }
+      events.emit(scope === 'batch' ? 'batch.branch_deleted' : 'batch.dry_run_cleared', `batch ${batch.seq}: ${scope === 'batch' ? 'staged branch cleared' : 'dry run cleared'}`, { runId, data: { deleted } });
+      return { deleted };
+    });
   }
 
   /**
    * Open the pull request for one staged batch with `sr submit` (dryRun: `sr submit --dry-run`, which
    * commits and pushes nothing for the PR). Only ever on the operator's explicit request.
    */
-  async submitBatch(runId: string, batchId: string, opts: { dryRun: boolean }) {
+  async submitBatch(runId: string, batchId: string, opts: { dryRun: boolean; allowUncheckedClaims?: boolean }) {
     const { store, events, repo } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
     if (row.status !== 'completed') throw new Error(`run is ${row.status}; submit once it has completed`);
+    if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish before submitting');
     const batch = store.getBatch(batchId);
     if (!batch || batch.runId !== runId) throw new Error('batch not found');
-    const prior = batch.detail as unknown as Record<string, unknown> | null;
-    if (batch.status === 'submitted' && !opts.dryRun) throw new Error(`batch ${batch.seq} is already submitted${prior?.pr ? `: ${String(prior.pr)}` : ''}`);
-    if (!['branch_ready', 'submitted'].includes(batch.status)) throw new Error(`batch ${batch.seq} is ${batch.status}: only a re-verified batch can be submitted`);
+    const prior = { ...(batch.detail as Record<string, unknown> | null) };
+    if (batch.status === 'submitted') throw new Error(`batch ${batch.seq} is already submitted${prior?.pr ? `: ${String(prior.pr)}` : ''}`);
+    if (batch.status !== 'branch_ready') throw new Error(`batch ${batch.seq} is ${batch.status}: only a re-verified batch can be submitted`);
     if (!repo.submitBatch) throw new Error('this repository adapter cannot submit pull requests');
     const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
-    if (tasks.length !== batch.taskIds.length || tasks.some((t) => t.state !== 'staged')) throw new Error('every packet of the batch must still be staged');
+    if (!tasks.length || tasks.length !== batch.taskIds.length || tasks.some((t) => t.state !== 'staged')) throw new Error('every packet of the batch must still be staged');
     const label = `${opts.dryRun ? 'dry-run submitting' : 'submitting'} ${runId} b${batch.seq}`;
+    const dryRun = opts.dryRun ? new AbortController() : undefined;
     return this.exclusive(label, async () => {
-      await this.reclaim(runId, tasks);
+      if (dryRun) this.dryRuns.set(batchId, dryRun);
       // Units in a stable order; the last unit's task is the one `sr submit` runs on.
       const ordered = [...tasks].sort((a, b) => a.unit.localeCompare(b.unit));
       const lastUnit = ordered.at(-1)!.unit;
@@ -573,27 +683,74 @@ export class RunEngine {
           ].join('\n')
         : null;
       const branch = `decomp/${runId}-b${batch.seq}-pr`;
-      const r = await repo.submitBatch!({
+      const input: SubmitBatchInput = {
         runId, seq: batch.seq, branch, files: all.files,
         tasks: sequence.map((t) => ({ id: t.id, srTaskId: t.srTaskId, functions: t.functions, task: t })),
-        message, draftedBy: all.draftedBy ?? (all.person ?? 'not stated'), title, extraBody, dryRun: opts.dryRun,
-      });
-      const detail = { ...prior, lastSubmit: { at: Date.now(), dryRun: opts.dryRun, ok: r.ok, problems: r.problems, blockers: r.blockers, warnings: r.warnings, plan: r.plan, error: r.error, branch } };
+        message, draftedBy: all.draftedBy ?? (all.person ?? 'not stated'), title, extraBody, dryRun: opts.dryRun, signal: dryRun?.signal,
+        allowUncheckedClaims: !opts.dryRun && opts.allowUncheckedClaims === true,
+      };
+      // Hash the exact inputs to the rebuild, including the pinned base and accepted task versions.
+      const fingerprint = createHash('sha256').update(JSON.stringify({
+        base: repo.baseSha ?? null, batchId, stagedBranch: batch.branch, branch,
+        files: input.files, message, draftedBy: input.draftedBy, title, extraBody,
+        tasks: sequence.map((t) => [t.id, t.srTaskId, t.unit, t.functions, t.lastVerdictId]),
+      })).digest('hex');
+      // Server-side prerequisite: a real submission needs a dry run of exactly this batch state.
+      // Any change (files, tasks, verdicts, attribution, title, pinned base) changes the fingerprint.
+      if (!opts.dryRun && prior.dryRunFingerprint !== fingerprint) {
+        if (prior.dryRunFingerprint !== undefined) {
+          delete prior.dryRunFingerprint;
+          delete prior.dryRunUncheckedClaims;
+          store.updateBatch(batchId, { detail: prior });
+        }
+        throw new Error('Run a clean dry run for the current batch before submitting');
+      }
+      // A dry run whose claims probes could not all run only allows a real submission that the
+      // operator explicitly accepts as unchecked (the real submission probes again either way).
+      const acceptedUnchecked = (prior.dryRunUncheckedClaims as string[] | undefined) ?? [];
+      if (!opts.dryRun && acceptedUnchecked.length && !input.allowUncheckedClaims) {
+        throw new Error(`The last dry run could not check claims for ${acceptedUnchecked.length} task(s): run the dry run again, or explicitly accept an unchecked batch`);
+      }
+      // The prerequisite is spent by this attempt; only the outcomes below can grant it again.
+      delete prior.dryRunFingerprint;
+      delete prior.dryRunUncheckedClaims;
+      store.updateBatch(batchId, { detail: prior });
+      await this.reclaim(runId, tasks, dryRun?.signal);
+      const result = await repo.submitBatch!(input);
+      const r = dryRun?.signal.aborted ? { ...result, ok: false, cancelled: true, problems: [], blockers: [], uncheckedClaims: [], warnings: [], plan: [], error: null } : result;
+      const onlyUnchecked = !r.cancelled && !r.blockers.length && !r.problems.length && !!r.uncheckedClaims?.length && r.submissionStarted !== true;
+      if (opts.dryRun && !r.cancelled && !r.blockers.length && !r.problems.length && (r.ok || onlyUnchecked)) {
+        prior.dryRunFingerprint = fingerprint;
+        if (onlyUnchecked) prior.dryRunUncheckedClaims = r.uncheckedClaims;
+      }
+      // A real submission refused only because claims could not be checked can be retried, with
+      // the operator's explicit acceptance; anything else found wrong needs a new dry run.
+      if (!opts.dryRun && !r.ok && onlyUnchecked) {
+        prior.dryRunFingerprint = fingerprint;
+        prior.dryRunUncheckedClaims = r.uncheckedClaims;
+      }
+      const detail = { ...prior, lastSubmit: {
+        at: Date.now(), dryRun: opts.dryRun, ok: r.ok, cancelled: r.cancelled ?? false, problems: r.problems, blockers: r.blockers,
+        uncheckedClaims: r.uncheckedClaims ?? [], allowUncheckedClaims: input.allowUncheckedClaims, submissionStarted: r.submissionStarted,
+        warnings: r.warnings, plan: r.plan, error: r.error, branch,
+      } };
       if (r.ok && !opts.dryRun) {
         store.updateBatch(batchId, { status: 'submitted', detail: { ...detail, pr: r.pullRequest, link: r.link, prBranch: branch, submittedAt: Date.now() } });
-        events.emit('batch.submitted', `batch ${batch.seq}: ${all.fnCount} functions submitted → ${r.pullRequest ?? r.link ?? branch}`, { runId, data: { pr: r.pullRequest, link: r.link, branch } });
+        events.emit('batch.submitted', `batch ${batch.seq}: ${all.fnCount} functions submitted → ${r.pullRequest ?? r.link ?? branch}`, { runId, data: { pr: r.pullRequest, link: r.link, branch, uncheckedClaims: r.uncheckedClaims ?? [], allowUncheckedClaims: input.allowUncheckedClaims } });
       } else {
         store.updateBatch(batchId, { detail });
         const why = r.problems.length ? `re-verification: ${r.problems.join('; ')}` : r.blockers.length ? `sr submit blockers: ${r.blockers.join('; ')}` : (r.error ?? '');
-        events.emit(opts.dryRun ? 'batch.submit_dry_run' : 'batch.submit_failed', `batch ${batch.seq}: ${opts.dryRun ? `dry run ${r.ok ? 'clean' : 'found problems'}` : 'NOT submitted'}${why ? ` — ${why}` : ''}`, { runId, level: r.ok ? 'info' : 'warn', data: { blockers: r.blockers, problems: r.problems } });
+        events.emit(opts.dryRun ? 'batch.submit_dry_run' : 'batch.submit_failed', `batch ${batch.seq}: ${opts.dryRun ? `dry run ${r.cancelled ? 'cancelled' : r.ok ? 'clean' : 'found problems'}` : 'NOT submitted'}${why ? ` — ${why}` : ''}`, { runId, level: r.ok ? 'info' : 'warn', data: { blockers: r.blockers, problems: r.problems } });
       }
       return r;
+    }).finally(() => {
+      if (dryRun && this.dryRuns.get(batchId) === dryRun) this.dryRuns.delete(batchId);
     });
   }
 
   /** Run `fn` with exclusive use of the worktree slots (refused while a run is active). */
   async exclusive<T>(label: string, fn: () => Promise<T>): Promise<T> {
-    if (this.active.size) throw new Error('a run is active; shadow evaluation uses the worktree slots and runs between runs');
+    if (this.active.size || this.discovering) throw new Error('a run is active; wait for it to finish before using the worktree slots');
     if (this.exclusiveHolder) throw new Error(`worktree slots are busy (${this.exclusiveHolder})`);
     this.exclusiveHolder = label;
     try {
@@ -604,7 +761,7 @@ export class RunEngine {
   }
 
   isIdle() {
-    return this.active.size === 0 && this.exclusiveHolder === null;
+    return this.active.size === 0 && this.discovering === null && this.exclusiveHolder === null;
   }
 
   /** The run's frozen skill view (snapshot persisted on first start, reused on resume). */
@@ -829,6 +986,7 @@ export class RunEngine {
         if (e instanceof AbortedError || signal.aborted) throw e;
         return this.infraFailure(run, task, leaseId, `prepare failed: ${(e as Error).message}`);
       }
+      if (prepared.srTaskId && !this.queue.transition(task.id, leaseId, ['leased'], 'leased', { srTaskId: prepared.srTaskId })) return;
 
       // 1b. late classification: prepare just produced the local packs — refine size-only estimates
       const routing = cfg.routing;
@@ -1003,7 +1161,7 @@ export class RunEngine {
       this.route(run, task, leaseId, attempt, gate.verdict, { infra: gate.infra, strike: gate.strike }, tierIdx, prepared.srTaskId);
       if (gate.verdict.decision === 'pass' && prepared.srTaskId && repo.recordAttribution && store.getTask(task.id)?.lastVerdictId === gate.verdict.id) {
         const draftedBy = draftedByText(personOf(cfg.draftedBy), [lease.model.id]);
-        const r = await repo.recordAttribution({ task, srTaskId: prepared.srTaskId, model: lease.model.id, draftedBy }).catch((e: Error) => ({ ok: false, problems: [e.message] }));
+        const r = await repo.recordAttribution({ task, srTaskId: prepared.srTaskId, model: lease.model.id, draftedBy, slot }).catch((e: Error) => ({ ok: false, problems: [e.message] }));
         ev(r.ok ? 'task.attributed' : 'task.attribution_failed', r.ok ? `claim and task attributed to ${lease.model.id} (drafted by ${draftedBy})` : `could not record ${lease.model.id} as the finishing model: ${r.problems.join('; ').slice(0, 300)}`, r.ok ? 'debug' : 'warn', { model: lease.model.id });
       }
       return;

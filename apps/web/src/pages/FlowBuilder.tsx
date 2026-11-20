@@ -104,10 +104,11 @@ function styledEdge(e: RFEdge): RFEdge {
   };
 }
 
-function fromRF(base: Pick<Flow, 'id' | 'name'>, nodes: RFNode[], edges: RFEdge[]): Flow {
+type FlowMetadata = Pick<Flow, 'id' | 'name' | 'runDefaults'>;
+
+function fromRF(base: FlowMetadata, nodes: RFNode[], edges: RFEdge[]): Flow {
   return {
-    id: base.id,
-    name: base.name,
+    ...base,
     nodes: nodes.map(({ id, position, data }) => {
       const { role, ...rest } = data;
       return { id, type: role, position: { x: Math.round(position.x), y: Math.round(position.y) }, data: rest };
@@ -147,7 +148,7 @@ function newNode(role: Role, position: { x: number; y: number }): RFNode {
 
 function Builder() {
   const [flows, setFlows] = useState<Flow[]>([]);
-  const [meta, setMeta] = useState<{ id: string; name: string }>({ id: 'default', name: 'Default' });
+  const [meta, setMeta] = useState<FlowMetadata>({ id: 'default', name: 'Default' });
   const [nodes, setNodes, onNodesChange] = useNodesState<RFNode>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<RFEdge>([]);
   const [selected, setSelected] = useState<{ node?: string; edge?: string }>({});
@@ -167,7 +168,7 @@ function Builder() {
     setCanvasKey((k) => k + 1);
     setNodes(n);
     setEdges(e);
-    setMeta({ id: f.id, name: f.name });
+    setMeta({ id: f.id, name: f.name, runDefaults: f.runDefaults });
     setSelected({});
     setTimeout(() => rf.fitView({ padding: 0.2 }), 30);
   }, [rf, setEdges, setNodes]);
@@ -289,7 +290,7 @@ function Builder() {
     const id = asNew || !saved ? uniqueId(name, new Set(flows.map((f) => f.id))) : meta.id;
     try {
       const r = await api.saveFlow({ ...current, id, name });
-      setMeta({ id: r.flow.id, name: r.flow.name });
+      setMeta({ id: r.flow.id, name: r.flow.name, runDefaults: r.flow.runDefaults });
       setFlows(await api.flows());
       const errs = r.issues.filter((i) => i.level === 'error').length;
       setStatus(errs ? `saved "${r.flow.name}" as a draft with ${errs} error(s) — fix them before running it` : `saved "${r.flow.name}"`);
@@ -353,7 +354,7 @@ function Builder() {
           <button className="primary" onClick={() => save(false)} title={saved ? 'Update this preset' : 'Save as a new preset'}>{saved ? 'Save' : 'Save new'}</button>
           {saved && <button onClick={() => save(true)} title="Save a copy under the name in the field">Save as copy</button>}
           <button onClick={newFlow}>New flow</button>
-          <button onClick={() => load({ ...defaultFlow(), id: meta.id, name: meta.name })} title="Replace the canvas with the default ladder (not saved until you click Save)">Load template</button>
+          <button onClick={() => load({ ...defaultFlow(), ...meta })} title="Replace the canvas with the default ladder (not saved until you click Save)">Load template</button>
           {saved && (
             <ConfirmButton onConfirm={async () => { await api.deleteFlow(meta.id); const fs = await api.flows(); setFlows(fs); load(fs[0] ?? defaultFlow()); setStatus(`deleted "${meta.name}"`); }} confirmLabel={`Delete "${meta.name}"?`}>
               Delete

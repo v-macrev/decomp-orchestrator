@@ -327,6 +327,28 @@ describe('editing and deleting runs', () => {
     }
     expect(s.store.getRun(keep.id)).not.toBeNull();
   }, 60_000);
+
+  it('keeps a run on partial claim cleanup and permits retrying deletion', async () => {
+    const s = setup();
+    const run = createRun(s, 'delete with claims', 6, 8);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    s.store.db.prepare("UPDATE tasks SET sr_task_id = 'claim-test' WHERE run_id = ?").run(run.id);
+    let fail = true;
+    (s.repo as RepoAdapter).releaseClaims = async (rvas) => rvas.map((rva, index) => (
+      fail && index === 0 ? { rva, ok: false, error: 'claim file locked' } : { rva, ok: true, error: null }
+    ));
+
+    const first = await s.engine.deleteRun(run.id);
+    expect(first).toMatchObject({ ok: false, failed: [{ rva: expect.any(String), error: 'claim file locked' }] });
+    expect(first.released).toBeGreaterThan(0);
+    expect(s.store.getRun(run.id)).not.toBeNull();
+    expect(s.store.listTasks(run.id).length).toBeGreaterThan(0);
+
+    fail = false;
+    expect(await s.engine.deleteRun(run.id)).toMatchObject({ ok: true });
+    expect(s.store.getRun(run.id)).toBeNull();
+  }, 60_000);
 });
 
 describe('carrying failed functions into a new run', () => {
@@ -362,9 +384,14 @@ describe('submitting a staged batch', () => {
     const inputs: SubmitBatchInput[] = [];
     (s.repo as RepoAdapter).submitBatch = async (input): Promise<SubmitBatchResult> => {
       inputs.push(input);
+      if (!input.dryRun && !input.allowUncheckedClaims) {
+        return { ok: false, dryRun: false, submissionStarted: false, uncheckedClaims: ['one probe timed out'], problems: [], blockers: [], warnings: [], plan: [], pullRequest: null, link: null, error: 'Claims checks could not be completed' };
+      }
       return { ok: true, dryRun: input.dryRun, problems: [], blockers: [], warnings: [], plan: input.dryRun ? ['would run: git push'] : [], pullRequest: input.dryRun ? null : 'https://github.com/o/r/pull/1', link: null, error: null };
     };
 
+    await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: false, allowUncheckedClaims: true })).rejects.toThrow(/clean dry run/);
+    expect(inputs).toHaveLength(0);
     const dry = await s.engine.submitBatch(run.id, batch.id, { dryRun: true });
     expect(dry.ok).toBe(true);
     expect(s.store.getBatch(batch.id)!.status).toBe('branch_ready');
@@ -378,12 +405,64 @@ describe('submitting a staged batch', () => {
       expect(input.message).not.toContain(input.tasks.at(-1)!.functions[0]!.rva);
     }
 
-    const real = await s.engine.submitBatch(run.id, batch.id, { dryRun: false });
+    await s.engine.updateRun(run.id, { draftedBy: 'another drafter' });
+    await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: false })).rejects.toThrow(/clean dry run/);
+    expect(inputs).toHaveLength(1);
+    await s.engine.submitBatch(run.id, batch.id, { dryRun: true });
+    const acceptedTask = s.store.getTask(batch.taskIds[0]!)!;
+    s.store.db.prepare("UPDATE tasks SET sr_task_id = 'changed' WHERE id = ?").run(acceptedTask.id);
+    await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: false })).rejects.toThrow(/clean dry run/);
+    s.store.db.prepare('UPDATE tasks SET sr_task_id = ? WHERE id = ?').run(acceptedTask.srTaskId, acceptedTask.id);
+    await s.engine.submitBatch(run.id, batch.id, { dryRun: true });
+    expect(await s.engine.submitBatch(run.id, batch.id, { dryRun: false })).toMatchObject({ ok: false, uncheckedClaims: ['one probe timed out'] });
+    const real = await s.engine.submitBatch(run.id, batch.id, { dryRun: false, allowUncheckedClaims: true });
     expect(real.pullRequest).toBe('https://github.com/o/r/pull/1');
     const after = s.store.getBatch(batch.id)!;
     expect(after.status).toBe('submitted');
     expect((after.detail as unknown as { pr: string }).pr).toBe('https://github.com/o/r/pull/1');
     await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: false })).rejects.toThrow(/already submitted/);
+  }, 60_000);
+
+  it('lets a dry run with unchecked claims through only with explicit acceptance, and re-arms only for unchecked claims', async () => {
+    const s = setup();
+    const run = createRun(s, 'unchecked', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = s.store.listBatches(run.id).find((b) => b.status === 'branch_ready')!;
+    const inputs: SubmitBatchInput[] = [];
+    let mode: 'unchecked' | 'problems' | 'ok' = 'unchecked';
+    (s.repo as RepoAdapter).submitBatch = async (input): Promise<SubmitBatchResult> => {
+      inputs.push(input);
+      const base = { dryRun: input.dryRun, warnings: [], plan: [], pullRequest: null, link: null };
+      if (mode === 'problems') return { ...base, ok: false, submissionStarted: false, problems: ['t1: compile error'], blockers: [], error: null };
+      if (mode === 'unchecked' && (input.dryRun || !input.allowUncheckedClaims)) {
+        return { ...base, ok: false, submissionStarted: false, uncheckedClaims: ['t1: claims check timed out'], problems: [], blockers: [], error: 'Claims checks could not be completed for the entire batch' };
+      }
+      return { ...base, ok: true, submissionStarted: !input.dryRun, problems: [], blockers: [], error: null, pullRequest: input.dryRun ? null : 'https://github.com/o/r/pull/2' };
+    };
+    const detail = () => s.store.getBatch(batch.id)!.detail as unknown as { dryRunFingerprint?: string; dryRunUncheckedClaims?: string[] };
+
+    // The dry run could not check one task's claims: the prerequisite is held, marked unchecked.
+    expect(await s.engine.submitBatch(run.id, batch.id, { dryRun: true })).toMatchObject({ ok: false, uncheckedClaims: ['t1: claims check timed out'] });
+    expect(detail()).toMatchObject({ dryRunFingerprint: expect.any(String), dryRunUncheckedClaims: ['t1: claims check timed out'] });
+    // A plain submission is refused before anything runs; the prerequisite survives the refusal.
+    await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: false })).rejects.toThrow(/explicitly accept/);
+    expect(inputs).toHaveLength(1);
+    expect(detail().dryRunFingerprint).toBeTruthy();
+
+    // A real attempt that re-verifies with problems spends the prerequisite: a new dry run is needed.
+    mode = 'problems';
+    expect(await s.engine.submitBatch(run.id, batch.id, { dryRun: false, allowUncheckedClaims: true })).toMatchObject({ ok: false });
+    expect(detail().dryRunFingerprint).toBeUndefined();
+    await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: false, allowUncheckedClaims: true })).rejects.toThrow(/clean dry run/);
+
+    // Unchecked again; the operator accepts it explicitly and the submission goes through.
+    mode = 'unchecked';
+    await s.engine.submitBatch(run.id, batch.id, { dryRun: true });
+    const real = await s.engine.submitBatch(run.id, batch.id, { dryRun: false, allowUncheckedClaims: true });
+    expect(real).toMatchObject({ ok: true, pullRequest: 'https://github.com/o/r/pull/2' });
+    expect(inputs.at(-1)).toMatchObject({ dryRun: false, allowUncheckedClaims: true });
+    expect(s.store.getBatch(batch.id)!.status).toBe('submitted');
   }, 60_000);
 
   it('refuses a batch whose re-verification failed, and adapters that cannot submit', async () => {
