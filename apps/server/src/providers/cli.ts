@@ -13,32 +13,55 @@ import { ProviderError, type CompletionRequest, type CompletionResponse, type Pr
 const resolved = new Map<string, string>();
 
 /**
- * Windows: a bare command name cannot be spawned without a shell when it is an npm `.cmd` shim
- * (Node refuses to spawn .cmd/.bat directly). Resolve it to a real executable: `<name>.exe` on PATH,
- * or the `.exe` an npm shim launches (`"%dp0%\node_modules\...\claude.exe"`). Elsewhere: unchanged.
+ * Folders searched for a CLI on Windows: PATH first, then the standard per-user install folders
+ * (npm's global prefix, the native installer's ~/.local/bin). The server is often started from a
+ * shell whose PATH lacks %APPDATA%\npm (another tool's terminal, a service, a scheduled task),
+ * which made `claude` unspawnable for every Claude Code account while it worked in a terminal.
  */
-export function resolveCliBinary(name: string): string {
+export function cliSearchDirs(env: NodeJS.ProcessEnv = process.env): string[] {
+  const path = (env.PATH ?? env.Path ?? '').split(';').map((d) => d.trim().replace(/^"|"$/g, '')).filter(Boolean);
+  const home = env.USERPROFILE;
+  const extra = [
+    env.APPDATA && join(env.APPDATA, 'npm'),
+    home && join(home, '.local', 'bin'),
+    env.LOCALAPPDATA && join(env.LOCALAPPDATA, 'Microsoft', 'WinGet', 'Links'),
+  ].filter((d): d is string => !!d);
+  const seen = new Set<string>();
+  return [...path, ...extra].filter((d) => {
+    const k = d.toLowerCase().replace(/[\\/]+$/, '');
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+}
+
+/**
+ * Windows: a bare command name cannot be spawned without a shell when it is an npm `.cmd` shim
+ * (Node refuses to spawn .cmd/.bat directly). Resolve it to a real executable: `<name>.exe` in the
+ * search folders, or the `.exe` an npm shim launches (`"%dp0%\node_modules\...\claude.exe"`).
+ * A miss is not cached, so installing the CLI needs no server restart. Elsewhere: unchanged.
+ */
+export function resolveCliBinary(name: string, env: NodeJS.ProcessEnv = process.env): string {
   if (process.platform !== 'win32' || isAbsolute(name) || /[\\/]/.test(name)) return name;
   const hit = resolved.get(name);
-  if (hit) return hit;
-  let out = name;
-  for (const dir of (process.env.PATH ?? process.env.Path ?? '').split(';').filter(Boolean)) {
+  if (hit && existsSync(hit)) return hit;
+  for (const dir of cliSearchDirs(env)) {
     const exe = join(dir, `${name}.exe`);
     if (existsSync(exe)) {
-      out = exe;
-      break;
+      resolved.set(name, exe);
+      return exe;
     }
     const cmd = join(dir, `${name}.cmd`);
     if (existsSync(cmd)) {
       const m = /"%dp0%\\([^"]+\.exe)"/i.exec(readFileSync(cmd, 'utf8'));
       if (m && existsSync(join(dir, m[1]!))) {
-        out = join(dir, m[1]!);
-        break;
+        resolved.set(name, join(dir, m[1]!));
+        return join(dir, m[1]!);
       }
     }
   }
-  resolved.set(name, out);
-  return out;
+  resolved.delete(name);
+  return name;
 }
 
 /**
@@ -68,7 +91,7 @@ export function classifyCliFailure(text: string, timedOut: boolean, aborted: boo
   const t = text.toLowerCase();
   if (aborted) return new ProviderError('aborted', 'aborted');
   // A missing binary is configuration, not a provider fault: do not retry it as a server error.
-  if (/spawn error|enoent|is not recognized as an internal or external command/.test(t)) return new ProviderError('auth', `CLI binary not found: ${text.trim().slice(0, 160)}`);
+  if (/spawn error|enoent|is not recognized as an internal or external command/.test(t)) return new ProviderError('auth', `CLI binary not found: ${text.trim().slice(0, 160)}. Install the CLI, or set the account's auth.binary to the full path of its .exe`);
   if (timedOut) return new ProviderError('timeout', 'cli timed out');
   // Subscription limits ("You've hit your weekly limit · resets 3am (America/Sao_Paulo)") last until
   // the stated reset — retrying every few minutes as for a 429 just burns attempts.
