@@ -201,11 +201,35 @@ export interface Batch {
   status: string;
   taskIds: string[];
   branch: string | null;
-  detail: { functions?: number; problems?: string[] } | null;
+  detail: {
+    functions?: number; problems?: string[]; draftedBy?: string | null; models?: string[];
+    pr?: string | null; link?: string | null; prBranch?: string; submittedAt?: number;
+    lastSubmit?: { at: number; dryRun: boolean; ok: boolean; problems: string[]; blockers: string[]; warnings: string[]; plan: string[]; error: string | null; branch: string };
+  } | null;
+}
+
+export interface SubmitResult {
+  ok: boolean;
+  dryRun: boolean;
+  problems: string[];
+  blockers: string[];
+  warnings: string[];
+  plan: string[];
+  pullRequest: string | null;
+  link: string | null;
+  error: string | null;
+}
+
+export interface RunEdit {
+  name?: string;
+  draftedBy?: string;
+  budgetUsd?: number | null;
+  prBatchSize?: number;
+  staging?: 'branches' | 'off';
 }
 
 export const api = {
-  health: () => req<{ ok: boolean; mode: string; repo: string; slots: number }>('GET', '/api/health'),
+  health: () => req<{ ok: boolean; mode: string; repo: string; slots: number; runDefaults?: { draftedBy?: string } }>('GET', '/api/health'),
   accounts: () => req<Account[]>('GET', '/api/accounts'),
   accountRuntime: () => req<AccountView[]>('GET', '/api/accounts/runtime'),
   saveAccount: (a: Account) => req<Account>('PUT', `/api/accounts/${encodeURIComponent(a.id)}`, a),
@@ -226,6 +250,10 @@ export const api = {
   runAction: (id: string, action: 'pause' | 'resume' | 'cancel', body?: unknown) => req('POST', `/api/runs/${id}/${action}`, body ?? {}),
   tasks: (id: string, state?: string, offset = 0) => req<Task[]>('GET', `/api/runs/${id}/tasks?limit=200&offset=${offset}${state ? `&state=${state}` : ''}`),
   batches: (id: string) => req<Batch[]>('GET', `/api/runs/${id}/batches`),
+  updateRun: (id: string, patch: RunEdit) => req<RunSummary>('PATCH', `/api/runs/${id}`, patch),
+  deleteRun: (id: string) => req<{ ok: boolean; released: number }>('DELETE', `/api/runs/${id}`),
+  stageRun: (id: string) => req<{ ok: boolean; staged: number; failed: number }>('POST', `/api/runs/${id}/stage`, {}),
+  submitBatch: (id: string, batchId: string, real: boolean) => req<SubmitResult>('POST', `/api/runs/${id}/batches/${batchId}/submit`, real ? { dryRun: false, confirm: true } : { dryRun: true }),
   knowledge: (id: string) => req<KnowledgeEntry[]>('GET', `/api/runs/${id}/knowledge`),
   bundle: (hash: string) => req<TaskContextBundle | { sections: Array<{ id: string; title: string; content: string }>; approxTokens: number }>('GET', `/api/bundles/${hash}`),
   task: (id: string) => req<TaskDetail>('GET', `/api/tasks/${id}`),

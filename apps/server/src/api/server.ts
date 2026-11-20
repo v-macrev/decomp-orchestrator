@@ -45,7 +45,7 @@ export async function buildServer(app: App) {
   const { store, engine, pool, events } = app;
   const notFound = (reply: FastifyReply, what: string) => reply.code(404).send({ error: `${what} not found` });
 
-  f.get('/api/health', async () => ({ ok: true, mode: app.cfg.mode, repo: app.repo.name, slots: app.repo.slotCount }));
+  f.get('/api/health', async () => ({ ok: true, mode: app.cfg.mode, repo: app.repo.name, slots: app.repo.slotCount, runDefaults: app.cfg.runDefaults }));
 
   // ---------------- accounts
   f.get('/api/accounts', async () => store.listAccounts());
@@ -147,7 +147,22 @@ export async function buildServer(app: App) {
     const body = CreateRun.parse(req.body);
     const flow = store.getFlow(body.flowId);
     if (!flow) return notFound(reply, 'flow');
-    const run = engine.createRun(body.name, { ...body.config, flowId: body.flowId }, flow);
+    const config: Record<string, unknown> = { ...body.config, flowId: body.flowId };
+    if (config.draftedBy === undefined && app.cfg.runDefaults.draftedBy) config.draftedBy = app.cfg.runDefaults.draftedBy;
+    // "Carry the failed functions": the dead packets of the chosen earlier runs join this run's selection.
+    const carry = z.object({ fromRuns: z.array(z.string()).max(50).default([]) }).optional().parse(config.carry);
+    if (carry?.fromRuns.length) {
+      const missing = carry.fromRuns.filter((id) => !store.getRun(id));
+      if (missing.length) return reply.code(400).send({ error: `runs not found: ${missing.join(', ')}` });
+      const dead = store.deadFunctions(carry.fromRuns);
+      if (!dead.length && config.selection === undefined) return reply.code(400).send({ error: 'the chosen runs have no dead functions to carry' });
+      // Without a selection of its own the run is only the carried functions.
+      if (config.selection === undefined) {
+        config.selection = { source: 'rva_list', rvas: dead.map((d) => d.rva) };
+        config.carry = { fromRuns: carry.fromRuns, rvas: [] };
+      } else config.carry = { fromRuns: carry.fromRuns, rvas: dead.map((d) => d.rva) };
+    }
+    const run = engine.createRun(body.name, config, flow);
     engine.start(run.id).catch((e) => events.emit('run.failed', `start failed: ${(e as Error).message}`, { runId: run.id, level: 'error' }));
     return run;
   });
@@ -162,7 +177,41 @@ export async function buildServer(app: App) {
     try {
       return { ok: true, ...(await engine.restage(req.params.id)) };
     } catch (e) {
-      return reply.code(409).send({ ok: false, reason: (e as Error).message });
+      return reply.code(409).send({ ok: false, reason: (e as Error).message, error: (e as Error).message });
+    }
+  });
+  // Edit a run's name and the settings that can still change (draftedBy, budget, PR size, staging before it finishes).
+  const EditRun = z.object({
+    name: z.string().min(1).max(120).optional(), draftedBy: z.string().min(1).max(200).optional(), budgetUsd: z.number().positive().nullable().optional(),
+    prBatchSize: z.number().int().min(1).max(60).optional(), staging: z.enum(['branches', 'off']).optional(),
+  }).strict();
+  f.patch('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const patch = EditRun.parse(req.body ?? {});
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return await engine.updateRun(req.params.id, patch);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  f.delete('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.deleteRun(req.params.id)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  // Open the batch's pull request with `sr submit`. Defaults to a dry run; a real submission pushes
+  // to the operator's fork and opens a PR upstream, so it needs { dryRun: false, confirm: true }.
+  f.post('/api/runs/:id/batches/:batchId/submit', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    const body = z.object({ dryRun: z.boolean().default(true), confirm: z.boolean().optional() }).parse(req.body ?? {});
+    if (!body.dryRun && body.confirm !== true) return reply.code(400).send({ ok: false, error: 'a real submission needs confirm: true' });
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return await engine.submitBatch(req.params.id, req.params.batchId, { dryRun: body.dryRun });
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
   f.get('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {

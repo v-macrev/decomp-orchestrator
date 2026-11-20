@@ -95,8 +95,17 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    as the owner of the game copy, agree to send locally made listings to your AI providers.
 5. Accepted units are staged on local branches (`decomp/<run>-b<n>`), re-verified as a whole.
    A batch that fails re-verification gets no branch and its packets stay `passed`; stage them
-   again with `POST /api/runs/:id/stage`. Review the branches and submit with the repo's own
-   `./sr submit`; nothing is pushed automatically.
+   again with **Batch passed functions** (`POST /api/runs/:id/stage`), which also batches a
+   finished run that had staging off. Each batch then has **Dry run** and **Submit PR** buttons
+   (`POST /api/runs/:id/batches/:batchId/submit`): the batch is rebuilt from the base,
+   re-verified, and submitted with the repo's own `sr submit`, one pull request per batch.
+   Nothing is pushed unless you click **Submit PR** after a clean dry run (the API needs
+   `{ "dryRun": false, "confirm": true }`).
+6. Runs can be edited (`PATCH /api/runs/:id`: name, drafted-by, budget, functions per PR) and
+   deleted (`DELETE /api/runs/:id`, which releases the local claims the run still holds). A new
+   run can carry the dead functions of earlier runs (`config.carry.fromRuns`). Set
+   `runDefaults.draftedBy` in `config/orchestrator.json` (e.g. your GitHub login) to prefill the
+   person named on claims, commits and `sr submit --drafted-by`.
 
 Set `ORCH_API_TOKEN` to require a bearer token on the API (the UI asks for it). Only the event
 stream also takes it as `?token=`, because browsers cannot send headers to an EventSource. The

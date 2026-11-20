@@ -298,6 +298,15 @@ export const RunConfig = z.object({
   /** Stop leasing new work when the run's spend reaches this, USD. */
   budgetUsd: z.number().positive().optional(),
   draftedBy: z.string().default('operator'),
+  /**
+   * Earlier values of `draftedBy` when the run was edited: "Drafted by" lines this run wrote under
+   * those names are rewritten to the current one when its functions are staged or submitted.
+   */
+  formerDraftedBy: z.array(z.string()).max(20).default([]),
+  /** Dead functions carried over from earlier runs: added to the selection at discovery. */
+  carry: z
+    .object({ fromRuns: z.array(z.string()).max(50).default([]), rvas: z.array(RvaHex).max(5_000).default([]) })
+    .default(() => ({ fromRuns: [], rvas: [] })),
   routing: z.lazy(() => RoutingConfig).default(() => RoutingConfig.parse({})),
   context: z.lazy(() => ContextConfig).default(() => ContextConfig.parse({})),
   skills: z.lazy(() => SkillsConfig).default(() => SkillsConfig.parse({})),

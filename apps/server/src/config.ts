@@ -55,6 +55,8 @@ export const ServerConfig = z.object({
       infraBackoffMs: z.number().int().optional(),
     })
     .default({}),
+  /** Defaults for new runs: `draftedBy` is the person named on claims, commits and `sr submit` (e.g. a GitHub login). */
+  runDefaults: z.object({ draftedBy: z.string().min(1).max(200).optional() }).default({}),
 });
 export type ServerConfig = z.infer<typeof ServerConfig>;
 

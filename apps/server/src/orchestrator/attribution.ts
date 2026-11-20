@@ -91,6 +91,24 @@ export function setDraftedBy(src: string, person: string | null, model: string):
   return { content: lines.join(eol), change: `Drafted by: "${line.slice(3)}"` };
 }
 
+/**
+ * Rename the person on this run's own "Drafted by" header lines (the run's draftedBy was edited
+ * after its functions were drafted): "<former>, assisted by <models>" becomes "<person>, assisted
+ * by <models>", also after "; later functions by". Lines naming anyone else are left alone.
+ */
+export function renamePerson(src: string, former: string[], person: string | null): string {
+  const names = uniq(former.map((f) => personOf(f) ?? '')).filter((f) => f !== person);
+  if (!names.length) return src;
+  const alt = names.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
+  const re = new RegExp(`(Drafted by\\s+|; later functions by\\s+)(?:${alt}),\\s*assisted by\\s+`, 'gi');
+  const eol = src.includes('\r\n') ? '\r\n' : '\n';
+  const lines = src.split(/\r?\n/);
+  for (let k = 0; k < lines.length && lines[k]!.trim().startsWith('//'); k++) {
+    if (DRAFTED.test(lines[k]!.trim())) lines[k] = lines[k]!.replace(re, (_m, lead: string) => `${lead}${person ? `${person}, assisted by ` : ''}`);
+  }
+  return lines.join(eol);
+}
+
 /** Commit trailers in the repo's own form, for models whose maker publishes a co-author address. */
 export function coAuthorTrailers(models: string[]): string[] {
   const out: string[] = [];

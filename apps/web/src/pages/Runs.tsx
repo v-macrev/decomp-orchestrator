@@ -28,7 +28,7 @@ export default function Runs({ mode }: { mode: string }) {
   return (
     <div className="page" style={{ display: 'grid', gap: 14 }}>
       <div className="grid2">
-        <NewRun mode={mode} onCreated={(id) => { setSel(id); refresh(); }} />
+        <NewRun mode={mode} runs={runs} onCreated={(id) => { setSel(id); refresh(); }} />
         <div className="panel">
           <h2>Runs</h2>
           <table>
@@ -51,7 +51,7 @@ export default function Runs({ mode }: { mode: string }) {
           </table>
         </div>
       </div>
-      {sel && <RunDetail key={sel} runId={sel} onChange={refresh} />}
+      {sel && <RunDetail key={sel} runId={sel} onChange={refresh} onDeleted={() => { setSel(null); refresh(); }} />}
     </div>
   );
 }
@@ -64,7 +64,7 @@ function StackBar({ counts, total }: { counts: Record<string, number>; total: nu
   );
 }
 
-function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => void }) {
+function NewRun({ mode, runs, onCreated }: { mode: string; runs: RunSummary[]; onCreated: (id: string) => void }) {
   const [flows, setFlows] = useState<Flow[]>([]);
   const [f, setF] = useState({
     name: `run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, flowId: 'default', source: mode === 'sim' ? 'synthetic' : 'sr_next',
@@ -74,6 +74,13 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
     capPerWorker: 60, gMaxSize: 256, gNamespaces: '', gModules: '', gRange: '', gExcludeGuess: false, gExcludeDrafted: false,
   });
   const [err, setErr] = useState('');
+  // "Carry the failed functions": earlier runs whose dead packets join this run.
+  const [carryFrom, setCarryFrom] = useState<string[]>([]);
+  const withDead = runs.filter((r) => (r.counts.dead ?? 0) > 0 && ['completed', 'cancelled', 'failed'].includes(r.status));
+  const carried = withDead.filter((r) => carryFrom.includes(r.id)).reduce((s, r) => s + (r.counts.dead ?? 0), 0);
+  useEffect(() => {
+    api.health().then((h) => { if (h.runDefaults?.draftedBy) setF((p) => (p.draftedBy === 'operator' ? { ...p, draftedBy: h.runDefaults!.draftedBy! } : p)); }).catch(() => undefined);
+  }, []);
   const [capacity, setCapacity] = useState<CapacityPlan | null>(null);
   const [preview, setPreview] = useState<GatherPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
@@ -86,7 +93,7 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
   // Live pre-run check: (worker instances × per-worker cap) vs the batch size.
   useEffect(() => {
     const flow = flows.find((x) => x.id === f.flowId);
-    if (!flow || f.source === 'rva_list') return setCapacity(null);
+    if (!flow || f.source === 'rva_list' || f.source === 'carry') return setCapacity(null);
     const t = setTimeout(() => {
       api.validateFlow(flow, { batch: f.count, cap: f.capPerWorker, stealing: f.routing && f.workStealing }).then((r) => setCapacity(r.capacity)).catch(() => setCapacity(null));
     }, 250);
@@ -102,10 +109,12 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
     setErr('');
-    const selection = f.source === 'rva_list' ? { source: 'rva_list', rvas: f.rvas.split(/[\s,]+/).filter(Boolean) } : f.source === 'synthetic' ? { source: 'synthetic', count: f.count, seed: Math.floor(Math.random() * 1e6) } : f.source === 'gather' ? { source: 'gather', filter: gatherFilter() } : { source: 'sr_next', count: f.count, maxSize: f.maxSize };
+    const carryOn = carryFrom.filter((id) => withDead.some((r) => r.id === id));
+    if (f.source === 'carry' && !carryOn.length) return setErr('Pick at least one earlier run to carry failed functions from.');
+    const selection = f.source === 'carry' ? null : f.source === 'rva_list' ? { source: 'rva_list', rvas: f.rvas.split(/[\s,]+/).filter(Boolean) } : f.source === 'synthetic' ? { source: 'synthetic', count: f.count, seed: Math.floor(Math.random() * 1e6) } : f.source === 'gather' ? { source: 'gather', filter: gatherFilter() } : { source: 'sr_next', count: f.count, maxSize: f.maxSize };
     try {
       const r = await api.createRun(f.name, f.flowId, {
-        selection, maxFunctionsPerWorker: f.capPerWorker, staging: f.staging, packetMaxFunctions: f.packetMaxFunctions, gateConcurrency: f.gateConcurrency, prBatchSize: f.prBatchSize,
+        ...(selection ? { selection } : {}), ...(carryOn.length ? { carry: { fromRuns: carryOn } } : {}), maxFunctionsPerWorker: f.capPerWorker, staging: f.staging, packetMaxFunctions: f.packetMaxFunctions, gateConcurrency: f.gateConcurrency, prBatchSize: f.prBatchSize,
         exposureConsent: f.exposureConsent, draftedBy: f.draftedBy, ...(f.budgetUsd ? { budgetUsd: Number(f.budgetUsd) } : {}),
         routing: { enabled: f.routing, llmTieBreak: f.llmTieBreak, promoteAfterFailures: f.promoteAfter, workStealing: f.workStealing },
         context: { mode: f.contextMode },
@@ -128,9 +137,10 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
           <select value={f.source} onChange={(e) => set('source', e.target.value)}>
             {mode === 'sim' ? <option value="synthetic">synthetic (simulator)</option> : <><option value="sr_next">sr next (readiness-ranked)</option><option value="rva_list">explicit RVAs</option></>}
             <option value="gather">gather (inventory scan + filters)</option>
+            <option value="carry">only failed functions carried over (below)</option>
           </select>
         </label>
-        {f.source !== 'rva_list' && <label>Functions<input type="number" min={1} value={f.count} onChange={(e) => set('count', Number(e.target.value))} style={{ width: 90 }} /></label>}
+        {!['rva_list', 'carry'].includes(f.source) && <label>Functions<input type="number" min={1} value={f.count} onChange={(e) => set('count', Number(e.target.value))} style={{ width: 90 }} /></label>}
         {f.source === 'sr_next' && <label>Max size (B)<input type="number" value={f.maxSize} onChange={(e) => set('maxSize', Number(e.target.value))} style={{ width: 90 }} /></label>}
       </div>
       {f.source === 'rva_list' && <label>RVAs (hex, comma/space separated)<textarea rows={3} value={f.rvas} onChange={(e) => set('rvas', e.target.value)} /></label>}
@@ -175,7 +185,18 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
         <label className="inline" title="Core skills in the cached prefix + up to 2 triggered skills per attempt (frozen for the run)"><input type="checkbox" checked={f.skills} disabled={f.contextMode !== 'budgeted'} onChange={(e) => set('skills', e.target.checked)} />Skills</label>
         <label className="inline" title="When the run completes: mine, patch, optimize and shadow-evaluate skills automatically"><input type="checkbox" checked={f.autoCurate} disabled={!f.skills || f.contextMode !== 'budgeted'} onChange={(e) => set('autoCurate', e.target.checked)} />Curate after run</label>
       </div>
-      <label>Drafted by (recorded on claims)<input value={f.draftedBy} onChange={(e) => set('draftedBy', e.target.value)} /></label>
+      {withDead.length > 0 && (
+        <div style={{ display: 'grid', gap: 4, border: '1px dashed var(--border)', borderRadius: 8, padding: 10 }}>
+          <span title="Their dead packets' functions are added to this run's selection (or are the whole run with the source above set to carried-only)">Carry failed functions from earlier runs{carried ? ` — ${carried} function(s)` : ''}</span>
+          {withDead.map((r) => (
+            <label key={r.id} className="inline">
+              <input type="checkbox" checked={carryFrom.includes(r.id)} onChange={(e) => setCarryFrom((xs) => (e.target.checked ? [...xs, r.id] : xs.filter((x) => x !== r.id)))} />
+              {r.name} <span className="muted">· {r.counts.dead} dead{(r.config.carry as { fromRuns?: string[] } | undefined)?.fromRuns?.length ? ' · itself a carry-over' : ''}</span>
+            </label>
+          ))}
+        </div>
+      )}
+      <label>Drafted by (claims, commits and <span className="mono">sr submit --drafted-by</span>)<input value={f.draftedBy} onChange={(e) => set('draftedBy', e.target.value)} /></label>
       <label className="inline" style={{ alignItems: 'flex-start' }}>
         <input type="checkbox" checked={f.exposureConsent} onChange={(e) => set('exposureConsent', e.target.checked)} />
         <span>Send private listings (made locally from my own copy of the game) to the configured AI providers. The project requires the owner's explicit agreement; without it workers only see public repository context.</span>
@@ -186,7 +207,7 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
   );
 }
 
-function RunDetail({ runId, onChange }: { runId: string; onChange: () => void }) {
+function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: () => void; onDeleted: () => void }) {
   const [m, setM] = useState<Metrics | null>(null);
   const [events, setEvents] = useState<TelemetryEvent[]>([]);
   const [tasks, setTasks] = useState<Task[]>([]);
@@ -196,6 +217,7 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
   const [retryingFailed, setRetryingFailed] = useState(false);
   const [retryFailedError, setRetryFailedError] = useState('');
   const [retryFailedMessage, setRetryFailedMessage] = useState('');
+  const [editing, setEditing] = useState(false);
 
   useEffect(() => {
     api.metrics(runId).then(setM).catch(() => undefined);
@@ -239,6 +261,15 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
       setRetryingFailed(false);
     }
   };
+  const removeRun = async () => {
+    setRetryFailedError('');
+    try {
+      await api.deleteRun(runId);
+      onDeleted();
+    } catch (e) {
+      setRetryFailedError((e as Error).message);
+    }
+  };
   const status = m.run.status;
   const deadTasks = m.tasks.dead ?? 0;
   const retryUnavailable = ['cancelled', 'failed', 'created', 'discovering'].includes(status)
@@ -253,8 +284,11 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
           <button onClick={() => act('resume')} disabled={status !== 'paused' || (m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd)} title={m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd ? 'Budget reached: set a new budget below to resume' : undefined}>Resume</button>
           <ConfirmButton onConfirm={retryFailed} disabled={!deadTasks || retryingFailed || retryUnavailable} className="primary" confirmLabel={`Retry ${deadTasks} failed task(s) where each stopped?`} title="Retries only dead packets; successful and quarantined tasks are left alone. Retries use this run's remaining budget.">{retryingFailed ? 'Retrying…' : `Retry failed tasks (${deadTasks})`}</ConfirmButton>
           <ConfirmButton onConfirm={() => act('cancel')} disabled={['completed', 'cancelled', 'failed'].includes(status)} confirmLabel="Cancel run? Open tasks stop">Cancel</ConfirmButton>
+          <button onClick={() => setEditing((x) => !x)}>{editing ? 'Close edit' : 'Edit'}</button>
+          <ConfirmButton onConfirm={removeRun} disabled={m.engine.active || ['running', 'discovering'].includes(status)} confirmLabel="Delete run and its history? Claims go back" title={m.engine.active ? 'Cancel or finish the run first' : 'Deletes the run, its packets, attempts and events; local claims it still holds are released (not those in a submitted PR)'}>Delete</ConfirmButton>
         </div>
-        {retryFailedError && <div className="lvl-error">Retry failed: {retryFailedError}</div>}
+        {editing && <RunEditor runId={runId} status={status} onSaved={() => { setEditing(false); onChange(); api.metrics(runId).then(setM).catch(() => undefined); }} />}
+        {retryFailedError && <div className="lvl-error">{retryFailedError}</div>}
         {retryFailedMessage && <div className="muted" role="status">{retryFailedMessage}</div>}
         {deadTasks > 0 && <div className="muted" style={{ fontSize: 12 }}>Retrying starts dead packets at the fast tier. Passed packets remain complete; quarantined packets still need individual review.</div>}
         {m.run.error && <div className="lvl-error">{m.run.error}</div>}
@@ -325,17 +359,156 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
         </table>
       </div>
 
-      {batches.length > 0 && (
-        <div className="panel">
-          <h2>Staged PR batches</h2>
-          <p className="muted" style={{ marginTop: 0 }}>Local branches, re-verified against the combined units. Review, then submit with <span className="mono">./sr submit</span> from the branch — nothing is pushed automatically.</p>
-          <table>
-            <thead><tr><th>#</th><th>Status</th><th>Branch</th><th>Functions</th><th>Problems</th></tr></thead>
-            <tbody>{batches.map((b) => <tr key={b.id}><td>{b.seq}</td><td><span className={`chip ${b.status === 'branch_ready' ? 'ok' : b.status === 'failed' ? 'error' : 'warn'}`}>{b.status}</span></td><td className="mono">{b.branch ?? '—'}</td><td>{b.detail?.functions ?? '?'}</td><td className="muted">{b.detail?.problems?.join('; ')}</td></tr>)}</tbody>
-          </table>
-        </div>
+      {(batches.length > 0 || (status === 'completed' && (m.tasks.passed ?? 0) > 0)) && (
+        <BatchesPanel runId={runId} status={status} passed={m.tasks.passed ?? 0} batches={batches} reload={() => api.batches(runId).then(setBatches).catch(() => undefined)} />
       )}
       {task && <TaskDrawer taskId={task} onClose={() => setTask(null)} />}
+    </div>
+  );
+}
+
+/** Name, drafted-by and the settings that can still change on an existing run. */
+function RunEditor({ runId, status, onSaved }: { runId: string; status: string; onSaved: () => void }) {
+  const [v, setV] = useState<{ name: string; draftedBy: string; budgetUsd: string; prBatchSize: number; staging: 'branches' | 'off' } | null>(null);
+  const [orig, setOrig] = useState<typeof v>(null);
+  const [err, setErr] = useState('');
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    api.runs().then((rs) => {
+      const r = rs.find((x) => x.id === runId);
+      if (!r) return;
+      const c = r.config as { draftedBy?: string; budgetUsd?: number; prBatchSize?: number; staging?: 'branches' | 'off' };
+      const init = { name: r.name, draftedBy: c.draftedBy ?? 'operator', budgetUsd: c.budgetUsd === undefined ? '' : String(c.budgetUsd), prBatchSize: c.prBatchSize ?? 40, staging: c.staging ?? 'branches' };
+      setV(init);
+      setOrig(init);
+    }).catch((e) => setErr((e as Error).message));
+  }, [runId]);
+  if (!v || !orig) return <div className="muted">loading…</div>;
+  const finished = ['completed', 'cancelled', 'failed'].includes(status);
+  const save = async (e: FormEvent) => {
+    e.preventDefault();
+    setErr('');
+    const patch: Parameters<typeof api.updateRun>[1] = {};
+    if (v.name.trim() !== orig.name) patch.name = v.name.trim();
+    if (v.draftedBy.trim() !== orig.draftedBy) patch.draftedBy = v.draftedBy.trim();
+    if (v.budgetUsd.trim() !== orig.budgetUsd) patch.budgetUsd = v.budgetUsd.trim() ? Number(v.budgetUsd) : null;
+    if (v.prBatchSize !== orig.prBatchSize) patch.prBatchSize = v.prBatchSize;
+    if (v.staging !== orig.staging) patch.staging = v.staging;
+    if (patch.budgetUsd !== undefined && patch.budgetUsd !== null && !(patch.budgetUsd > 0)) return setErr('Budget must be a positive number, or empty for none.');
+    setSaving(true);
+    try {
+      if (Object.keys(patch).length) await api.updateRun(runId, patch);
+      onSaved();
+    } catch (x) {
+      setErr((x as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+  return (
+    <form onSubmit={save} style={{ display: 'grid', gap: 8, border: '1px dashed var(--border)', borderRadius: 8, padding: 10, margin: '6px 0 10px' }}>
+      <div className="row">
+        <label className="grow">Name<input value={v.name} onChange={(e) => setV({ ...v, name: e.target.value })} /></label>
+        <label className="grow" title="Used on claims, commit messages and sr submit --drafted-by from now on; this run's earlier Drafted-by lines are renamed when its functions are batched or submitted">Drafted by<input value={v.draftedBy} onChange={(e) => setV({ ...v, draftedBy: e.target.value })} /></label>
+      </div>
+      <div className="row">
+        <label>Budget USD<input value={v.budgetUsd} placeholder="none" onChange={(e) => setV({ ...v, budgetUsd: e.target.value })} style={{ width: 80 }} /></label>
+        <label>Functions / PR (≤60)<input type="number" min={1} max={60} value={v.prBatchSize} onChange={(e) => setV({ ...v, prBatchSize: Number(e.target.value) })} style={{ width: 80 }} /></label>
+        <label title={finished ? 'Decided when the run finished; batch passed functions from the PR batches panel instead' : 'What happens to matched functions when the run finishes'}>Staging
+          <select value={v.staging} disabled={finished} onChange={(e) => setV({ ...v, staging: e.target.value as 'branches' | 'off' })}><option value="off">off (no commits)</option><option value="branches">local branches</option></select>
+        </label>
+        <span className="grow" />
+        <button className="primary" type="submit" disabled={saving}>{saving ? 'Saving…' : 'Save'}</button>
+      </div>
+      {err && <div className="lvl-error">{err}</div>}
+    </form>
+  );
+}
+
+/**
+ * Passed functions → re-verified local branches (one per batch) → one pull request per batch with
+ * the repository's own `sr submit`. Submitting is always an explicit click, after a clean dry run.
+ */
+function BatchesPanel({ runId, status, passed, batches, reload }: { runId: string; status: string; passed: number; batches: Batch[]; reload: () => void }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [msg, setMsg] = useState('');
+  const [err, setErr] = useState('');
+  const run = async (key: string, fn: () => Promise<string>) => {
+    setBusy(key);
+    setErr('');
+    setMsg('');
+    try {
+      setMsg(await fn());
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(null);
+      reload();
+    }
+  };
+  const stage = () => run('stage', async () => {
+    const r = await api.stageRun(runId);
+    return `${r.staged} batch(es) staged${r.failed ? `, ${r.failed} failed re-verification (their packets stay passed)` : ''}.`;
+  });
+  const submit = (b: Batch, real: boolean) => run(`${real ? 'submit' : 'dry'}-${b.id}`, async () => {
+    const r = await api.submitBatch(runId, b.id, real);
+    if (real) return r.ok ? `Batch ${b.seq} submitted: ${r.pullRequest ?? r.link ?? 'see the events'}` : `Batch ${b.seq} was not submitted: ${r.error ?? r.blockers.join('; ')}`;
+    return r.ok ? `Dry run of batch ${b.seq} is clean: Submit PR is now available.` : `Dry run of batch ${b.seq} found problems (below).`;
+  });
+  return (
+    <div className="panel">
+      <div className="row">
+        <h2 className="grow" style={{ margin: 0 }}>PR batches</h2>
+        {status === 'completed' && passed > 0 && <button className="primary" disabled={!!busy} onClick={stage} title="Group passed packets into batches (whole units, up to the run's functions per PR), re-verify each in a clean tree and commit it to a local branch">{busy === 'stage' ? 'Batching…' : `Batch passed functions (${passed} packet${passed === 1 ? '' : 's'})`}</button>}
+      </div>
+      <p className="muted" style={{ marginTop: 6 }}>
+        Each batch is re-verified in a clean tree and committed to a local branch. <b>Dry run</b> rebuilds the batch from the base, re-verifies it and runs <span className="mono">sr submit --dry-run</span>; nothing is pushed.
+        {' '}<b>Submit PR</b> (after a clean dry run) runs <span className="mono">sr submit</span>: it pushes the batch's branch to your fork and opens one pull request upstream.
+      </p>
+      {msg && <div className="muted" role="status">{msg}</div>}
+      {err && <div className="lvl-error">{err}</div>}
+      {batches.length > 0 && (
+        <table>
+          <thead><tr><th>#</th><th>Status</th><th>Branch</th><th>Functions</th><th>Drafted by</th><th>Last check / PR</th><th /></tr></thead>
+          <tbody>
+            {batches.map((b) => {
+              const d = b.detail;
+              const last = d?.lastSubmit;
+              const cleanDry = !!last && last.dryRun && last.ok;
+              const findings = last ? [...last.problems.map((x) => `re-verify: ${x}`), ...last.blockers.map((x) => `blocked: ${x}`), ...(last.error && !last.ok ? [last.error] : [])] : [];
+              return (
+                <tr key={b.id}>
+                  <td>{b.seq}</td>
+                  <td><span className={`chip ${b.status === 'branch_ready' || b.status === 'submitted' ? 'ok' : b.status === 'failed' ? 'error' : 'warn'}`}>{b.status}</span></td>
+                  <td className="mono" style={{ fontSize: 11 }}>{b.branch ?? '—'}</td>
+                  <td>{d?.functions ?? '?'}</td>
+                  <td style={{ fontSize: 12 }}>{d?.draftedBy ?? <span className="muted">—</span>}</td>
+                  <td style={{ fontSize: 12, maxWidth: 420 }}>
+                    {d?.pr ? <a href={d.pr} target="_blank" rel="noreferrer">{d.pr}</a> : d?.link ? <a href={d.link} target="_blank" rel="noreferrer">open the PR by hand</a> : null}
+                    {d?.problems?.length ? <div className="muted">{d.problems.join('; ')}</div> : null}
+                    {last && !d?.pr && (
+                      <div className={last.ok ? 'muted' : 'lvl-warn'}>
+                        {last.dryRun ? 'dry run' : 'submit'} {new Date(last.at).toLocaleString()}: {last.ok ? 'clean' : 'problems'}
+                        {findings.length > 0 && <ul style={{ margin: '2px 0 0 16px', padding: 0 }}>{findings.slice(0, 8).map((x) => <li key={x}>{x}</li>)}</ul>}
+                        {last.warnings.length > 0 && <details><summary>{last.warnings.length} warning(s)</summary><ul style={{ margin: 0, paddingLeft: 16 }}>{last.warnings.map((x) => <li key={x}>{x}</li>)}</ul></details>}
+                        {last.plan.length > 0 && <details><summary>plan</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>{last.plan.join('\n')}</pre></details>}
+                      </div>
+                    )}
+                  </td>
+                  <td style={{ whiteSpace: 'nowrap' }}>
+                    {b.status === 'branch_ready' && (
+                      <>
+                        <button disabled={!!busy} onClick={() => submit(b, false)}>{busy === `dry-${b.id}` ? 'Checking…' : 'Dry run'}</button>{' '}
+                        <ConfirmButton className="primary" disabled={!!busy || !cleanDry} onConfirm={() => submit(b, true)} confirmLabel="Push to your fork and open the PR?" title={cleanDry ? 'Runs sr submit: pushes the branch to your fork and opens one pull request upstream' : 'Run a clean dry run first'}>{busy === `submit-${b.id}` ? 'Submitting…' : 'Submit PR'}</ConfirmButton>
+                      </>
+                    )}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }

@@ -401,6 +401,42 @@ export class Store {
       createdAt: r.created_at as number,
     }));
   }
+  getBatch(id: string) {
+    const runId = (this.db.prepare('SELECT run_id FROM pr_batches WHERE id = ?').get(id) as Raw | undefined)?.run_id as string | undefined;
+    return runId ? (this.listBatches(runId).find((b) => b.id === id) ?? null) : null;
+  }
+  /** Rename a run and/or replace its config (already validated by the caller). */
+  updateRun(id: string, patch: { name?: string; config?: RunConfig }) {
+    return this.db.prepare('UPDATE runs SET name = COALESCE(@name, name), config_json = COALESCE(@config, config_json), updated_at = @now WHERE id = @id')
+      .run({ id, name: patch.name ?? null, config: patch.config ? j(patch.config) : null, now: Date.now() }).changes > 0;
+  }
+  /** Delete a run and everything recorded under it (tasks, attempts, verdicts, events, batches...). */
+  deleteRun(id: string) {
+    return this.tx(() => {
+      const tasks = `SELECT id FROM tasks WHERE run_id = @id`;
+      for (const sql of [
+        `DELETE FROM skill_injections WHERE run_id = @id OR task_id IN (${tasks})`,
+        `DELETE FROM worker_assignments WHERE run_id = @id`,
+        `DELETE FROM run_workers WHERE run_id = @id`,
+        `DELETE FROM gathered_functions WHERE run_id = @id`,
+        `DELETE FROM run_knowledge_cache WHERE run_id = @id`,
+        `DELETE FROM pr_batches WHERE run_id = @id`,
+        `DELETE FROM events WHERE run_id = @id OR task_id IN (${tasks})`,
+        `DELETE FROM verdicts WHERE task_id IN (${tasks})`,
+        `DELETE FROM attempts WHERE run_id = @id OR task_id IN (${tasks})`,
+        `DELETE FROM tasks WHERE run_id = @id`,
+      ]) this.db.prepare(sql).run({ id });
+      return this.db.prepare('DELETE FROM runs WHERE id = @id').run({ id }).changes > 0;
+    });
+  }
+  /** Functions of the given runs' dead packets (deduplicated, in RVA order). */
+  deadFunctions(runIds: string[]): Array<{ rva: string; name: string | null; runId: string }> {
+    if (!runIds.length) return [];
+    const rows = this.db.prepare(`SELECT t.run_id, json_extract(f.value, '$.rva') rva, json_extract(f.value, '$.name') name FROM tasks t, json_each(t.functions_json) f
+      WHERE t.state = 'dead' AND t.run_id IN (${runIds.map(() => '?').join(',')}) ORDER BY rva`).all(...runIds) as Array<{ run_id: string; rva: string; name: string | null }>;
+    const seen = new Set<string>();
+    return rows.filter((r) => !seen.has(r.rva) && seen.add(r.rva)).map((r) => ({ rva: r.rva, name: r.name, runId: r.run_id }));
+  }
   // ---------------- function gathering (Phase 4)
   /** RVAs this tool is still working on (open in any run) or matched but not yet submitted. */
   rvasInFlight(excludeRunId: string | null): Set<string> {

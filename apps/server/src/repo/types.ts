@@ -129,6 +129,45 @@ export interface RepoAdapter {
    * and the task's `drafter_model`, set to the model of the accepted attempt.
    */
   recordAttribution?(input: { task: TaskRow; srTaskId: string; model: string; draftedBy: string }): Promise<{ ok: boolean; problems: string[] }>;
+  /**
+   * Open one pull request for a staged batch with the repository's own `sr submit`: rebuild the
+   * batch on a fresh branch from the base, re-verify every packet, commit every unit but the last,
+   * then submit the last unit's task (which commits it, pushes the branch and opens the PR).
+   * `dryRun` runs `sr submit --dry-run`: nothing is committed for the submitted unit or pushed.
+   */
+  submitBatch?(input: SubmitBatchInput): Promise<SubmitBatchResult>;
+}
+
+export interface SubmitBatchInput {
+  runId: string;
+  seq: number;
+  branch: string;
+  files: Array<{ path: string; content: string }>;
+  /** The last one is submitted through; the others are committed first. */
+  tasks: Array<{ id: string; srTaskId: string | null; functions: TaskRow['functions']; task: TaskRow }>;
+  /** Commit message for the units committed before the submitted one. */
+  message: string;
+  /** `sr submit --drafted-by`. */
+  draftedBy: string;
+  /** After a real submit of a multi-packet batch: the PR's title and a section for the other functions. */
+  title: string | null;
+  extraBody: string | null;
+  dryRun: boolean;
+}
+
+export interface SubmitBatchResult {
+  ok: boolean;
+  dryRun: boolean;
+  /** Re-verification or git problems found before `sr submit` ran. */
+  problems: string[];
+  /** `sr submit`'s own blockers and warnings. */
+  blockers: string[];
+  warnings: string[];
+  plan: string[];
+  pullRequest: string | null;
+  /** When gh could not open the PR: the compare link to open it by hand. */
+  link: string | null;
+  error: string | null;
 }
 
 export interface StageBatchInput {

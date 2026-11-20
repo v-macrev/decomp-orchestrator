@@ -8,7 +8,7 @@ import type { Store, TaskRow } from '../db/store.js';
 import type { RepoAdapter } from '../repo/types.js';
 import type { EventBus } from '../telemetry/events.js';
 import { newId } from '../util/async.js';
-import { coAuthorTrailers, draftedByText, personOf } from './attribution.js';
+import { coAuthorTrailers, draftedByText, personOf, renamePerson } from './attribution.js';
 
 export interface StageSummary {
   /** Batches with a verified branch (or drafts, for adapters that do not stage). */
@@ -39,28 +39,12 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
   }
   if (cur.length) batches.push(cur);
 
-  const person = personOf(store.getRun(runId)?.config.draftedBy);
   let seq = store.maxBatchSeq(runId);
   for (const tasks of batches) {
     seq++;
     const id = newId('batch');
     store.createBatch({ id, runId, seq, taskIds: tasks.map((t) => t.id) });
-    const files = latestFiles(store, tasks);
-    const fnCount = tasks.reduce((s, t) => s + t.functions.length, 0);
-    // Attribution as contributors give it: the model that finished each packet (its accepted
-    // attempt), a "Drafted by" line for `sr submit --drafted-by`, and co-author trailers.
-    const finisher = new Map(tasks.map((t) => [t.id, finishingModel(store, t)]));
-    const models = [...new Set([...finisher.values()].filter((m): m is string => !!m))];
-    const draftedBy = models.length ? draftedByText(person, models) : null;
-    const lines = tasks.flatMap((t) => t.functions.map((f) => `- ${f.rva} ${f.name ?? ''}${finisher.get(t.id) ? ` (drafted by ${finisher.get(t.id)})` : ''}`));
-    const trailers = coAuthorTrailers(models);
-    const message = [
-      `Reconstruct ${fnCount} function(s) across ${new Set(tasks.map((t) => t.unit)).size} unit(s)`,
-      '',
-      lines.join('\n'),
-      ...(draftedBy ? ['', `Drafted by ${draftedBy}.`] : []),
-      ...(trailers.length ? ['', ...trailers] : []),
-    ].join('\n');
+    const { files, fnCount, draftedBy, models, message } = batchContent(store, runId, tasks);
     if (repo.stageBatch) {
       const r = await repo.stageBatch({ runId, seq, files, tasks: tasks.map((t) => ({ id: t.id, srTaskId: t.srTaskId, functions: t.functions, task: t })), message });
       const ok = r.verified && !!r.branch;
@@ -80,8 +64,35 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
   return summary;
 }
 
+/**
+ * What a batch commits, with attribution as contributors give it: the model that finished each
+ * packet (its accepted attempt), a "Drafted by" line for `sr submit --drafted-by`, and co-author
+ * trailers. The person is the run's current draftedBy; lines written under an earlier name of the
+ * run (it was edited) are renamed.
+ */
+export function batchContent(store: Store, runId: string, tasks: TaskRow[]) {
+  const cfg = store.getRun(runId)?.config;
+  const person = personOf(cfg?.draftedBy);
+  const former = cfg?.formerDraftedBy ?? [];
+  const files = latestFiles(store, tasks).map((f) => (f.path.endsWith('.cpp') && former.length ? { ...f, content: renamePerson(f.content, former, person) } : f));
+  const fnCount = tasks.reduce((s, t) => s + t.functions.length, 0);
+  const finisher = new Map(tasks.map((t) => [t.id, finishingModel(store, t)]));
+  const models = [...new Set([...finisher.values()].filter((m): m is string => !!m))];
+  const draftedBy = models.length ? draftedByText(person, models) : null;
+  const lines = tasks.flatMap((t) => t.functions.map((f) => `- ${f.rva} ${f.name ?? ''}${finisher.get(t.id) ? ` (drafted by ${finisher.get(t.id)})` : ''}`));
+  const trailers = coAuthorTrailers(models);
+  const message = [
+    `Reconstruct ${fnCount} function(s) across ${new Set(tasks.map((t) => t.unit)).size} unit(s)`,
+    '',
+    lines.join('\n'),
+    ...(draftedBy ? ['', `Drafted by ${draftedBy}.`] : []),
+    ...(trailers.length ? ['', ...trailers] : []),
+  ].join('\n');
+  return { files, fnCount, finisher, models, draftedBy, person, message };
+}
+
 /** The model of the packet's accepted attempt. */
-function finishingModel(store: Store, t: TaskRow): string | null {
+export function finishingModel(store: Store, t: TaskRow): string | null {
   const v = t.lastVerdictId ? store.getVerdict(t.lastVerdictId) : null;
   return (v ? store.getAttempt(v.attemptId)?.model : null) ?? null;
 }

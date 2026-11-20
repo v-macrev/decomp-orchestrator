@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { coAuthorTrailers, draftedByText, listModels, personOf, setDraftedBy } from '../src/orchestrator/attribution.js';
+import { coAuthorTrailers, draftedByText, listModels, personOf, renamePerson, setDraftedBy } from '../src/orchestrator/attribution.js';
 import { repairAnswer } from '../src/orchestrator/headerRepair.js';
 import { cheatScan } from '../src/gatekeeper/rules.js';
 
@@ -79,5 +79,29 @@ describe('the "Drafted by" header line', () => {
     const h = '// Source exposure: mixed.\n#pragma once\nclass A {};\n';
     const r = await repairAnswer([{ path: 'r/A.h', content: h }], async () => h, {}, { attribution: { person: null, model: 'gpt-6.2-sol' } });
     expect(r.files[0]!.content).toBe(h);
+  });
+});
+
+describe('renamePerson', () => {
+  const unit = (line: string) => ['// X functions for build sse.', line, '', 'int X::A() { return 1; }', '// Drafted by decomp-orchestrator test, assisted by m (a body comment, untouched)', ''].join('\n');
+  it('renames this run\'s own line, keeping the models', () => {
+    const out = renamePerson(unit('// Drafted by decomp-orchestrator test, assisted by gpt-6.1-terra and claude-opus-5-5.'), ['decomp-orchestrator test'], 'v-macrev');
+    expect(out.split('\n')[1]).toBe('// Drafted by v-macrev, assisted by gpt-6.1-terra and claude-opus-5-5.');
+    expect(out).toContain('// Drafted by decomp-orchestrator test, assisted by m (a body comment, untouched)');
+  });
+  it('renames after another contributor\'s line and leaves other people alone', () => {
+    const later = renamePerson(unit('// Drafted by gpt-6.1-terra; later functions by old name, assisted by claude-sonnet-5-5.'), ['old name'], 'v-macrev');
+    expect(later.split('\n')[1]).toBe('// Drafted by gpt-6.1-terra; later functions by v-macrev, assisted by claude-sonnet-5-5.');
+    const other = unit('// Drafted by someone else, assisted by gpt-6.1-terra.');
+    expect(renamePerson(other, ['old name'], 'v-macrev')).toBe(other);
+  });
+  it('drops the person when the run no longer names one, and ignores placeholders', () => {
+    expect(renamePerson(unit('// Drafted by old, assisted by gpt-6.1-terra.'), ['old'], null).split('\n')[1]).toBe('// Drafted by gpt-6.1-terra.');
+    const src = unit('// Drafted by operator, assisted by gpt-6.1-terra.');
+    expect(renamePerson(src, ['operator'], 'v-macrev')).toBe(src);
+  });
+  it('keeps CRLF line ends', () => {
+    const src = unit('// Drafted by old, assisted by m-1.').replace(/\n/g, '\r\n');
+    expect(renamePerson(src, ['old'], 'v-macrev')).toBe(src.replace('old, assisted', 'v-macrev, assisted'));
   });
 });

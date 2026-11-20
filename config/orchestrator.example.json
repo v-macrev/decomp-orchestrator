@@ -4,6 +4,7 @@
   "dbPath": "data/orchestrator.db",
   "mode": "repo",
   "accountsFile": "config/accounts.json",
+  "runDefaults": { "draftedBy": "your-github-login" },
   "repo": {
     "path": "D:/Repositories/skyrim_decomp",
     "baseRef": "origin/main",

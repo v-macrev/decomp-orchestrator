@@ -25,7 +25,7 @@ import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
-import type { Backlog, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
+import type { Backlog, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult } from './types.js';
 
 export interface SrRepoConfig {
   /** Paths are on the repository host: Windows/POSIX paths for `local`, Linux paths for `wsl`. */
@@ -446,6 +446,116 @@ export class SrRepo implements RepoAdapter {
       return { branch: null, verified: false, problems: [`git: ${(commit.stderr || commit.stdout).slice(0, 300)}`] };
     }
     return { branch, verified: true, problems };
+  }
+
+  async submitBatch(input: SubmitBatchInput): Promise<SubmitBatchResult> {
+    const slot = this.slotCount;
+    const p = this.wt(slot);
+    const out: SubmitBatchResult = { ok: false, dryRun: input.dryRun, problems: [], blockers: [], warnings: [], plan: [], pullRequest: null, link: null, error: null };
+    const last = input.tasks.at(-1);
+    if (!last?.srTaskId || !/^[A-Za-z0-9._-]+$/.test(last.srTaskId)) return { ...out, problems: ['the batch has no submittable sr task'] };
+    if (!/^[A-Za-z0-9._/-]+$/.test(input.branch)) return { ...out, problems: [`branch name ${input.branch} is not plain`] };
+    const tdir = this.p.join(this.cfg.localDir, 'contrib', 'tasks', last.srTaskId);
+    let unit: string[];
+    try {
+      const task = JSON.parse(readFileSync(this.host.fsPath(this.p.join(tdir, 'task.json')), 'utf8')) as { contrib?: { unit?: string[] } };
+      unit = (task.contrib?.unit ?? []).map((u) => u.replace(/\\/g, '/'));
+      if (!unit.length) throw new Error('task.json lists no unit');
+    } catch (e) {
+      return { ...out, problems: [`${last.srTaskId}: ${(e as Error).message.slice(0, 200)}`] };
+    }
+    try {
+      await this.ensureWorktree(slot);
+    } catch (e) {
+      return { ...out, problems: [`staging worktree: ${(e as Error).message.slice(0, 200)}`] };
+    }
+    try {
+      // The same tree the PR will carry, from the base, re-verified packet by packet: this also
+      // writes each task's last-compare.json, which `sr submit` checks against the unit's digest.
+      await this.writeFiles(slot, input.files);
+      const ac = new AbortController();
+      for (const t of input.tasks) {
+        if (!t.srTaskId) {
+          out.problems.push(`${t.id}: no sr task id`);
+          continue;
+        }
+        const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: ac.signal, timeoutMs: 600_000 });
+        if (!r.allPass) out.problems.push(`${t.id}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
+      }
+      if (out.problems.length) return out;
+      const git = async (args: string[]) => {
+        const r = await this.git(p, args);
+        if (r.code !== 0) throw new Error(`git ${args[0]}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+        return r.stdout;
+      };
+      await git(['checkout', '-q', '-B', input.branch]);
+      const others = input.files.map((f) => f.path).filter((f) => !unit.includes(f));
+      if (others.length) {
+        await git(['add', '--', ...others]);
+        await git(['commit', '-q', '-m', input.message]);
+      }
+      // `sr submit` needs the network (claims check, push, gh) and the operator's own git/gh
+      // credentials: it runs on the host, never in the sandbox, and without SR_CONTRIB_OFFLINE.
+      const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_NO_SIBLING_NAMES: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', GIT_TERMINAL_PROMPT: '0' };
+      const list = (v: unknown) => (Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x)).slice(0, 400)) : []);
+      // `sr submit` checks other people's open claims and PRs only for the task it runs on: ask it
+      // (dry run, which changes nothing) about every other task of the batch too.
+      const collisions: string[] = [];
+      for (const id of new Set(input.tasks.slice(0, -1).map((t) => t.srTaskId).filter((x): x is string => !!x && x !== last.srTaskId && /^[A-Za-z0-9._-]+$/.test(x)))) {
+        const probe = await this.host.run(this.cfg.python, ['tools/contrib.py', '--json', 'submit', id, '--drafted-by', input.draftedBy, '--dry-run'], { cwd: p, env, timeoutMs: 300_000, maxOutputBytes: 8 * 1024 * 1024 });
+        const pj = parseJsonOutput(probe.stdout) as Record<string, unknown> | null;
+        if (!pj) out.warnings.push(`${id}: claims check did not run (exit ${probe.code})`);
+        collisions.push(...list(pj?.blockers).filter((b) => /another open claim or pull request/i.test(b)).map((b) => `${id}: ${b}`));
+        out.warnings.push(...list(pj?.warnings).filter((w) => /GitHub claims not checked/i.test(w)).map((w) => `${id}: ${w}`));
+      }
+      if (collisions.length && !input.dryRun) {
+        out.blockers = collisions;
+        out.error = 'other contributors have open claims or pull requests on functions in this batch; nothing was submitted';
+        return out;
+      }
+      const args = ['tools/contrib.py', '--json', 'submit', last.srTaskId, '--drafted-by', input.draftedBy, ...(input.dryRun ? ['--dry-run'] : [])];
+      const run = await this.host.run(this.cfg.python, args, { cwd: p, env, timeoutMs: 900_000, maxOutputBytes: 8 * 1024 * 1024 });
+      const j = parseJsonOutput(run.stdout) as Record<string, unknown> | null;
+      out.blockers = [...collisions, ...list(j?.blockers)];
+      out.warnings = [...out.warnings, ...list(j?.warnings)];
+      out.plan = list(j?.plan);
+      out.pullRequest = typeof j?.pull_request === 'string' ? j.pull_request : null;
+      out.link = typeof j?.link === 'string' ? j.link : null;
+      out.ok = run.code === 0 && j?.ok !== false && !out.blockers.length;
+      if (!out.ok) out.error = String(j?.error ?? (run.timedOut ? 'sr submit timed out' : `sr submit exit ${run.code}: ${(run.stderr || run.stdout).trim().slice(-300)}`));
+      if (out.ok && !input.dryRun) {
+        const branch = input.branch;
+        // The other packets' tasks are part of this PR too: record it where `sr` keeps task state.
+        for (const t of input.tasks.slice(0, -1)) {
+          if (!t.srTaskId || !/^[A-Za-z0-9._-]+$/.test(t.srTaskId) || t.srTaskId === last.srTaskId) continue;
+          const file = this.host.fsPath(this.p.join(this.cfg.localDir, 'contrib', 'tasks', t.srTaskId, 'task.json'));
+          try {
+            const task = JSON.parse(readFileSync(file, 'utf8')) as { contrib?: Record<string, unknown> };
+            writeFileSync(file, `${JSON.stringify({ ...task, contrib: { ...task.contrib, submitted: branch } }, null, 2)}\n`, 'utf8');
+          } catch (e) {
+            out.warnings.push(`${t.srTaskId}: could not record the submission: ${(e as Error).message.slice(0, 200)}`);
+          }
+        }
+        // `sr submit` titles and describes the PR from the submitted task; name the whole batch.
+        if (out.pullRequest && (input.title || input.extraBody)) {
+          const bodyFile = this.p.join(tdir, 'pr-body-batch.md');
+          try {
+            const body = readFileSync(this.host.fsPath(this.p.join(tdir, 'pr-body.md')), 'utf8');
+            writeFileSync(this.host.fsPath(bodyFile), `${body.trimEnd()}\n\n${input.extraBody ?? ''}\n`, 'utf8');
+            const edit = await this.host.run('gh', ['pr', 'edit', out.pullRequest, ...(input.title ? ['--title', input.title] : []), '--body-file', bodyFile], { cwd: p, timeoutMs: 120_000 });
+            if (edit.code !== 0) out.warnings.push(`gh pr edit: ${(edit.stderr || edit.stdout).trim().slice(0, 300)}; the PR keeps sr submit's title and body`);
+          } catch (e) {
+            out.warnings.push(`PR body: ${(e as Error).message.slice(0, 200)}`);
+          }
+        }
+      }
+      return out;
+    } catch (e) {
+      return { ...out, ok: false, error: (e as Error).message };
+    } finally {
+      // The pushed branch stays (it is the PR); the staging worktree goes back to the base.
+      await this.reset(slot).catch(() => undefined);
+    }
   }
 
   // ---------------------------------------------------------------- context

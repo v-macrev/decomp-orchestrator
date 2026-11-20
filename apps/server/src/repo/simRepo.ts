@@ -106,7 +106,9 @@ export class SimRepo implements RepoAdapter, SimOracle {
   }
 
   async discover(sel: SelectionSpec): Promise<DiscoveredFunction[]> {
-    if (sel.source !== 'synthetic') throw new Error('SimRepo supports only synthetic selection');
+    // Explicit RVAs resolve against functions this simulator has already discovered (carry-over runs).
+    if (sel.source === 'rva_list') return sel.rvas.map((r) => this.functions.get(r.toLowerCase())).filter((f): f is DiscoveredFunction => !!f);
+    if (sel.source !== 'synthetic') throw new Error('SimRepo supports only synthetic and rva_list selection');
     const rnd = mulberry32(sel.seed);
     const out: DiscoveredFunction[] = [];
     let cls = 0;

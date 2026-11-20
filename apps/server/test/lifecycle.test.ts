@@ -13,7 +13,7 @@ import { RunEngine } from '../src/orchestrator/engine.js';
 import { AccountPool } from '../src/pool/scheduler.js';
 import { ProviderRegistry } from '../src/providers/registry.js';
 import { SimRepo } from '../src/repo/simRepo.js';
-import type { StageBatchInput, StageBatchResult } from '../src/repo/types.js';
+import type { RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult } from '../src/repo/types.js';
 import { EventBus } from '../src/telemetry/events.js';
 import { mockAccount } from './helpers.js';
 
@@ -273,5 +273,128 @@ describe('retrying failed packets of a paused run', () => {
     expect(r.ok).toBe(true);
     await engine2.waitFor(run.id);
     expect(s.store.getRun(run.id)!.status).toBe('completed');
+  }, 60_000);
+});
+
+describe('editing and deleting runs', () => {
+  it('renames the person from then on, re-records held claims, and batches a staging-off run under the new name', async () => {
+    const s = setup();
+    const run = s.engine.createRun('off', { flowId: 'default', selection: { source: 'synthetic', count: 8, seed: 4 }, staging: 'off', draftedBy: 'decomp-orchestrator test' }, flow());
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    expect(s.store.functionCounts(run.id).passed ?? 0).toBeGreaterThan(0);
+    const claims: string[] = [];
+    (s.repo as RepoAdapter).recordAttribution = async (i) => {
+      claims.push(i.draftedBy);
+      return { ok: true, problems: [] };
+    };
+    const edited = await s.engine.updateRun(run.id, { draftedBy: 'v-macrev', name: 'real test', prBatchSize: 30 });
+    expect(edited.name).toBe('real test');
+    expect(edited.config.draftedBy).toBe('v-macrev');
+    expect(edited.config.formerDraftedBy).toEqual(['decomp-orchestrator test']);
+    expect(edited.config.prBatchSize).toBe(30);
+    await expect(s.engine.updateRun(run.id, { staging: 'branches' })).rejects.toThrow(/decided when the run finishes/);
+    expect(claims).toHaveLength(0); // a finished staging-off run holds no claims to re-record
+
+    const messages: string[] = [];
+    const real = s.repo.stageBatch.bind(s.repo);
+    s.repo.stageBatch = async (input: StageBatchInput) => {
+      messages.push(input.message);
+      return real(input);
+    };
+    const r = await s.engine.restage(run.id);
+    expect(r.staged).toBeGreaterThan(0);
+    expect(claims.length).toBeGreaterThan(0); // batching takes the claims back, as the new person
+    for (const c of claims) expect(c).toMatch(/^v-macrev, assisted by /);
+    expect(messages[0]).toMatch(/\nDrafted by v-macrev, assisted by /);
+    expect(s.store.functionCounts(run.id).passed ?? 0).toBe(0);
+    await expect(s.engine.restage(run.id)).rejects.toThrow(/no passed packets/);
+  }, 60_000);
+
+  it('deletes a finished run with everything under it, and refuses a loaded one', async () => {
+    const s = setup();
+    const run = createRun(s, 'to-delete', 6, 8);
+    await s.engine.start(run.id);
+    await expect(s.engine.deleteRun(run.id)).rejects.toThrow(/loaded|cancel/);
+    await s.engine.waitFor(run.id);
+    const keep = createRun(s, 'keep', 4, 9);
+    await s.engine.deleteRun(run.id);
+    expect(s.store.getRun(run.id)).toBeNull();
+    for (const t of ['tasks', 'attempts', 'pr_batches', 'run_workers', 'events']) {
+      const n = (s.store.db.prepare(`SELECT COUNT(*) n FROM ${t} WHERE run_id = ?`).get(run.id) as { n: number }).n;
+      expect(n, t).toBe(0);
+    }
+    expect(s.store.getRun(keep.id)).not.toBeNull();
+  }, 60_000);
+});
+
+describe('carrying failed functions into a new run', () => {
+  it('adds the dead functions of earlier runs to the new run\'s selection', async () => {
+    const s = setup();
+    const first = createRun(s, 'first', 10, 11);
+    await s.engine.start(first.id);
+    await s.engine.waitFor(first.id);
+    const victims = s.store.listTasks(first.id, { limit: 2 });
+    s.store.db.prepare(`UPDATE tasks SET state = 'dead' WHERE id IN (?, ?)`).run(victims[0]!.id, victims[1]!.id);
+    const dead = s.store.deadFunctions([first.id]);
+    expect(dead.map((d) => d.rva).sort()).toEqual(victims.flatMap((t) => t.functions.map((f) => f.rva)).sort());
+
+    const second = s.engine.createRun('second', { flowId: 'default', selection: { source: 'synthetic', count: 3, seed: 21 }, carry: { fromRuns: [first.id], rvas: dead.map((d) => d.rva) } }, flow());
+    await s.engine.start(second.id);
+    await s.engine.waitFor(second.id);
+    const rvas = new Set(s.store.listTasks(second.id, { limit: 1000 }).flatMap((t) => t.functions.map((f) => f.rva)));
+    for (const d of dead) expect(rvas.has(d.rva)).toBe(true);
+    expect(rvas.size).toBe(3 + dead.length);
+    const ev = s.store.db.prepare(`SELECT msg FROM events WHERE run_id = ? AND kind = 'run.carried'`).get(second.id) as { msg: string } | undefined;
+    expect(ev?.msg).toMatch(new RegExp(`carried over ${dead.length} dead function`));
+  }, 60_000);
+});
+
+describe('submitting a staged batch', () => {
+  it('submits through the last unit\'s task, only marks a real submission, and never twice', async () => {
+    const s = setup();
+    const run = createRun(s, 'submit', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = s.store.listBatches(run.id).find((b) => b.status === 'branch_ready')!;
+    expect(batch).toBeTruthy();
+    const inputs: SubmitBatchInput[] = [];
+    (s.repo as RepoAdapter).submitBatch = async (input): Promise<SubmitBatchResult> => {
+      inputs.push(input);
+      return { ok: true, dryRun: input.dryRun, problems: [], blockers: [], warnings: [], plan: input.dryRun ? ['would run: git push'] : [], pullRequest: input.dryRun ? null : 'https://github.com/o/r/pull/1', link: null, error: null };
+    };
+
+    const dry = await s.engine.submitBatch(run.id, batch.id, { dryRun: true });
+    expect(dry.ok).toBe(true);
+    expect(s.store.getBatch(batch.id)!.status).toBe('branch_ready');
+    const input = inputs[0]!;
+    expect(input.dryRun).toBe(true);
+    const units = input.tasks.map((t) => t.task.unit);
+    expect(units.at(-1)).toBe([...units].sort().at(-1)); // the last unit is the one sr submit runs on
+    if (new Set(units).size > 1) {
+      expect(input.title).toMatch(/^Reconstruct \d+ functions$/);
+      expect(input.extraBody).toContain('the others are:');
+      expect(input.message).not.toContain(input.tasks.at(-1)!.functions[0]!.rva);
+    }
+
+    const real = await s.engine.submitBatch(run.id, batch.id, { dryRun: false });
+    expect(real.pullRequest).toBe('https://github.com/o/r/pull/1');
+    const after = s.store.getBatch(batch.id)!;
+    expect(after.status).toBe('submitted');
+    expect((after.detail as unknown as { pr: string }).pr).toBe('https://github.com/o/r/pull/1');
+    await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: false })).rejects.toThrow(/already submitted/);
+  }, 60_000);
+
+  it('refuses a batch whose re-verification failed, and adapters that cannot submit', async () => {
+    const s = setup();
+    const run = createRun(s, 'nosubmit', 6, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = s.store.listBatches(run.id)[0]!;
+    await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: true })).rejects.toThrow(/cannot submit/);
+    s.store.updateBatch(batch.id, { status: 'failed' });
+    (s.repo as RepoAdapter).submitBatch = async () => { throw new Error('must not be called'); };
+    await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: true })).rejects.toThrow(/only a re-verified batch/);
   }, 60_000);
 });
