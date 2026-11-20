@@ -278,8 +278,12 @@ export class RunEngine {
     return { ok: true };
   }
 
-  /** Retry the run's dead-lettered packets only, returning them to the fast tier first. */
-  async retryFailedTasks(runId: string): Promise<{ ok: true; requeued: number; tier: number; tierLabel: string; status: string } | { ok: false; reason: string }> {
+  /**
+   * Retry the run's dead-lettered packets only. By default each goes back to the tier where it
+   * stopped (it already proved too hard for the tiers below, and its history carries over);
+   * `from: 'fast'` starts the ladder again.
+   */
+  async retryFailedTasks(runId: string, opts: { from?: 'last' | 'fast' } = {}): Promise<{ ok: true; requeued: number; tier: number; tierLabel: string; status: string } | { ok: false; reason: string }> {
     const { store, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) return { ok: false, reason: 'run not found' };
@@ -293,13 +297,16 @@ export class RunEngine {
     if (!active && this.exclusiveHolder) return { ok: false, reason: `worktree slots are busy (${this.exclusiveHolder}); retry when they are free` };
 
     const plan = compileFlowPlan(row.flow);
-    const tier = plan.tiers.findIndex((t) => t.capability === 'fast');
-    if (tier < 0) return { ok: false, reason: 'flow has no fast worker tier; add one before retrying failed tasks' };
-    const tierLabel = plan.tiers[tier]!.node.data.label || plan.tiers[tier]!.node.id;
-    const requeued = this.queue.requeueDead(runId, tier);
+    const fromFast = opts.from === 'fast';
+    const fast = plan.tiers.findIndex((t) => t.capability === 'fast');
+    if (fromFast && fast < 0) return { ok: false, reason: 'flow has no fast worker tier; add one before retrying failed tasks' };
+    const dead = store.db.prepare("SELECT MAX(tier) t FROM tasks WHERE run_id = ? AND state = 'dead'").get(runId) as { t: number | null };
+    const tier = fromFast ? fast : Math.min(dead.t ?? 0, plan.tiers.length - 1);
+    const tierLabel = fromFast ? plan.tiers[tier]!.node.data.label || plan.tiers[tier]!.node.id : 'the tier where each packet stopped';
+    const requeued = this.queue.requeueDead(runId, fromFast ? tier : null);
     if (!requeued) return { ok: true, requeued: 0, tier, tierLabel, status: row.status };
 
-    events.emit('run.retry_failed', `requeued ${requeued} dead packet(s) at ${tierLabel} (fast tier first)`, {
+    events.emit('run.retry_failed', `requeued ${requeued} dead packet(s) at ${tierLabel}`, {
       runId, level: 'warn', data: { requeued, tier, tierLabel },
     });
     if (active) {
@@ -514,7 +521,24 @@ export class RunEngine {
           ? stealSources(run.plan, tier).filter((t) => myRank - CAPABILITY_RANK[run.plan.tiers[t]!.capability] <= routing.stealMaxGap).map((t) => ({ tier: t, minBacklog: run.idleSlots(t) }))
           : [];
         const worker = run.workerBySlot.get(slot);
-        const [leased] = this.queue.lease(runId, tier, 1, this.opts.leaseMs, { stealFrom: steal, worker });
+        let [leased] = this.queue.lease(runId, tier, 1, this.opts.leaseMs, { stealFrom: steal, worker });
+        let workTier = tier;
+        if (!leased && routing.helpUp) {
+          // Nothing here or below: run a higher tier's ready packet in this worktree, with that
+          // tier's node (models, limits). The packet keeps its tier; only the worktree is lent.
+          const myCap = CAPABILITY_RANK[run.plan.tiers[tier]!.capability];
+          const higher = run.plan.tiers.filter((t) => t.index !== tier && CAPABILITY_RANK[t.capability] > myCap).sort((a, b) => CAPABILITY_RANK[b.capability] - CAPABILITY_RANK[a.capability]);
+          for (const up of higher) {
+            [leased] = this.queue.lease(runId, up.index, 1, this.opts.leaseMs, { worker });
+            if (leased) {
+              workTier = up.index;
+              events.emit('task.helped', `${run.plan.tiers[tier]!.node.data.label || run.plan.tiers[tier]!.node.id} is idle; its worktree runs a ${up.node.data.label || up.node.id} packet with that tier's models`, {
+                runId, taskId: leased.task.id, level: 'debug', data: { slotTier: tier, tier: up.index },
+              });
+              break;
+            }
+          }
+        }
         if (!leased) {
           if (!this.queue.hasOpenWork(runId)) return;
           if (worker && this.queue.workerRemaining(runId, worker) <= 0 && !run.capped.has(slot)) {
@@ -547,7 +571,7 @@ export class RunEngine {
         }
         run.busySlots.add(slot);
         try {
-          await this.processTask(run, tier, slot, leased.task, leased.leaseId);
+          await this.processTask(run, workTier, slot, leased.task, leased.leaseId);
         } finally {
           run.busySlots.delete(slot);
           run.wake.notify();

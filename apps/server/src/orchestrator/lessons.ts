@@ -28,7 +28,7 @@ export const FINDING_GUIDANCE: Record<string, string> = {
   PREFLIGHT_PROBLEM: 'Every file you change needs a truthful "// Code origin:" line in its leading header — including the .h — and must keep licence notices complete.',
   SCOPE_LINE_TOO_LONG: 'Keep every line under 200 characters; state origin and adaptation in short header lines.',
   COMPARE_FUNCTION_SIZE_MISMATCH: 'The candidate compiles to a different size: compare branch structure, inlined helpers and return paths with the target before changing details.',
-  COMPARE_COMPILE_ERROR: 'Fix exactly the compiler errors listed. Declare every type and callee you use; an include the compiler cannot open can be written relative to the including file ("../../area/Y.h"), staying inside reconstruction/.',
+  COMPARE_COMPILE_ERROR: 'Fix exactly the compiler errors listed. Declare every type and callee you use; an include the compiler cannot open can be written relative to the including file ("../../area/Y.h"), staying inside reconstruction/. To change a line of the .h (an #include, a member), return the complete .h in "files"; that is allowed even in edits mode.',
   COMPARE_CODE_BYTE_MISMATCH: 'Same size, different code: the shape is close. Check operand types and widths, field offsets, comparison direction and which value is tested first; keep the size.',
   REPEATED_CANDIDATE: 'This exact code already failed (see <history>). Try a structurally different reconstruction.',
   COMPARE_SYMBOL_MISSING: 'Define the function with exactly the declared signature so it binds to its symbol.',

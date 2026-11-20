@@ -68,7 +68,7 @@ function NewRun({ mode, onCreated }: { mode: string; onCreated: (id: string) => 
   const [flows, setFlows] = useState<Flow[]>([]);
   const [f, setF] = useState({
     name: `run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, flowId: 'default', source: mode === 'sim' ? 'synthetic' : 'sr_next',
-    count: 500, maxSize: 64, rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: false, draftedBy: 'operator',
+    count: 500, maxSize: 64, rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: true, draftedBy: 'operator',
     routing: true, llmTieBreak: false, promoteAfter: 2, workStealing: true, contextMode: 'budgeted',
     skills: true, autoCurate: false, staging: mode === 'sim' ? 'branches' : 'off',
     capPerWorker: 60, gMaxSize: 256, gNamespaces: '', gModules: '', gRange: '', gExcludeGuess: false, gExcludeDrafted: false,
@@ -251,7 +251,7 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
           <button onClick={() => act('pause')} disabled={status !== 'running'}>Pause</button>
           <button onClick={() => act('pause', { immediate: true })} disabled={status !== 'running'} title="Abort in-flight attempts (not counted against tasks)">Pause now</button>
           <button onClick={() => act('resume')} disabled={status !== 'paused' || (m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd)} title={m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd ? 'Budget reached: set a new budget below to resume' : undefined}>Resume</button>
-          <ConfirmButton onConfirm={retryFailed} disabled={!deadTasks || retryingFailed || retryUnavailable} className="primary" confirmLabel={`Retry ${deadTasks} failed task(s) at fast tier?`} title="Retries only dead packets; successful and quarantined tasks are left alone. Retries use this run's remaining budget.">{retryingFailed ? 'Retrying…' : `Retry failed tasks (${deadTasks})`}</ConfirmButton>
+          <ConfirmButton onConfirm={retryFailed} disabled={!deadTasks || retryingFailed || retryUnavailable} className="primary" confirmLabel={`Retry ${deadTasks} failed task(s) where each stopped?`} title="Retries only dead packets; successful and quarantined tasks are left alone. Retries use this run's remaining budget.">{retryingFailed ? 'Retrying…' : `Retry failed tasks (${deadTasks})`}</ConfirmButton>
           <ConfirmButton onConfirm={() => act('cancel')} disabled={['completed', 'cancelled', 'failed'].includes(status)} confirmLabel="Cancel run? Open tasks stop">Cancel</ConfirmButton>
         </div>
         {retryFailedError && <div className="lvl-error">Retry failed: {retryFailedError}</div>}

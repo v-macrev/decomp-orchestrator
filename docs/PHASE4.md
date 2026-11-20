@@ -226,3 +226,11 @@ The attempt log showed why:
 
 Everything shown comes from the candidate's own compiled code or from counts; no target bytes or
 listing text reach a worker without exposure consent.
+
+### Throughput for the hardest packets
+
+| Problem seen | Fix |
+|---|---|
+| A flow asking for 34 workers got 3 worktrees, one per tier, so the last hard packets queued behind a single frontier slot while the other worktrees sat idle | `routing.helpUp` (default on): a slot with nothing on its own tier or below runs a higher tier's ready packet with that tier's node and models; the packet keeps its tier, only the worktree is lent |
+| "Retry failed tasks" sent packets that had died at the frontier back to the fast tier, spending attempts on the tiers that had already failed | Retries go back to the tier where each packet stopped (its history carries over); `{"from":"fast"}` on `POST /api/runs/:id/retry-failed` restarts the ladder |
+| On a large unit (edits mode) the worker could not change an `#include` in the header: complete files were forbidden | A complete `.h` is allowed in every mode; only a complete `.cpp` is refused in edits mode, because its accepted bodies are elided |

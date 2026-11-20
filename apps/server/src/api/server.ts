@@ -144,7 +144,8 @@ export async function buildServer(app: App) {
     return run;
   });
   f.post('/api/runs/:id/retry-failed', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
-    const result = await engine.retryFailedTasks(req.params.id);
+    const from = (req.body as { from?: unknown } | undefined)?.from === 'fast' ? 'fast' : 'last';
+    const result = await engine.retryFailedTasks(req.params.id, { from });
     return result.ok ? result : reply.code(result.reason === 'run not found' ? 404 : 409).send(result);
   });
   f.get('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {

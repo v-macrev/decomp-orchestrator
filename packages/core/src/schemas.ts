@@ -565,6 +565,12 @@ export const RoutingConfig = z.object({
   workStealing: z.boolean().default(true),
   /** How many capability steps down a slot may steal (1: frontier takes balanced work, never fast). */
   stealMaxGap: z.number().int().min(1).max(2).default(1),
+  /**
+   * A slot with nothing to do on its own tier (or below) runs a higher tier's ready packet with that
+   * tier's models. Worktrees are the scarce resource; without this, the last hard packets of a run
+   * queue behind one frontier slot while the other worktrees sit idle.
+   */
+  helpUp: z.boolean().default(true),
 });
 export type RoutingConfig = z.infer<typeof RoutingConfig>;
 

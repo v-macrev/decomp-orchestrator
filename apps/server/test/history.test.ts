@@ -141,3 +141,19 @@ describe('machine-code grouping', () => {
     expect(text).toContain('Every compared attempt (3) differs at the very first instruction');
   });
 });
+
+describe('retrying dead packets', () => {
+  it('keeps each packet on the tier where it stopped unless asked to start again at the fast tier', async () => {
+    const { TaskQueue } = await import('../src/queue/taskQueue.js');
+    const { store } = seed([]);
+    store.insertTasks('run1', [{ id: 'task2', unit: 'r/B.cpp', functions: [{ rva: '0x1', name: 'B::F', size: 8, nameOrigin: null }], priority: 1, tier: 2 }]);
+    store.db.prepare("UPDATE tasks SET state = 'dead', tier = 2, attempts_at_tier = 9 WHERE run_id = 'run1'").run();
+    const q = new TaskQueue(store);
+    expect(q.requeueDead('run1', null)).toBe(2);
+    expect(store.getTask('task2')!.tier).toBe(2);
+    expect(store.getTask('task2')!.attemptsAtTier).toBe(0);
+    store.db.prepare("UPDATE tasks SET state = 'dead' WHERE run_id = 'run1'").run();
+    q.requeueDead('run1', 0);
+    expect(store.getTask('task2')!.tier).toBe(0);
+  });
+});

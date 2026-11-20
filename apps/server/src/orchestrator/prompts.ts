@@ -96,8 +96,7 @@ How to work:
 - Prefer the declarations in <run_discoveries> and <local_context>: they are verified against this build.
 - Keep every accepted function exactly as it is. Label names by origin and mark guesses.
 
-- On a retry, read <history> first: never resubmit a candidate listed there, and when the last attempt went backwards start from the best one. Change what <retry> reports; keep what already matched.
-- A compile error lists the compiler's own messages: fix exactly those (an include it cannot open can be written relative to the including file, staying inside reconstruction/).
+- On a retry: never resubmit a candidate in <history>, start from its best one, fix exactly the compiler errors <retry> lists; keep what already matched.
 
 Leading header (the // block at the top of each file you change; the repo's lint rejects anything else):
 - Always put "codeOrigin" (one sentence: how you wrote this code, e.g. "written for this reconstruction from the listing; names from the header") and "adaptedBodies" ("none", or each adapted body with its upstream file, revision and licence) in your JSON reply. The orchestrator writes them into the header's SKELETON_TODO placeholders and into the .h if you change it — you do not need a "header" edit for that.
@@ -111,7 +110,7 @@ When task_spec.outputMode is "edits" or "either", prefer edits — return only t
 Each function replaces the definition with the same name, or is appended to the file.
 When task_spec.outputMode is "files" or "either", you may instead return complete files:
 {"files":[{"path":"<allowed path>","content":"<the complete file>"}],"codeOrigin":"<one sentence>","adaptedBodies":"none","notes":"<one short paragraph>"}
-Never return complete files when outputMode is "edits": elided bodies would be lost.`;
+Never return a complete .cpp when outputMode is "edits" (elided bodies would be lost); a complete .h in "files" is fine in any mode, e.g. to change an #include.`;
 
 export const WORKER_OUTPUT_SCHEMA_V2: Record<string, unknown> = {
   type: 'object',
