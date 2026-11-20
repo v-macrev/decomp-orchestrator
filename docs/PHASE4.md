@@ -267,3 +267,18 @@ help-up a packet can pass on a different model from the one it started on.
 
 The person is the run's `draftedBy` (the contributor's name or login). The schema's placeholder
 `operator` counts as no person.
+
+### Slots that lose their worktree
+
+In the retry run, `TESObjectARMO::GetSkill` reached an exact 31/31 match on Opus. That attempt was
+rejected for a comment the repo's label grammar misread. The packet was later dead-lettered by
+three infrastructure failures, all `Unable to create .../worktrees/slot-2/index.lock: File
+exists`. The WSL host wraps every command in `timeout -k`, and aborting an attempt kills
+`wsl.exe`. A git killed mid-reset leaves its lock behind, every later reset of that slot fails, and
+each failure was charged to whichever packet the slot had just leased.
+
+| Problem | Fix |
+|---|---|
+| A stale `index.lock` failed every reset until an operator deleted it | `SrRepo.reset` clears the lock only when it is provably abandoned: no live git process works in or on the worktree (checked through `/proc`, by working directory and command line), and the lock is at least 10 s old. Then it resets once more. A host where processes cannot be inspected never has a lock removed. Resets of one slot are serialized. Each recovery is reported as `slot.lock_recovered` |
+| A slot that could not be restored dead-lettered packets: three of them and a packet was gone | The reset failure is the slot's fault: the packet goes back to the queue uncharged, and the slot is parked (`slot.parked`, back-off 15 s doubling to 5 min). It takes no work until a reset succeeds (`slot.recovered`), and work-stealing does not count it as idle |
+| The infrastructure-failure path inserted a `retry` verdict and then tried the lease-guarded move separately | Same transaction as `settle()`: a lost lease files the verdict as `stale`, moves nothing and emits `task.stale` instead of `task.infra` |

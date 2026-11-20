@@ -17,7 +17,7 @@
 //     --read-only ...` with only the worktree and SR_LOCAL_DIR mounted;
 //   * writes are realpath-checked so a symlink in the worktree cannot redirect them.
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, statSync } from 'node:fs';
 import { dirname as fsDirname } from 'node:path';
 import type { CompareFunctionResult, Finding, FunctionFeatures, FunctionTarget, SelectionSpec } from '@decomp/core';
 import { featuresFromPack, type PackJson } from '../intel/x64features.js';
@@ -58,6 +58,22 @@ const DOCS: Array<[string, string, number]> = [
 
 export class InfraError extends Error {}
 
+/** A git lock younger than this may belong to a command that is just starting: never touch it. */
+const STALE_LOCK_MS = 10_000;
+/**
+ * Prints "<pid> <comm>" for each live git process whose working directory is in the worktree or
+ * whose command line names the worktree or its git dir; "NOPROC" when /proc is not available.
+ */
+const LIVE_GIT_SCRIPT = [
+  '[ -d /proc/self ] || { echo NOPROC; exit 0; }',
+  'for d in /proc/[0-9]*; do',
+  '  n=$(cat "$d/comm" 2>/dev/null) || continue',
+  '  case "$n" in git*) ;; *) continue ;; esac',
+  '  c=$(readlink "$d/cwd" 2>/dev/null)',
+  '  case "$c" in "$1"|"$1"/*) echo "${d#/proc/} $n"; continue ;; esac',
+  '  if tr "\\0" " " < "$d/cmdline" 2>/dev/null | grep -qF -e "$1" -e "$2"; then echo "${d#/proc/} $n"; fi',
+  'done',
+].join('\n');
 export class SrRepo implements RepoAdapter {
   readonly name = 'skyrim_decomp';
   readonly slotCount: number;
@@ -145,12 +161,61 @@ export class SrRepo implements RepoAdapter {
     await this.git(this.cfg.repoPath, ['worktree', 'prune']);
   }
 
+  notice: ((kind: string, msg: string) => void) | null = null;
+
+  /**
+   * Restore a slot to the pinned revision. One reset per slot at a time. A git killed mid-command
+   * (the host's `timeout -k`, an aborted attempt, a server stop) leaves `index.lock` behind and
+   * every later reset fails; such a lock is cleared only when it is provably abandoned (see
+   * clearStaleLock), then the reset is tried once more.
+   */
   async reset(slot: number) {
+    await this.srMutex.run(`reset-${slot}`, async () => {
+      const first = await this.tryReset(slot);
+      if (first === null) return;
+      if (!/index\.lock'?: File exists/i.test(first)) throw new InfraError(`slot ${slot} could not be restored to a clean state: ${first}`);
+      const freed = await this.clearStaleLock(slot);
+      if (!freed.cleared) throw new InfraError(`slot ${slot} could not be restored to a clean state: ${freed.reason}; ${first}`);
+      const again = await this.tryReset(slot);
+      if (again !== null) throw new InfraError(`slot ${slot} could not be restored to a clean state after clearing a stale lock: ${again}`);
+      this.notice?.('slot.lock_recovered', `slot ${slot}: cleared a stale ${freed.lock} (${freed.reason}) and restored the worktree`);
+    });
+  }
+
+  /** null when the slot is clean at the pinned revision, else what went wrong. */
+  private async tryReset(slot: number): Promise<string | null> {
     const p = this.wt(slot);
     const a = await this.git(p, ['reset', '--hard', '-q', this.sha], 300_000);
     const b = await this.git(p, ['clean', '-ffdxq'], 300_000);
     const s = await this.git(p, ['status', '--porcelain=v1', '--untracked-files=all']);
-    if (a.code !== 0 || b.code !== 0 || s.stdout.trim()) throw new InfraError(`slot ${slot} could not be restored to a clean state: ${(a.stderr + b.stderr + s.stdout).slice(0, 300)}`);
+    return a.code !== 0 || b.code !== 0 || s.stdout.trim() ? (a.stderr + b.stderr + s.stdout).slice(0, 300) : null;
+  }
+
+  /**
+   * Remove the worktree's index.lock only when it is abandoned: no live git process works in or on
+   * the worktree (checked through /proc; a host where that cannot be checked never gets a lock
+   * removed) and the lock is older than STALE_LOCK_MS. A live git keeps its lock.
+   */
+  private async clearStaleLock(slot: number): Promise<{ cleared: boolean; reason: string; lock?: string }> {
+    const p = this.wt(slot);
+    const dir = await this.git(p, ['rev-parse', '--absolute-git-dir']);
+    if (dir.code !== 0) return { cleared: false, reason: `git dir unknown: ${dir.stderr.trim().slice(0, 120)}` };
+    const gitDir = dir.stdout.trim();
+    const lock = this.p.join(gitDir, 'index.lock');
+    const ps = await this.host.run('sh', ['-c', LIVE_GIT_SCRIPT, 'sh', p, gitDir], { cwd: '/', timeoutMs: 30_000 }).catch(() => null);
+    if (!ps || ps.code !== 0 || ps.stdout.includes('NOPROC')) return { cleared: false, reason: 'cannot tell whether a git process still holds the lock on this host' };
+    const live = ps.stdout.trim().split('\n').filter(Boolean);
+    if (live.length) return { cleared: false, reason: `git still running on the worktree (pid ${live.slice(0, 3).join(', ')})` };
+    let age: number;
+    try {
+      age = Date.now() - statSync(this.host.fsPath(lock)).mtimeMs;
+    } catch {
+      return { cleared: true, reason: 'the lock is already gone', lock: 'index.lock' };
+    }
+    if (age < STALE_LOCK_MS) return { cleared: false, reason: `the lock is only ${Math.round(age / 1000)}s old` };
+    const rm = await this.host.run('rm', ['-f', '--', lock], { cwd: '/', timeoutMs: 30_000 });
+    if (rm.code !== 0) return { cleared: false, reason: `rm failed: ${rm.stderr.trim().slice(0, 120)}` };
+    return { cleared: true, reason: `no git process alive, lock ${Math.round(age / 1000)}s old`, lock: 'index.lock' };
   }
 
   // ---------------------------------------------------------------- discovery

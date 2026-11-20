@@ -94,6 +94,8 @@ export interface RepoAdapter {
   /** Run the repository's own publication scan over the slot's diff (optional). */
   repoLeakScan?(slot: number, opts: { signal: AbortSignal }): Promise<Finding[] | null>;
   reset(slot: number): Promise<void>;
+  /** Operator notices from the adapter (e.g. a stale git lock it cleared); set by the engine. */
+  notice?: ((kind: string, msg: string) => void) | null;
   docs(): Promise<DocSection[]>;
   /** Headers included by the unit (one level), for the context bundle. */
   includedHeaders(slot: number, unitFiles: string[], opts?: { maxChars?: number; maxHeaders?: number }): Promise<DocSection[]>;

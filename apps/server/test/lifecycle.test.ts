@@ -187,6 +187,58 @@ describe('a worker whose lease was lost before routing', () => {
   }, 60_000);
 });
 
+describe('an infrastructure failure after the lease was lost', () => {
+  it('files the verdict as stale and does not move or charge the task', async () => {
+    const s = setup();
+    let stolen: string | null = null;
+    const realCompare = s.repo.compare.bind(s.repo);
+    s.repo.compare = async (...args: Parameters<SimRepo['compare']>) => {
+      if (!stolen) {
+        stolen = args[1].id;
+        s.store.db.prepare("UPDATE tasks SET lease_id = 'someone-else' WHERE id = ?").run(stolen);
+        return { ...(await realCompare(...args)), completed: false, allPass: false, functions: [], infraError: 'comparator crashed' };
+      }
+      return realCompare(...args);
+    };
+    const run = createRun(s, 'infra-stale', 4);
+    await s.engine.start(run.id);
+    await until(() => stolen !== null && s.store.verdictsForTask(stolen).length > 0);
+    expect(s.store.verdictsForTask(stolen!).map((v) => v.route)).toEqual(['stale']);
+    const task = s.store.getTask(stolen!)!;
+    expect(task.infraFailures).toBe(0);
+    const kinds = (s.store.db.prepare('SELECT kind FROM events WHERE task_id = ?').all(stolen) as Array<{ kind: string }>).map((e) => e.kind);
+    expect(kinds).toContain('task.stale');
+    expect(kinds).not.toContain('task.infra');
+    await s.engine.cancel(run.id);
+  }, 60_000);
+});
+
+describe('a slot whose worktree cannot be restored', () => {
+  it('is parked and retried; its packets go back uncharged and the run completes', async () => {
+    const s = setup();
+    const real = s.repo.reset.bind(s.repo);
+    let failures = 4;
+    s.repo.reset = async (slot: number) => {
+      if (slot === 0 && failures > 0) {
+        failures--;
+        throw new Error(`slot 0 could not be restored to a clean state: index.lock: File exists`);
+      }
+      return real(slot);
+    };
+    const engine = new RunEngine((s.engine as unknown as { deps: ConstructorParameters<typeof RunEngine>[0] }).deps, { leaseMs: 5_000, heartbeatMs: 500, infraBackoffMs: 5, idlePollMs: 20, slotParkBaseMs: 30, maxInfraFailures: 2 });
+    cleanups.push(() => engine.close());
+    const run = createRun(s, 'parked', 12);
+    await engine.start(run.id);
+    await engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    const kinds = (s.store.db.prepare('SELECT kind FROM events WHERE run_id = ?').all(run.id) as Array<{ kind: string }>).map((e) => e.kind);
+    expect(kinds).toContain('slot.parked');
+    expect(kinds).toContain('slot.recovered');
+    expect(kinds).not.toContain('task.dead'); // 4 failed restores, maxInfraFailures 2: none charged to a packet
+    expect(s.store.taskCounts(run.id).dead ?? 0).toBe(0);
+  }, 60_000);
+});
+
 describe('retrying failed packets of a paused run', () => {
   it('resumes the run so the requeued packets are worked', async () => {
     const s = setup();

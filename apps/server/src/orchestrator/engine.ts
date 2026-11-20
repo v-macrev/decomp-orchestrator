@@ -44,6 +44,8 @@ export interface EngineOptions {
   leaseMs: number;
   heartbeatMs: number;
   maxInfraFailures: number;
+  /** First back-off for a slot whose worktree cannot be restored (doubles per failed restore, cap 5 min). */
+  slotParkBaseMs: number;
   maxProviderFailures: number;
   providerTimeoutMs: number;
   maxOutputTokens: number;
@@ -56,6 +58,7 @@ const DEFAULTS: EngineOptions = {
   leaseMs: 120_000,
   heartbeatMs: 20_000,
   maxInfraFailures: 5,
+  slotParkBaseMs: 15_000,
   maxProviderFailures: 40,
   providerTimeoutMs: 15 * 60_000,
   maxOutputTokens: 32_000,
@@ -92,11 +95,14 @@ class ActiveRun {
   /** Workers with no function left under the per-worker cap (they only finish their own packets). */
   capped = new Set<number>();
   capacityStalled = false;
+  /** Slots whose worktree could not be restored: slot → when to try again. They take no work. */
+  parked = new Map<number, number>();
+  parkStrikes = new Map<number, number>();
   constructor(readonly row: RunRow, readonly plan: FlowPlan, readonly gate: GateKeeper) {}
 
   /** Idle slots that could still take new work (capped workers cannot absorb a backlog). */
   idleSlots(tier: number): number {
-    return (this.slotsByTier.get(tier) ?? []).filter((s) => !this.busySlots.has(s) && !this.capped.has(s)).length;
+    return (this.slotsByTier.get(tier) ?? []).filter((s) => !this.busySlots.has(s) && !this.capped.has(s) && !this.parked.has(s)).length;
   }
 }
 
@@ -123,6 +129,7 @@ export class RunEngine {
   constructor(private deps: EngineDeps, opts: Partial<EngineOptions> = {}) {
     this.opts = { ...DEFAULTS, ...opts };
     this.queue = new TaskQueue(deps.store);
+    deps.repo.notice = (kind, msg) => deps.events.emit(kind, msg, { level: 'warn' });
     this.context = new ContextBuilder(deps.repo, deps.store);
     this.contextV2 = new TaskContextBuilder(deps.repo, deps.store);
     this.classifier = new ComplexityClassifier({ store: deps.store, repo: deps.repo, pool: deps.pool, providers: deps.providers, events: deps.events });
@@ -528,6 +535,22 @@ export class RunEngine {
           await run.resumed.wait(5_000, run.cancel.signal);
           continue;
         }
+        const parkedUntil = run.parked.get(slot);
+        if (parkedUntil !== undefined) {
+          if (Date.now() < parkedUntil) {
+            await run.wake.wait(Math.min(5_000, parkedUntil - Date.now()), run.cancel.signal);
+            continue;
+          }
+          try {
+            await this.deps.repo.reset(slot);
+            run.parked.delete(slot);
+            run.parkStrikes.delete(slot);
+            events.emit('slot.recovered', `slot ${slot} restored; it takes work again`, { runId, level: 'warn' });
+          } catch (e) {
+            this.parkSlot(run, slot, (e as Error).message);
+          }
+          continue;
+        }
         const budget = run.row.config.budgetUsd;
         if (budget !== undefined && (store.getRun(runId)?.costUsd ?? 0) >= budget) {
           if (!run.budgetPaused) {
@@ -621,8 +644,16 @@ export class RunEngine {
 
     let attempt: Attempt | null = null;
     try {
-      // 1. fresh worktree + carry forward units accepted earlier in this run
-      await repo.reset(slot);
+      // 1. fresh worktree + carry forward units accepted earlier in this run. A slot that cannot be
+      // restored is the slot's fault, not the packet's: give the packet back uncharged, park the slot.
+      try {
+        await repo.reset(slot);
+      } catch (e) {
+        if (e instanceof AbortedError || signal.aborted) throw e;
+        this.parkSlot(run, slot, (e as Error).message);
+        this.infraFailure(run, task, leaseId, `slot ${slot} could not be restored`, undefined, { slotFault: true });
+        return;
+      }
       const carried = this.carriedFiles(runId, task.unit);
       if (carried.length) await repo.writeFiles(slot, carried);
       // The claim must name a model or the agent, never a guess: the model is chosen per attempt
@@ -831,7 +862,10 @@ export class RunEngine {
       return this.infraFailure(run, task, leaseId, (e as Error).message);
     } finally {
       clearInterval(hb);
-      await repo.reset(slot).catch((err) => ev('slot.reset_failed', `slot ${slot} reset failed: ${(err as Error).message}`, 'error'));
+      await repo.reset(slot).catch((err) => {
+        ev('slot.reset_failed', `slot ${slot} reset failed: ${(err as Error).message}`, 'error');
+        this.parkSlot(run, slot, (err as Error).message);
+      });
     }
   }
 
@@ -848,16 +882,37 @@ export class RunEngine {
     });
   }
 
-  private infraFailure(run: ActiveRun, task: TaskRow, leaseId: string, msg: string) {
-    const n = task.infraFailures + 1;
+  /**
+   * An infrastructure failure: retry later, or dead-letter after maxInfraFailures. The move and the
+   * verdict (when there is one) are one lease-guarded transaction, like settle(). A slot fault
+   * (the worktree could not be restored) does not count against the packet.
+   */
+  private infraFailure(run: ActiveRun, task: TaskRow, leaseId: string, msg: string, verdict?: Verdict, opts: { slotFault?: boolean } = {}) {
+    const { store, events } = this.deps;
+    const n = opts.slotFault ? task.infraFailures : task.infraFailures + 1;
     const runId = run.row.id;
-    if (n >= this.opts.maxInfraFailures) {
-      this.queue.transition(task.id, leaseId, ['leased', 'gating'], 'dead', { infraFailures: n });
-      this.deps.events.emit('task.dead', `dead-lettered after ${n} infrastructure failures: ${msg}`, { runId, taskId: task.id, level: 'error' });
-    } else {
-      this.queue.transition(task.id, leaseId, ['leased', 'gating'], 'pending', { infraFailures: n, notBefore: Date.now() + this.opts.infraBackoffMs * n });
-      this.deps.events.emit('task.infra', `infrastructure failure (${n}/${this.opts.maxInfraFailures}): ${msg}`, { runId, taskId: task.id, level: 'warn' });
+    const dead = !opts.slotFault && n >= this.opts.maxInfraFailures;
+    const moved = store.tx(() => {
+      const ok = this.queue.transition(task.id, leaseId, ['leased', 'gating'], dead ? 'dead' : 'pending', dead ? { infraFailures: n } : { infraFailures: n, notBefore: Date.now() + this.opts.infraBackoffMs * Math.max(1, n) });
+      if (verdict) store.insertVerdict({ ...verdict, route: ok ? (dead ? 'dead_letter' : 'retry') : 'stale' });
+      return ok;
+    });
+    if (!moved) {
+      events.emit('task.stale', `lease lost before handling an infrastructure failure: ${msg.slice(0, 200)}; task not moved`, { runId, taskId: task.id, level: 'warn' });
+      return;
     }
+    if (dead) events.emit('task.dead', `dead-lettered after ${n} infrastructure failures: ${msg}`, { runId, taskId: task.id, level: 'error' });
+    else if (opts.slotFault) events.emit('task.infra', `${msg}; returned to the queue without counting against the packet`, { runId, taskId: task.id, level: 'warn' });
+    else events.emit('task.infra', `infrastructure failure (${n}/${this.opts.maxInfraFailures}): ${msg}`, { runId, taskId: task.id, level: 'warn' });
+  }
+
+  /** Take a slot out of service until its worktree can be restored (backoff 15 s → 5 min). */
+  private parkSlot(run: ActiveRun, slot: number, msg: string) {
+    const strikes = (run.parkStrikes.get(slot) ?? 0) + 1;
+    run.parkStrikes.set(slot, strikes);
+    const wait = Math.min(300_000, this.opts.slotParkBaseMs * 2 ** (strikes - 1));
+    run.parked.set(slot, Date.now() + wait);
+    this.deps.events.emit('slot.parked', `slot ${slot} out of service for ${Math.round(wait / 1000)}s (${strikes} failed restore(s)): ${msg.slice(0, 300)}`, { runId: run.row.id, level: strikes === 1 ? 'warn' : 'error' });
   }
 
   /**
@@ -889,10 +944,7 @@ export class RunEngine {
     const common = { lastVerdictId: verdict.id, ...(srTaskId ? { srTaskId } : {}) };
     const fnLabel = task.functions.map((f) => f.name ?? f.rva).join(', ');
 
-    if (flags.infra) {
-      store.insertVerdict({ ...verdict, route: 'retry' });
-      return this.infraFailure(run, task, leaseId, verdict.findings.find((f) => f.code.startsWith('INFRA'))?.message ?? 'infra');
-    }
+    if (flags.infra) return this.infraFailure(run, task, leaseId, verdict.findings.find((f) => f.code.startsWith('INFRA'))?.message ?? 'infra', verdict);
     this.skills.recordOutcome(attempt.id, verdict);
     const attemptsTotal = task.attemptsTotal + 1;
     const attemptsAtTier = task.attemptsAtTier + 1;
