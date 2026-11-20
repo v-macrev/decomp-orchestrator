@@ -221,6 +221,7 @@ export const api = {
   raiseWorkerCap: (runId: string, maxFunctionsPerWorker: number) => req('POST', `/api/runs/${runId}/capacity`, { maxFunctionsPerWorker, resume: true }),
   runs: () => req<RunSummary[]>('GET', '/api/runs'),
   createRun: (name: string, flowId: string, config: Record<string, unknown>) => req<{ id: string }>('POST', '/api/runs', { name, flowId, config }),
+  retryFailedTasks: (id: string) => req<{ ok: boolean; requeued: number; tier: number; tierLabel: string; status: string }>('POST', `/api/runs/${id}/retry-failed`, {}),
   metrics: (id: string) => req<Metrics>('GET', `/api/runs/${id}/metrics`),
   runAction: (id: string, action: 'pause' | 'resume' | 'cancel', body?: unknown) => req('POST', `/api/runs/${id}/${action}`, body ?? {}),
   tasks: (id: string, state?: string, offset = 0) => req<Task[]>('GET', `/api/runs/${id}/tasks?limit=200&offset=${offset}${state ? `&state=${state}` : ''}`),

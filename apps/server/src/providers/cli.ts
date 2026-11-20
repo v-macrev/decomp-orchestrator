@@ -81,11 +81,89 @@ export function classifyCliFailure(text: string, timedOut: boolean, aborted: boo
   // use that model at all, so retrying it (as a server error would be) only wastes attempts.
   const unsupported = /the '([^']+)' model is not supported|model[_ ]not[_ ]found|unknown model|model .{0,40}does not exist/i.exec(text);
   if (unsupported) return new ProviderError('bad_request', `model ${unsupported[1] ?? ''} is not available on this login`.replace(/\s+/g, ' '));
+  // Invalid structured-output schemas are request/configuration errors. Treating them as server
+  // errors opens the account circuit even though the provider is healthy.
+  if (/invalid schema for (?:response|output)|invalid (?:json )?schema/i.test(text)) {
+    return new ProviderError('bad_request', 'Codex rejected the structured-output JSON schema');
+  }
   if (/rate.?limit|429|too many requests/.test(t)) return new ProviderError('rate_limited', 'cli rate limited');
   if (/overloaded|529|503/.test(t)) return new ProviderError('overloaded', 'provider overloaded');
   if (/not logged in|please run .*login|invalid api key|unauthori[sz]ed|401|403|authentication/.test(t)) return new ProviderError('auth', 'cli profile is not authenticated');
   if (/5\d\d|internal server error/.test(t)) return new ProviderError('server_error', 'provider server error');
   return new ProviderError('server_error', `cli failed: ${text.slice(0, 200)}`);
+}
+
+type JsonSchema = Record<string, unknown>;
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Codex CLI's structured output uses strict JSON Schema. Strict schemas require every object
+ * property to be required; optional properties are represented as nullable unions instead.
+ */
+function codexStrictSchema(schema: JsonSchema): JsonSchema {
+  return normalizeSchemaNode(schema) as JsonSchema;
+}
+
+function normalizeSchemaNode(node: unknown): unknown {
+  if (Array.isArray(node)) return node.map(normalizeSchemaNode);
+  if (!isRecord(node)) return node;
+
+  const out: Record<string, unknown> = { ...node };
+  if (isRecord(node.properties)) {
+    const originalRequired = new Set(Array.isArray(node.required) ? node.required.filter((x): x is string => typeof x === 'string') : []);
+    const properties: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(node.properties)) {
+      const normalized = normalizeSchemaNode(child);
+      properties[key] = originalRequired.has(key) ? normalized : nullableSchema(normalized);
+    }
+    out.properties = properties;
+    out.required = Object.keys(properties);
+    out.additionalProperties = false;
+  }
+
+  for (const [key, value] of Object.entries(out)) {
+    if (key !== 'properties' && key !== 'required') out[key] = normalizeSchemaNode(value);
+  }
+  return out;
+}
+
+function nullableSchema(schema: unknown): unknown {
+  if (!isRecord(schema)) return { anyOf: [schema, { type: 'null' }] };
+  const type = schema.type;
+  if (typeof type === 'string') return { ...schema, type: type === 'null' ? type : [type, 'null'] };
+  if (Array.isArray(type)) return { ...schema, type: type.includes('null') ? type : [...type, 'null'] };
+  if (Array.isArray(schema.anyOf)) return { ...schema, anyOf: [...schema.anyOf, { type: 'null' }] };
+  return { anyOf: [schema, { type: 'null' }] };
+}
+
+/** Remove nulls used only to encode optional fields before the app's Zod schemas parse output. */
+function omitOptionalNulls(value: unknown, schema: unknown): unknown {
+  if (Array.isArray(value)) {
+    const items = isRecord(schema) ? schema.items : undefined;
+    return value.map((item) => omitOptionalNulls(item, items));
+  }
+  if (!isRecord(value) || !isRecord(schema) || !isRecord(schema.properties)) return value;
+
+  const required = new Set(Array.isArray(schema.required) ? schema.required.filter((x): x is string => typeof x === 'string') : []);
+  const result: Record<string, unknown> = { ...value };
+  for (const [key, childSchema] of Object.entries(schema.properties)) {
+    if (!(key in result)) continue;
+    if (!required.has(key) && result[key] === null) delete result[key];
+    else result[key] = omitOptionalNulls(result[key], childSchema);
+  }
+  return result;
+}
+
+function restoreOptionalJsonFields(text: string, schema: JsonSchema): string {
+  try {
+    return JSON.stringify(omitOptionalNulls(JSON.parse(text), schema));
+  } catch {
+    // Preserve non-JSON output so the normal worker parser can report a contract failure.
+    return text;
+  }
 }
 
 export class ClaudeCliAdapter implements ProviderAdapter {
@@ -155,9 +233,10 @@ export class CodexCliAdapter implements ProviderAdapter {
         '-s', 'read-only', '--color', 'never', '--json', '-m', req.model.id, '-o', outFile,
         '-c', 'approval_policy="never"',
       ];
-      if (req.jsonSchema && account.options.cliJsonSchema !== false) {
+      const useSchema = !!req.jsonSchema && account.options.cliJsonSchema !== false;
+      if (useSchema) {
         const schemaFile = join(dir, 'schema.json');
-        writeFileSync(schemaFile, JSON.stringify(req.jsonSchema));
+        writeFileSync(schemaFile, JSON.stringify(codexStrictSchema(req.jsonSchema!)));
         args.push('--output-schema', schemaFile);
       }
       const effort = req.effort ?? req.model.defaultEffort;
@@ -176,6 +255,7 @@ export class CodexCliAdapter implements ProviderAdapter {
         /* missing on failure */
       }
       if (r.code !== 0 || !text) throw classifyCliFailure(`${r.stderr} ${r.stdout.slice(-4000)}`, r.timedOut, r.aborted);
+      if (useSchema) text = restoreOptionalJsonFields(text, req.jsonSchema!);
       let inputTokens = 0, outputTokens = 0, cacheReadTokens = 0, cacheWriteTokens = 0;
       for (const line of r.stdout.split('\n')) {
         if (!line.includes('usage')) continue;

@@ -143,6 +143,10 @@ export async function buildServer(app: App) {
     engine.start(run.id).catch((e) => events.emit('run.failed', `start failed: ${(e as Error).message}`, { runId: run.id, level: 'error' }));
     return run;
   });
+  f.post('/api/runs/:id/retry-failed', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    const result = await engine.retryFailedTasks(req.params.id);
+    return result.ok ? result : reply.code(result.reason === 'run not found' ? 404 : 409).send(result);
+  });
   f.get('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const r = store.getRun(req.params.id);
     return r ? { ...r, metrics: runMetrics(store, engine, pool, r.id) } : notFound(reply, 'run');

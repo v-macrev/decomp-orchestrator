@@ -174,7 +174,7 @@ export class Store {
   setRunStatus(id: string, to: RunStatus, from?: RunStatus[], extra: { error?: string | null } = {}) {
     const now = Date.now();
     const sets = ['status = @to', 'updated_at = @now'];
-    if (to === 'running') sets.push('started_at = COALESCE(started_at, @now)');
+    if (to === 'running') sets.push('started_at = COALESCE(started_at, @now)', 'finished_at = NULL');
     if (['completed', 'cancelled', 'failed'].includes(to)) sets.push('finished_at = @now');
     if (extra.error !== undefined) sets.push('error = @error');
     const where = from?.length ? `AND status IN (${from.map((_, i) => `@f${i}`).join(',')})` : '';

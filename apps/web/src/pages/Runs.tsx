@@ -193,6 +193,9 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
   const [batches, setBatches] = useState<Batch[]>([]);
   const [filter, setFilter] = useState('');
   const [task, setTask] = useState<string | null>(null);
+  const [retryingFailed, setRetryingFailed] = useState(false);
+  const [retryFailedError, setRetryFailedError] = useState('');
+  const [retryFailedMessage, setRetryFailedMessage] = useState('');
 
   useEffect(() => {
     api.metrics(runId).then(setM).catch(() => undefined);
@@ -220,7 +223,26 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
     await api.runAction(runId, a, body);
     onChange();
   };
+  const retryFailed = async () => {
+    setRetryFailedError('');
+    setRetryFailedMessage('');
+    setRetryingFailed(true);
+    try {
+      const result = await api.retryFailedTasks(runId);
+      setRetryFailedMessage(result.requeued
+        ? `Requeued ${result.requeued} failed packet(s) at ${result.tierLabel}.`
+        : 'There are no dead packets to retry.');
+      onChange();
+    } catch (e) {
+      setRetryFailedError((e as Error).message);
+    } finally {
+      setRetryingFailed(false);
+    }
+  };
   const status = m.run.status;
+  const deadTasks = m.tasks.dead ?? 0;
+  const retryUnavailable = ['cancelled', 'failed', 'created', 'discovering'].includes(status)
+    || (m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd);
   return (
     <div style={{ display: 'grid', gap: 14 }}>
       <div className="panel">
@@ -229,8 +251,12 @@ function RunDetail({ runId, onChange }: { runId: string; onChange: () => void })
           <button onClick={() => act('pause')} disabled={status !== 'running'}>Pause</button>
           <button onClick={() => act('pause', { immediate: true })} disabled={status !== 'running'} title="Abort in-flight attempts (not counted against tasks)">Pause now</button>
           <button onClick={() => act('resume')} disabled={status !== 'paused' || (m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd)} title={m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd ? 'Budget reached: set a new budget below to resume' : undefined}>Resume</button>
+          <ConfirmButton onConfirm={retryFailed} disabled={!deadTasks || retryingFailed || retryUnavailable} className="primary" confirmLabel={`Retry ${deadTasks} failed task(s) at fast tier?`} title="Retries only dead packets; successful and quarantined tasks are left alone. Retries use this run's remaining budget.">{retryingFailed ? 'Retrying…' : `Retry failed tasks (${deadTasks})`}</ConfirmButton>
           <ConfirmButton onConfirm={() => act('cancel')} disabled={['completed', 'cancelled', 'failed'].includes(status)} confirmLabel="Cancel run? Open tasks stop">Cancel</ConfirmButton>
         </div>
+        {retryFailedError && <div className="lvl-error">Retry failed: {retryFailedError}</div>}
+        {retryFailedMessage && <div className="muted" role="status">{retryFailedMessage}</div>}
+        {deadTasks > 0 && <div className="muted" style={{ fontSize: 12 }}>Retrying starts dead packets at the fast tier. Passed packets remain complete; quarantined packets still need individual review.</div>}
         {m.run.error && <div className="lvl-error">{m.run.error}</div>}
         {status === 'paused' && m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd && <BudgetPausedBanner m={m} onChange={onChange} />}
         <StackBar counts={f} total={m.totalFunctions} />

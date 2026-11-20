@@ -172,6 +172,14 @@ export class TaskQueue {
     );
   }
 
+  /** Retry only dead-lettered packets in a run, starting them again at the requested tier. */
+  requeueDead(runId: string, tier: number): number {
+    return this.store.db.prepare(`UPDATE tasks SET state = 'pending', tier = ?, attempts_at_tier = 0,
+        attempts_at_difficulty = 0, no_improvement_streak = 0, infra_failures = 0, provider_failures = 0,
+        not_before = 0, updated_at = ?
+      WHERE run_id = ? AND state = 'dead'`).run(tier, this.now(), runId).changes;
+  }
+
   /** Earliest not_before among pending tasks of the given tiers, or null. Lets idle slots sleep precisely. */
   nextReadyAt(runId: string, tier: number | number[]): number | null {
     const tiers = Array.isArray(tier) ? tier : [tier];

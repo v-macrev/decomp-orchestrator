@@ -277,6 +277,40 @@ export class RunEngine {
     return { ok: true };
   }
 
+  /** Retry the run's dead-lettered packets only, returning them to the fast tier first. */
+  async retryFailedTasks(runId: string): Promise<{ ok: true; requeued: number; tier: number; tierLabel: string; status: string } | { ok: false; reason: string }> {
+    const { store, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) return { ok: false, reason: 'run not found' };
+    if (!['running', 'paused', 'completed'].includes(row.status)) return { ok: false, reason: `run is ${row.status}` };
+    if (row.config.budgetUsd !== undefined && row.costUsd >= row.config.budgetUsd) {
+      return { ok: false, reason: `run budget $${row.config.budgetUsd} reached; raise the budget before retrying failed tasks` };
+    }
+
+    const active = this.active.get(runId);
+    if (!active && this.active.size > 0) return { ok: false, reason: 'another run is active; retry when it finishes' };
+    if (!active && this.exclusiveHolder) return { ok: false, reason: `worktree slots are busy (${this.exclusiveHolder}); retry when they are free` };
+
+    const plan = compileFlowPlan(row.flow);
+    const tier = plan.tiers.findIndex((t) => t.capability === 'fast');
+    if (tier < 0) return { ok: false, reason: 'flow has no fast worker tier; add one before retrying failed tasks' };
+    const tierLabel = plan.tiers[tier]!.node.data.label || plan.tiers[tier]!.node.id;
+    const requeued = this.queue.requeueDead(runId, tier);
+    if (!requeued) return { ok: true, requeued: 0, tier, tierLabel, status: row.status };
+
+    events.emit('run.retry_failed', `requeued ${requeued} dead packet(s) at ${tierLabel} (fast tier first)`, {
+      runId, level: 'warn', data: { requeued, tier, tierLabel },
+    });
+    if (active) {
+      active.capacityStalled = false;
+      active.wake.notify();
+    } else {
+      if (row.status === 'completed') store.setRunStatus(runId, 'running', ['completed']);
+      await this.start(runId);
+    }
+    return { ok: true, requeued, tier, tierLabel, status: active?.row.status ?? 'running' };
+  }
+
   private async resumeRun(runId: string) {
     const run = this.active.get(runId);
     if (!run) {
