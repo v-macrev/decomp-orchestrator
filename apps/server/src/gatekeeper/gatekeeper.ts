@@ -158,9 +158,13 @@ export class GateKeeper {
         }
         if (r.compileError) {
           const errs = r.compileErrors ?? [];
+          const foreign = foreignErrorFiles(errs, input.prepared.allowedPaths);
+          const hint = foreign.length
+            ? `\nThe error is inside ${foreign.join(', ')}, which this packet may not edit, so no edit there can fix it. Stop including that header (directly or through another one) and declare minimal stand-ins for the types you need in the unit's own .h, marked STANDIN, as other units do.`
+            : '';
           return [{
             stage: 'compare', code: 'COMPARE_COMPILE_ERROR', severity: 'block',
-            message: errs.length ? `candidate failed to compile:\n${errs.map((e) => `  ${e}`).join('\n')}` : 'candidate failed to compile (the compiler gave no error lines)',
+            message: errs.length ? `candidate failed to compile:\n${errs.map((e) => `  ${e}`).join('\n')}${hint}` : 'candidate failed to compile (the compiler gave no error lines)',
           }];
         }
         return r.functions
@@ -210,4 +214,25 @@ export class GateKeeper {
 
     return done('pass', 'accept');
   }
+}
+
+/**
+ * Repository files outside the packet that compiler errors point into
+ * (`reconstruction/a/../../declarations/X.h(67): fatal error ...` → `reconstruction/declarations/X.h`).
+ */
+export function foreignErrorFiles(errors: string[], allowed: string[]): string[] {
+  const allow = new Set(allowed);
+  const out = new Set<string>();
+  for (const e of errors) {
+    const m = /^(reconstruction\/[^\s(]+)\(\d+\)\s*:\s*(?:fatal\s+)?error/.exec(e.trim());
+    if (!m) continue;
+    const parts: string[] = [];
+    for (const seg of m[1]!.split('/')) {
+      if (seg === '..') parts.pop();
+      else if (seg !== '.') parts.push(seg);
+    }
+    const p = parts.join('/');
+    if (!allow.has(p)) out.add(p);
+  }
+  return [...out];
 }

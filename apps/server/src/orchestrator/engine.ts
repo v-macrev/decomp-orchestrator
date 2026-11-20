@@ -682,8 +682,12 @@ export class RunEngine {
       const binding: PoolBinding = { ...node.data.pool, capability: node.data.pool.capability ?? (routing.enabled ? tier.capability : undefined) };
       const estIn = contextTokens;
       let waitedEmitted = false;
+      // Model rotation: after two attempts without progress, the accounts (= models) that made them
+      // go to the back of the queue, so a different model brings different ideas to the packet.
+      const recent = history.filter((h) => h.accountId).slice(-2);
+      const deprioritize = task.noImprovementStreak >= 2 && recent.length === 2 ? [...new Set(recent.map((h) => h.accountId!))] : [];
       const lease = await pool.acquire(
-        { binding, role: 'worker', estInputTokens: estIn, estOutputTokens: Math.min(this.opts.maxOutputTokens, outputMode === 'edits' ? 3_000 : 8_000) },
+        { binding, role: 'worker', estInputTokens: estIn, estOutputTokens: Math.min(this.opts.maxOutputTokens, outputMode === 'edits' ? 3_000 : 8_000), deprioritize },
         signal,
         (ms, reason) => {
           if (!waitedEmitted && ms > 3_000) {
@@ -693,6 +697,11 @@ export class RunEngine {
         },
       );
       store.updateAttempt(attempt.id, { accountId: lease.account.id, model: lease.model.id });
+      if (deprioritize.length) {
+        ev('pool.rotated', deprioritize.includes(lease.account.id)
+          ? `no progress in 2 attempts, but only ${lease.account.id} could take this one`
+          : `no progress in 2 attempts on ${deprioritize.join(', ')}: switched to ${lease.account.id}/${lease.model.id}`, 'info', { from: deprioritize, to: lease.account.id });
+      }
       const t0 = Date.now();
       let text: string;
       try {

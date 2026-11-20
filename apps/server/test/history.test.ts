@@ -170,3 +170,33 @@ describe('scope line limit', () => {
     expect(checkScope([{ path, content: `${after}${long}x\n` }], [path], undefined, () => base).findings.map((f) => f.code)).toEqual(['SCOPE_LINE_TOO_LONG']);
   });
 });
+
+describe('errors in files the packet cannot edit', () => {
+  it('names the shared header so the worker uses local stand-ins instead', async () => {
+    const { foreignErrorFiles } = await import('../src/gatekeeper/gatekeeper.js');
+    const allowed = ['reconstruction/skyrim_shared/forms/TESObjectARMO.h', 'reconstruction/skyrim_shared/forms/TESObjectARMO.cpp'];
+    expect(foreignErrorFiles([
+      "reconstruction/skyrim_shared/forms/../../declarations/TESForm.h(67): fatal error C1083: Cannot open include file: 'declarations/BaseFormComponent.h'",
+      'reconstruction/skyrim_shared/forms/TESObjectARMO.h(12): error C2065: x',
+      'translation unit: something',
+    ], allowed)).toEqual(['reconstruction/declarations/TESForm.h']);
+  });
+});
+
+describe('model rotation', () => {
+  it('prefers another account when the last ones are deprioritised, but still uses them when alone', async () => {
+    const { AccountPool } = await import('../src/pool/scheduler.js');
+    const { Account } = await import('@decomp/core');
+    const acct = (id: string) => Account.parse({ id, label: id, provider: 'claude_cli', auth: { type: 'cli_profile', configDir: `/x/${id}` }, models: [{ id: 'm', capability: 'frontier', roles: ['worker'] }] });
+    const pool = new AccountPool([acct('a'), acct('b')], null, null);
+    const req = { binding: { strategy: 'pool' as const, accountIds: [], tags: [], capability: 'frontier' as const }, role: 'worker' as const, estInputTokens: 10, estOutputTokens: 10 };
+    for (let i = 0; i < 5; i++) {
+      const r = pool.tryAcquire({ ...req, deprioritize: ['a'] });
+      expect('lease' in r && r.lease.account.id).toBe('b');
+      if ('lease' in r) pool.release(r.lease, { kind: 'ok', usage: { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }, latencyMs: 1 });
+    }
+    pool.setAccounts([acct('a')]);
+    const r = pool.tryAcquire({ ...req, deprioritize: ['a'] });
+    expect('lease' in r && r.lease.account.id).toBe('a');
+  });
+});

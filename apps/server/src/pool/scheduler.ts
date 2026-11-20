@@ -30,6 +30,11 @@ export interface AcquireRequest {
   estOutputTokens: number;
   /** Accounts to avoid for this request (e.g. the one that just refused or failed it). */
   avoid?: string[];
+  /**
+   * Accounts to use only when nothing else can take the request now (soft, unlike `avoid`): the ones
+   * whose recent attempts at a packet stopped improving, so another model gets a turn.
+   */
+  deprioritize?: string[];
 }
 
 export interface Lease {
@@ -241,13 +246,13 @@ export class AccountPool {
     return w > 0 ? { ok: false, waitMs: w } : { ok: true };
   }
 
-  private score(slot: AccountSlot, model?: ModelSpec): number {
+  private score(slot: AccountSlot, model?: ModelSpec, penalised = false): number {
     const head = Math.min(slot.rpm.headroom, slot.itpm.headroom, slot.otpm.headroom);
     const free = 1 - slot.inFlight / Math.max(1, slot.limit);
     const lat = (slot.rt.ewmaLatencyMs ?? 20_000) / 10_000;
     // Cost weight breaks ties between equally healthy accounts (priority still dominates).
     const cost = model?.costWeight ?? 0;
-    return slot.account.priority * 1000 + 60 * head + 30 * free - 40 * slot.errorRate - lat - 4 * cost + Math.random() * 3;
+    return slot.account.priority * 1000 + 60 * head + 30 * free - 40 * slot.errorRate - lat - 4 * cost + Math.random() * 3 - (penalised ? 500 : 0);
   }
 
   tryAcquire(req: AcquireRequest): { lease: Lease } | { waitMs: number; reason: string } {
@@ -257,12 +262,13 @@ export class AccountPool {
     let minWait = Infinity;
     const reasons: string[] = [];
     const avoid = new Set(req.avoid ?? []);
+    const later = new Set(req.deprioritize ?? []);
     const pool = cands.length > avoid.size ? cands.filter((c) => !avoid.has(c.slot.account.id)) : cands;
     for (const { slot, model } of pool) {
       this.refresh(slot);
       const a = this.admits(slot, req);
       if (a.ok) {
-        const s = this.score(slot, model);
+        const s = this.score(slot, model, later.has(slot.account.id));
         if (!best || s > best.s) best = { slot, model, s };
       } else {
         minWait = Math.min(minWait, a.waitMs);

@@ -16,6 +16,7 @@ import { failureCategory } from './lessons.js';
 export interface HistoryEntry {
   n: number;
   model: string | null;
+  accountId: string | null;
   category: string;
   /** Exact bytes, or aligned bytes when nothing matched in place; null without byte evidence. */
   score: number | null;
@@ -95,7 +96,7 @@ export function buildHistory(store: Store, task: TaskRow): HistoryEntry[] {
     if (!v || v.findings.some((f) => f.code.startsWith('INFRA'))) continue;
     const judged = !!v.compare?.length || v.findings.some((f) => f.code === 'COMPARE_COMPILE_ERROR');
     out.push({
-      n: a.n, model: a.model,
+      n: a.n, model: a.model, accountId: a.accountId,
       category: v.decision === 'pass' ? 'PASS' : failureCategory(v.findings.find((f) => f.severity === 'block')?.code ?? 'OTHER'),
       score: progressScore(v), outcome: outcomeOf(v),
       fingerprint: a.files?.length ? sourceFingerprint(a.files) : null, judged,
