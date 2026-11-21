@@ -747,6 +747,41 @@ describe('handling what blocks a batch', () => {
     expect(blame.claims).toHaveLength(1);
   }, 60_000);
 
+  it('"Prepare all for PR" sets aside upstream work, withholds claimed units, and dry-runs the rest clean', async () => {
+    const s = setup();
+    const run = createRun(s, 'prepare', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const tasks = s.store.listBatches(run.id).filter((b) => b.status === 'branch_ready').flatMap((b) => b.taskIds.map((id) => s.store.getTask(id)!));
+    const units = [...new Set(tasks.map((t) => t.unit))];
+    expect(units.length).toBeGreaterThanOrEqual(3);
+    const upstreamTask = tasks.find((t) => t.unit === units[0])!;
+    const claimedTask = tasks.find((t) => t.unit === units[1])!;
+    s.repo.upstreamMatched.set(upstreamTask.functions[0]!.rva, 'someone');
+    const claimedRva = claimedTask.functions[0]!.rva;
+    s.repo.claimedByOthers.set(claimedRva, [{ url: 'https://github.com/o/r/issues/7', author: 'x', updatedAt: new Date().toISOString() }]);
+    let dryRuns = 0;
+    (s.repo as RepoAdapter).submitBatch = async (input) => {
+      dryRuns++;
+      const hit = input.tasks.find((t) => t.functions.some((fn) => fn.rva === claimedRva));
+      const blockers = hit ? [`${hit.srTaskId}: another open claim or pull request names ${claimedRva}: https://github.com/o/r/issues/7 (talk to them, or pass --ack-collision)`] : [];
+      return { ok: !hit, dryRun: input.dryRun, submissionStarted: false, problems: [], blockers, warnings: [], plan: [], pullRequest: null, link: null, error: hit ? 'Submission preflight found blockers' : null };
+    };
+    const r = await s.engine.prepareAll(run.id);
+    expect(r.cancelled).toBe(false);
+    expect(r.needsYou).toEqual([]);
+    expect(r.ready.length).toBeGreaterThan(0);
+    for (const t of tasks) {
+      const state = s.store.getTask(t.id)!.state;
+      expect(state).toBe(t.unit === units[0] ? 'set_aside' : t.unit === units[1] ? 'withheld' : 'staged');
+    }
+    // Every batch still open has a clean dry run at this base: a second pass does no dry runs.
+    const before = dryRuns;
+    const again = await s.engine.prepareAll(run.id);
+    expect(dryRuns).toBe(before);
+    expect(again.ready.sort()).toEqual(r.ready.sort());
+  }, 60_000);
+
   it('re-verifies every failed batch as new batches and knows when a withheld claim lapses', async () => {
     const s = setup();
     const run = createRun(s, 'refail', 12, 3);

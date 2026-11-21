@@ -13,6 +13,7 @@ import {
   CAPABILITY_RANK, DIFFICULTIES, DIFFICULTY_RANK, Flow, RunConfig, WorkerOutput, compileFlowPlan, harder, promote, stealSources, tierFor, validateFlow,
   type Attempt, type CapabilityTier, type Difficulty, type FlowPlan, type PoolBinding, type Route, type SkillSelection, type TaskState, type Verdict,
 } from '@decomp/core';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
 import type { RunRow, Store, TaskRow } from '../db/store.js';
@@ -1163,6 +1164,104 @@ export class RunEngine {
   }
 
   /**
+   * Everything that gets a finished run's batches ready for pull requests, in one operation:
+   * re-verify failed batches, set aside what upstream already has or changed, then dry-run every
+   * batch without a clean dry run at this base. A dry run that blames units of the batch sets them
+   * aside; one that finds other contributors' claims withholds those units (never acknowledged);
+   * the rest is re-verified and dry-run again. Submits nothing: the operator still opens each PR.
+   */
+  async prepareAll(runId: string) {
+    const { store, repo } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be prepared`);
+    if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
+    if (!repo.submitBatch) throw new Error('this repository adapter cannot submit pull requests');
+    const steps = 4;
+    return this.exclusive(`preparing ${runId} for pull requests`, async () => {
+      const startedAt = Date.now();
+      const done: string[] = [];
+      const needsYou: Array<{ seq: number; why: string }> = [];
+      const phase = (n: number, what: string) => {
+        if (this.op) this.op.label = `Preparing ${runId} for pull requests — step ${n} of ${steps}: ${what}`;
+      };
+      const failedLeft = () => store.listBatches(runId).filter((b) => (b.status === 'failed' || b.status === 'interrupted') && b.taskIds.some((id) => store.getTask(id)?.state === 'passed'));
+      const changeable = () => {
+        try {
+          return this.changeableBatches(runId, null);
+        } catch {
+          return [];
+        }
+      };
+      const clean = (b: { detail: unknown }) => {
+        const d = (b.detail ?? {}) as { dryRunFingerprint?: string; dryRunBase?: string | null; dryRunUncheckedClaims?: string[]; lastSubmit?: { ok?: boolean; dryRun?: boolean } };
+        return !!d.dryRunFingerprint && d.dryRunBase === (repo.baseSha ?? null) && !d.dryRunUncheckedClaims?.length && d.lastSubmit?.ok === true;
+      };
+
+      phase(1, 'batching and re-verifying');
+      if (failedLeft().length) {
+        const s = await this.restageFailedAll(runId);
+        done.push(`re-verified the failed batches: ${s.staged} staged, ${s.failed} still failing`);
+      }
+      // Matched packets in no batch yet (staging was off, or a batch was cleared): batch them too.
+      const failedNow = new Set(failedLeft().flatMap((b) => b.taskIds));
+      const loose = store.listTasks(runId, { state: 'passed', limit: 100_000 }).filter((t) => !failedNow.has(t.id));
+      if (loose.length) {
+        if (row.config.staging === 'off') await this.reclaim(runId, loose);
+        const s = await stageRun(store, repo, this.deps.events, runId, row.config.prBatchSize, { only: loose.map((t) => t.id), progress: this.progress });
+        done.push(`batched the matched packets that had no batch: ${s.staged} staged, ${s.failed} failing`);
+      }
+
+      phase(2, 'checking against upstream');
+      if (repo.upstreamState && changeable().length) {
+        const u = await this.setAsideUpstreamAll(runId);
+        if (u.setAsideFunctions) done.push(`set aside ${u.setAsideFunctions} function(s) upstream already has or changed`);
+      }
+
+      phase(3, 'dry runs');
+      const tried = new Set<string>();
+      for (let round = 0; round < 4; round++) {
+        const todo = changeable().filter((w) => !tried.has(w.batch.id) && !clean(w.batch));
+        if (!todo.length) break;
+        const claimed: string[] = [];
+        for (const [i, w] of todo.entries()) {
+          tried.add(w.batch.id);
+          phase(3, `dry run ${i + 1} of ${todo.length} (batch ${w.batch.seq})`);
+          const r = await this.submitBatch(runId, w.batch.id, { dryRun: true });
+          if (r.cancelled) return { cancelled: true, done, needsYou, ready: [], durationMs: Date.now() - startedAt };
+          if (r.ok && !r.uncheckedClaims?.length) continue;
+          if (r.uncheckedClaims?.length && !r.blockers.length && !r.problems.length) {
+            needsYou.push({ seq: w.batch.seq, why: 'claims could not be checked (GitHub unreachable?): run its dry run again later' });
+            continue;
+          }
+          const blame = await this.blockingUnits(runId, w.batch.id);
+          if (Object.keys(blame.units).length) {
+            phase(3, `setting aside what blocked batch ${w.batch.seq}`);
+            const s = await this.setAsideBlocking(runId, w.batch.id);
+            done.push(`batch ${w.batch.seq}: set aside ${s.setAsideFunctions} function(s) its dry run blamed`);
+          } else if (blame.claims.length) {
+            claimed.push(w.batch.id);
+          } else {
+            needsYou.push({ seq: w.batch.seq, why: (blame.unattributed[0] ?? r.error ?? 'the dry run failed').slice(0, 300) });
+          }
+        }
+        if (claimed.length && repo.claimCollisions) {
+          phase(3, `withholding units other contributors claimed (${claimed.length} batch(es))`);
+          const d = await this.dropCollisions(runId, claimed);
+          done.push(`withheld ${d.withheldFunctions} function(s) others have claimed; they come back on their own when the claims lapse`);
+        }
+      }
+
+      phase(4, 'summing up');
+      for (const b of failedLeft()) needsYou.push({ seq: b.seq, why: 'its re-verification fails: open it to see which packets' });
+      const ready = store.listBatches(runId).filter((b) => b.status === 'branch_ready' && clean(b)).map((b) => b.seq);
+      for (const w of changeable()) if (!clean(w.batch) && !needsYou.some((n) => n.seq === w.batch.seq)) needsYou.push({ seq: w.batch.seq, why: 'still has no clean dry run' });
+      this.deps.events.emit('run.prepared', `prepared for pull requests: ${ready.length} batch(es) ready to submit${needsYou.length ? `, ${needsYou.length} need you` : ''}`, { runId, level: needsYou.length ? 'warn' : 'info', data: { ready, needsYou, done } });
+      return { cancelled: false, done, needsYou, ready, durationMs: Date.now() - startedAt };
+    });
+  }
+
+  /**
    * Open the pull request for one staged batch with `sr submit` (dryRun: `sr submit --dry-run`, which
    * commits and pushes nothing for the PR). Only ever on the operator's explicit request.
    */
@@ -1254,6 +1353,7 @@ export class RunEngine {
       const onlyUnchecked = !r.cancelled && !r.blockers.length && !r.problems.length && !!r.uncheckedClaims?.length && r.submissionStarted !== true;
       if (opts.dryRun && !r.cancelled && !r.blockers.length && !r.problems.length && (r.ok || onlyUnchecked)) {
         prior.dryRunFingerprint = fingerprint;
+        prior.dryRunBase = repo.baseSha ?? null;
         if (onlyUnchecked) prior.dryRunUncheckedClaims = r.uncheckedClaims;
       }
       // A real submission refused only because claims could not be checked can be retried, with
@@ -1284,17 +1384,23 @@ export class RunEngine {
 
   /** Run `fn` with exclusive use of the worktree slots (refused while a run is active). */
   async exclusive<T>(label: string, fn: () => Promise<T>): Promise<T> {
+    // A step of an operation that already holds the slots (Prepare all for PR) runs inside it.
+    if (this.slotsHeld.getStore() === this) return fn();
     if (this.active.size || this.discovering) throw new Error('a run is active; wait for it to finish before using the worktree slots');
     if (this.exclusiveHolder) throw new Error(`worktree slots are busy (${this.exclusiveHolder})`);
     this.exclusiveHolder = label;
     this.beginOperation(label);
+    this.deps.repo.useIdleSlots?.(true);
     try {
-      return await fn();
+      return await this.slotsHeld.run(this, fn);
     } finally {
+      this.deps.repo.useIdleSlots?.(false);
       this.exclusiveHolder = null;
       this.op = null;
     }
   }
+
+  private slotsHeld = new AsyncLocalStorage<RunEngine>();
 
   /** The operation holding the worktree slots, if any, with its current step and recent history. */
   operation(): OperationProgress | null {

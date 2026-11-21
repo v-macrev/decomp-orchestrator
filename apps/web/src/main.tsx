@@ -34,14 +34,14 @@ function App() {
   return (
     <div className="app">
       <header className="topbar">
-        <span className="brand">decomp·orchestrator</span>
+        <span className="brand"><span className="logo" aria-hidden="true">◆</span>decomp·orchestrator</span>
         <nav className="tabs">
-          {([['runs', 'Runs & telemetry'], ['flow', 'Flow builder'], ['skills', 'Skills & optimization'], ['accounts', 'Accounts']] as Array<[Tab, string]>).map(([k, l]) => (
+          {([['runs', 'Runs'], ['flow', 'Flow builder'], ['skills', 'Skills'], ['accounts', 'Accounts']] as Array<[Tab, string]>).map(([k, l]) => (
             <button key={k} className={tab === k ? 'active' : ''} onClick={() => setTab(k)}>{l}</button>
           ))}
         </nav>
         <span className="grow" />
-        {health && <span className="muted" style={{ fontSize: 12 }}>{health.mode} mode · {health.repo} · {health.slots} worktree slots</span>}
+        {health && <span className="chip ok" title={health.repo}>{health.mode} · {health.slots} slots</span>}
         {err && (
           <span className="lvl-error" style={{ fontSize: 12 }}>
             API unreachable{err.includes('unauthorized') ? ' (token)' : ''}{' '}

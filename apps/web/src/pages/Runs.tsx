@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
-// Bulk-run control + live telemetry: queue depth, slots, pass/fail/retry, per-account health and
-// throughput, token/cost tracking, per-function drill-down with diffs and Gate Keeper verdicts.
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+// Runs: a list of runs, a guided view of one run (progress, what to do next), its PR batches,
+// packets and telemetry. Each screen leads with the one next step; details sit one click away.
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { Flow, Task, TelemetryEvent } from '@decomp/core';
 import { api, stream, type AccountView, type Batch, type CapacityPlan, type ClaimCollision, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
@@ -9,14 +9,17 @@ import { TaskDrawer } from '../components/TaskDrawer';
 
 const STATE_COLORS: Record<string, string> = {
   staged: 'var(--ok)', passed: 'var(--ok)', gating: 'var(--info)', leased: 'var(--accent)', pending: 'var(--muted)',
-  dead: 'var(--bad)', quarantined: '#ff9e64', cancelled: 'var(--border)',
+  withheld: 'var(--warn)', set_aside: 'var(--warn)', dead: 'var(--bad)', quarantined: '#e08a4f', cancelled: 'var(--border)',
 };
 
 export default function Runs({ mode }: { mode: string }) {
   const [runs, setRuns] = useState<RunSummary[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [sel, setSel] = useState<string | null>(null);
+  const [creating, setCreating] = useState(false);
   const refresh = useCallback(() => api.runs().then((r) => {
     setRuns(r);
+    setLoaded(true);
     setSel((s) => s ?? r[0]?.id ?? null);
   }), []);
   useEffect(() => {
@@ -24,34 +27,35 @@ export default function Runs({ mode }: { mode: string }) {
     const t = setInterval(refresh, 5_000);
     return () => clearInterval(t);
   }, [refresh]);
+  const showForm = creating || (loaded && !sel);
 
   return (
-    <div className="page" style={{ display: 'grid', gap: 14 }}>
-      <div className="grid2">
-        <NewRun mode={mode} runs={runs} onCreated={(id) => { setSel(id); refresh(); }} />
-        <div className="panel">
-          <h2>Runs</h2>
-          <table>
-            <thead><tr><th>Name</th><th>Status</th><th>Progress</th><th>Cost</th></tr></thead>
-            <tbody>
-              {runs.map((r) => {
-                const total = Object.values(r.counts).reduce((a, b) => a + b, 0);
-                const done = (r.counts.staged ?? 0) + (r.counts.passed ?? 0) + (r.counts.dead ?? 0) + (r.counts.quarantined ?? 0);
-                return (
-                  <tr key={r.id} className="click" onClick={() => setSel(r.id)} style={r.id === sel ? { outline: '1px solid var(--accent)' } : undefined}>
-                    <td>{r.name}<div className="muted mono" style={{ fontSize: 11 }}>{r.id}</div></td>
-                    <td><span className={`chip ${r.status}`}>{r.status}</span></td>
-                    <td style={{ minWidth: 120 }}><StackBar counts={r.counts} total={total} /><span className="muted" style={{ fontSize: 11 }}>{done}/{total}</span></td>
-                    <td>${r.costUsd.toFixed(2)}</td>
-                  </tr>
-                );
-              })}
-              {runs.length === 0 && <tr><td colSpan={4} className="muted">No runs yet.</td></tr>}
-            </tbody>
-          </table>
-        </div>
+    <div className="page">
+      <div className="runs-layout">
+        <aside className="stack" style={{ alignContent: 'start' }}>
+          <button className={showForm ? 'primary big' : 'big'} onClick={() => setCreating(true)}>+ New run</button>
+          <div className="run-list" role="list" aria-label="Runs">
+            {runs.map((r) => {
+              const total = Object.values(r.counts).reduce((a, b) => a + b, 0);
+              const done = (r.counts.staged ?? 0) + (r.counts.passed ?? 0) + (r.counts.dead ?? 0) + (r.counts.quarantined ?? 0) + (r.counts.withheld ?? 0) + (r.counts.set_aside ?? 0);
+              return (
+                <button key={r.id} role="listitem" className={`run-item${!showForm && r.id === sel ? ' selected' : ''}`} onClick={() => { setSel(r.id); setCreating(false); }}>
+                  <span className="name">{r.name}</span>
+                  <span className={`chip ${r.status}`}>{r.status}</span>
+                  <span className="meta muted small">{done}/{total} done · ${r.costUsd.toFixed(2)}</span>
+                  <StackBar counts={r.counts} total={total} />
+                </button>
+              );
+            })}
+            {loaded && runs.length === 0 && <p className="muted small">No runs yet. Start one with <b>New run</b>.</p>}
+          </div>
+        </aside>
+        <main className="stack" style={{ minWidth: 0, alignContent: 'start' }}>
+          {showForm
+            ? <NewRun mode={mode} runs={runs} onCancel={sel ? () => setCreating(false) : undefined} onCreated={(id) => { setSel(id); setCreating(false); refresh(); }} />
+            : sel && <RunDetail key={sel} runId={sel} onChange={refresh} onDeleted={() => { setSel(null); refresh(); }} />}
+        </main>
       </div>
-      {sel && <RunDetail key={sel} runId={sel} onChange={refresh} onDeleted={() => { setSel(null); refresh(); }} />}
     </div>
   );
 }
@@ -72,7 +76,7 @@ function flowRunDefaults(flow: Flow | undefined) {
   };
 }
 
-function NewRun({ mode, runs, onCreated }: { mode: string; runs: RunSummary[]; onCreated: (id: string) => void }) {
+function NewRun({ mode, runs, onCreated, onCancel }: { mode: string; runs: RunSummary[]; onCreated: (id: string) => void; onCancel?: () => void }) {
   const [flows, setFlows] = useState<Flow[]>([]);
   const [f, setF] = useState({
     name: `run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, flowId: 'default', source: mode === 'sim' ? 'synthetic' : 'sr_next',
@@ -156,93 +160,125 @@ function NewRun({ mode, runs, onCreated }: { mode: string; runs: RunSummary[]; o
       setErr((x as Error).message);
     }
   };
+  const carryBlock = withDead.length > 0 && (
+    <div className="panel flat" style={{ display: 'grid', gap: 6, padding: 14 }}>
+      <b className="small">Carry failed functions from earlier runs{carried ? ` — ${carried} function(s)` : ''}</b>
+      {withDead.map((r) => (
+        <label key={r.id} className="inline">
+          <input type="checkbox" checked={carryFrom.includes(r.id)} onChange={(e) => setCarryFrom((xs) => (e.target.checked ? [...xs, r.id] : xs.filter((x) => x !== r.id)))} />
+          {r.name} <span className="muted">· {r.counts.dead} failed{(r.config.carry as { fromRuns?: string[] } | undefined)?.fromRuns?.length ? ' · itself a carry-over' : ''}</span>
+        </label>
+      ))}
+    </div>
+  );
   return (
-    <form className="panel" onSubmit={submit} style={{ display: 'grid', gap: 10, alignContent: 'start' }}>
-      <h2>New bulk run</h2>
+    <form className="panel stack" onSubmit={submit}>
       <div className="row">
-        <label className="grow">Name<input value={f.name} onChange={(e) => set('name', e.target.value)} /></label>
-        <label>Flow preset<select value={f.flowId} onChange={(e) => selectFlow(e.target.value)}>{flows.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+        <h2 className="grow" style={{ margin: 0 }}>New bulk run</h2>
+        {onCancel && <button type="button" className="link" onClick={onCancel}>Back to the run</button>}
       </div>
-      <div className="row">
-        <label>Backlog source
+      <p className="muted" style={{ margin: 0 }}>Choose what to work on and start. The flow preset fills in sensible limits; everything else is under <b>Advanced options</b>.</p>
+      <div className="form-grid">
+        <label className="wide">Name<input value={f.name} onChange={(e) => set('name', e.target.value)} /></label>
+        <label>Flow preset<select value={f.flowId} onChange={(e) => selectFlow(e.target.value)}>{flows.map((x) => <option key={x.id} value={x.id}>{x.name}</option>)}</select></label>
+        <label>What to work on
           <select value={f.source} onChange={(e) => set('source', e.target.value)}>
-            {mode === 'sim' ? <option value="synthetic">synthetic (simulator)</option> : <><option value="sr_next">sr next (readiness-ranked)</option><option value="rva_list">explicit RVAs</option></>}
-            <option value="gather">gather (inventory scan + filters)</option>
-            <option value="carry">only failed functions carried over (below)</option>
+            {mode === 'sim' ? <option value="synthetic">synthetic (simulator)</option> : <><option value="sr_next">next ready functions (sr next)</option><option value="rva_list">a list of RVAs</option></>}
+            <option value="gather">scan the inventory with filters</option>
+            <option value="carry">only failed functions of earlier runs</option>
           </select>
         </label>
-        {!['rva_list', 'carry'].includes(f.source) && <label>Functions<input type="number" min={1} value={f.count} onChange={(e) => set('count', Number(e.target.value))} style={{ width: 90 }} /></label>}
-        {f.source === 'sr_next' && <label>Max size (B)<input type="number" value={f.maxSize} onChange={(e) => set('maxSize', Number(e.target.value))} style={{ width: 90 }} /></label>}
-        {f.source === 'sr_next' && <button type="button" onClick={checkAvailability} disabled={checkingAvailability}>{checkingAvailability ? 'Checking upstream…' : 'Check availability'}</button>}
+        {!['rva_list', 'carry'].includes(f.source) && <label>How many functions<input type="number" min={1} value={f.count} onChange={(e) => set('count', Number(e.target.value))} /></label>}
+        {f.source === 'sr_next' && <label>Max size (bytes)<input type="number" value={f.maxSize} onChange={(e) => set('maxSize', Number(e.target.value))} /></label>}
+        <label title="Named on claims, commits and sr submit --drafted-by">Drafted by<input value={f.draftedBy} onChange={(e) => set('draftedBy', e.target.value)} /></label>
       </div>
-      {f.source === 'sr_next' && availability?.requested === f.count && availability.maxSize === f.maxSize && (
-        <div role="status" className={availability.selected < f.count ? 'lvl-warn' : 'muted'}>
-          {availability.selected} of {availability.requested} requested functions eligible across {availability.units} source units after checking upstream.
+      {f.source === 'sr_next' && (
+        <div className="row">
+          <button type="button" onClick={checkAvailability} disabled={checkingAvailability}>{checkingAvailability ? 'Checking upstream…' : 'How many are available?'}</button>
+          {availability?.requested === f.count && availability.maxSize === f.maxSize && (
+            <span role="status" className={availability.selected < f.count ? 'lvl-warn small' : 'muted small'}>
+              {availability.selected} of {availability.requested} are free to take, across {availability.units} source units.
+            </span>
+          )}
         </div>
       )}
-      {f.source === 'rva_list' && <label>RVAs (hex, comma/space separated)<textarea rows={3} value={f.rvas} onChange={(e) => set('rvas', e.target.value)} /></label>}
+      {f.source === 'rva_list' && <label>RVAs (hex, comma or space separated)<textarea rows={3} value={f.rvas} onChange={(e) => set('rvas', e.target.value)} /></label>}
       {f.source === 'gather' && (
-        <div style={{ display: 'grid', gap: 8, border: '1px dashed var(--border)', borderRadius: 8, padding: 10 }}>
-          <div className="row">
-            <label>Max size (B)<input type="number" value={f.gMaxSize} onChange={(e) => set('gMaxSize', Number(e.target.value))} style={{ width: 80 }} /></label>
-            <label className="grow" title="Qualified-name prefixes on :: boundaries">Namespaces / classes<input value={f.gNamespaces} placeholder="RE, BSTArray, TESForm" onChange={(e) => set('gNamespaces', e.target.value)} /></label>
-            <label className="grow" title="reconstruction/<area>/…">Modules<input value={f.gModules} placeholder="skyrim, gamebryo" onChange={(e) => set('gModules', e.target.value)} /></label>
-            <label title="Half-open ranges, comma separated">RVA ranges<input value={f.gRange} placeholder="0x1000-0x2000" onChange={(e) => set('gRange', e.target.value)} style={{ width: 150 }} /></label>
+        <div className="panel flat" style={{ display: 'grid', gap: 10, padding: 14 }}>
+          <div className="form-grid">
+            <label>Max size (bytes)<input type="number" value={f.gMaxSize} onChange={(e) => set('gMaxSize', Number(e.target.value))} /></label>
+            <label title="Qualified-name prefixes on :: boundaries">Namespaces / classes<input value={f.gNamespaces} placeholder="RE, BSTArray, TESForm" onChange={(e) => set('gNamespaces', e.target.value)} /></label>
+            <label title="reconstruction/<area>/…">Modules<input value={f.gModules} placeholder="skyrim, gamebryo" onChange={(e) => set('gModules', e.target.value)} /></label>
+            <label title="Half-open ranges, comma separated">RVA ranges<input value={f.gRange} placeholder="0x1000-0x2000" onChange={(e) => set('gRange', e.target.value)} /></label>
           </div>
           <div className="row">
             <label className="inline"><input type="checkbox" checked={f.gExcludeGuess} onChange={(e) => set('gExcludeGuess', e.target.checked)} />Skip GUESS-named functions</label>
             <label className="inline" title="Skip functions whose unit already contains a non-trivial draft"><input type="checkbox" checked={f.gExcludeDrafted} onChange={(e) => set('gExcludeDrafted', e.target.checked)} />Skip drafted</label>
-            <span className="muted" style={{ fontSize: 12 }}>Locked (claimed) and in-flight functions are always skipped.</span>
             <span className="grow" />
-            <button type="button" disabled={previewing} onClick={() => { setPreviewing(true); api.gatherPreview(gatherFilter()).then(setPreview).catch((e) => setErr(String(e.message))).finally(() => setPreviewing(false)); }}>{previewing ? 'Gathering…' : 'Preview gather'}</button>
+            <button type="button" disabled={previewing} onClick={() => { setPreviewing(true); api.gatherPreview(gatherFilter()).then(setPreview).catch((e) => setErr(String(e.message))).finally(() => setPreviewing(false)); }}>{previewing ? 'Gathering…' : 'Preview'}</button>
           </div>
+          <span className="muted small">Claimed and in-flight functions are always skipped.</span>
           {preview && <GatherSummary g={preview} />}
         </div>
       )}
-      <div className="row">
-        <label>Functions / packet<input type="number" min={1} max={60} value={f.packetMaxFunctions} onChange={(e) => set('packetMaxFunctions', Number(e.target.value))} style={{ width: 80 }} /></label>
-        <label>Concurrent compares<input type="number" min={1} max={64} value={f.gateConcurrency} onChange={(e) => set('gateConcurrency', Number(e.target.value))} style={{ width: 80 }} /></label>
-        <label>Functions / PR (≤60)<input type="number" min={1} max={60} value={f.prBatchSize} onChange={(e) => set('prBatchSize', Number(e.target.value))} style={{ width: 80 }} /></label>
-        <label>Budget USD<input value={f.budgetUsd} placeholder="none" onChange={(e) => set('budgetUsd', e.target.value)} style={{ width: 80 }} /></label>
-        <label title="Off: nothing is committed in the target repository and every claim is released at the end">Staging<select value={f.staging} onChange={(e) => set('staging', e.target.value)}><option value="off">off (no commits)</option><option value="branches">local branches</option></select></label>
-        <label title="Hard ceiling of distinct functions one worker instance may take in this run">Max fn / worker<input type="number" min={1} max={5000} value={f.capPerWorker} onChange={(e) => set('capPerWorker', Number(e.target.value))} style={{ width: 80 }} /></label>
-      </div>
-      {capacity && (
-        <div className={capacity.warnings.length ? 'lvl-warn' : 'muted'} style={{ fontSize: 12 }}>
-          {capacity.workers} worker instance(s) × {capacity.maxPerWorker} = {capacity.capacity} function capacity for a batch of {capacity.batch}
-          {capacity.warnings.length ? <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>{capacity.warnings.map((w) => <li key={w}>{w}</li>)}</ul> : ' — ok'}
+      {f.source === 'carry' && carryBlock}
+      {capacity && capacity.warnings.length > 0 && (
+        <div className="notice lvl-warn small">
+          {capacity.workers} worker(s) × {capacity.maxPerWorker} = room for {capacity.capacity} of {capacity.batch} functions.
+          <ul style={{ margin: '4px 0 0 16px', padding: 0 }}>{capacity.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
         </div>
       )}
-      <div className="row" style={{ alignItems: 'center' }}>
-        <label className="inline"><input type="checkbox" checked={f.routing} onChange={(e) => set('routing', e.target.checked)} />Route by complexity</label>
-        <label className="inline" title="Idle higher tiers pull lower-tier backlog"><input type="checkbox" checked={f.workStealing} disabled={!f.routing} onChange={(e) => set('workStealing', e.target.checked)} />Work stealing</label>
-        <label className="inline" title="Borderline scores go to the Orchestrator's model (shape counts only, never listings)"><input type="checkbox" checked={f.llmTieBreak} disabled={!f.routing} onChange={(e) => set('llmTieBreak', e.target.checked)} />LLM tie-break</label>
-        <label>Promote after<input type="number" min={1} max={20} value={f.promoteAfter} disabled={!f.routing} onChange={(e) => set('promoteAfter', Number(e.target.value))} style={{ width: 60 }} /></label>
-        <label>Context<select value={f.contextMode} onChange={(e) => set('contextMode', e.target.value)}><option value="budgeted">budgeted bundles (v2)</option><option value="legacy">legacy bundles</option></select></label>
-        <label className="inline" title="Core skills in the cached prefix + up to 2 triggered skills per attempt (frozen for the run)"><input type="checkbox" checked={f.skills} disabled={f.contextMode !== 'budgeted'} onChange={(e) => set('skills', e.target.checked)} />Skills</label>
-        <label className="inline" title="When the run completes: mine, patch, optimize and shadow-evaluate skills automatically"><input type="checkbox" checked={f.autoCurate} disabled={!f.skills || f.contextMode !== 'budgeted'} onChange={(e) => set('autoCurate', e.target.checked)} />Curate after run</label>
-      </div>
-      {withDead.length > 0 && (
-        <div style={{ display: 'grid', gap: 4, border: '1px dashed var(--border)', borderRadius: 8, padding: 10 }}>
-          <span title="Their dead packets' functions are added to this run's selection (or are the whole run with the source above set to carried-only)">Carry failed functions from earlier runs{carried ? ` — ${carried} function(s)` : ''}</span>
-          {withDead.map((r) => (
-            <label key={r.id} className="inline">
-              <input type="checkbox" checked={carryFrom.includes(r.id)} onChange={(e) => setCarryFrom((xs) => (e.target.checked ? [...xs, r.id] : xs.filter((x) => x !== r.id)))} />
-              {r.name} <span className="muted">· {r.counts.dead} dead{(r.config.carry as { fromRuns?: string[] } | undefined)?.fromRuns?.length ? ' · itself a carry-over' : ''}</span>
-            </label>
-          ))}
-        </div>
-      )}
-      <label>Drafted by (claims, commits and <span className="mono">sr submit --drafted-by</span>)<input value={f.draftedBy} onChange={(e) => set('draftedBy', e.target.value)} /></label>
       <label className="inline" style={{ alignItems: 'flex-start' }}>
         <input type="checkbox" checked={f.exposureConsent} onChange={(e) => set('exposureConsent', e.target.checked)} />
         <span>Send private listings (made locally from my own copy of the game) to the configured AI providers. The project requires the owner's explicit agreement; without it workers only see public repository context.</span>
       </label>
-      {err && <div className="lvl-error">{err}</div>}
-      <div><button className="primary" type="submit">Start run</button></div>
+      <details className="panel flat" style={{ padding: 14 }}>
+        <summary><b>Advanced options</b> <span className="muted small">packets, PR size, budget, staging, routing, skills</span></summary>
+        <div className="stack" style={{ marginTop: 12 }}>
+          <div className="form-grid">
+            <label>Functions per packet<input type="number" min={1} max={60} value={f.packetMaxFunctions} onChange={(e) => set('packetMaxFunctions', Number(e.target.value))} /></label>
+            <label>Compares at once<input type="number" min={1} max={64} value={f.gateConcurrency} onChange={(e) => set('gateConcurrency', Number(e.target.value))} /></label>
+            <label>Functions per PR (≤60)<input type="number" min={1} max={60} value={f.prBatchSize} onChange={(e) => set('prBatchSize', Number(e.target.value))} /></label>
+            <label>Budget (USD)<input value={f.budgetUsd} placeholder="none" onChange={(e) => set('budgetUsd', e.target.value)} /></label>
+            <label title="Off: nothing is committed in the target repository and every claim is released at the end">When finished<select value={f.staging} onChange={(e) => set('staging', e.target.value)}><option value="off">commit nothing</option><option value="branches">stage local branches</option></select></label>
+            <label title="Hard ceiling of distinct functions one worker instance may take in this run">Max functions per worker<input type="number" min={1} max={5000} value={f.capPerWorker} onChange={(e) => set('capPerWorker', Number(e.target.value))} /></label>
+            <label>Context<select value={f.contextMode} onChange={(e) => set('contextMode', e.target.value)}><option value="budgeted">budgeted bundles (v2)</option><option value="legacy">legacy bundles</option></select></label>
+            <label>Promote after failures<input type="number" min={1} max={20} value={f.promoteAfter} disabled={!f.routing} onChange={(e) => set('promoteAfter', Number(e.target.value))} /></label>
+          </div>
+          {capacity && !capacity.warnings.length && <span className="muted small">{capacity.workers} worker(s) × {capacity.maxPerWorker} = room for {capacity.capacity} of {capacity.batch} functions — ok.</span>}
+          <div className="row">
+            <label className="inline"><input type="checkbox" checked={f.routing} onChange={(e) => set('routing', e.target.checked)} />Route by complexity</label>
+            <label className="inline" title="Idle higher tiers pull lower-tier backlog"><input type="checkbox" checked={f.workStealing} disabled={!f.routing} onChange={(e) => set('workStealing', e.target.checked)} />Work stealing</label>
+            <label className="inline" title="Borderline scores go to the Orchestrator's model (shape counts only, never listings)"><input type="checkbox" checked={f.llmTieBreak} disabled={!f.routing} onChange={(e) => set('llmTieBreak', e.target.checked)} />LLM tie-break</label>
+            <label className="inline" title="Core skills in the cached prefix + up to 2 triggered skills per attempt (frozen for the run)"><input type="checkbox" checked={f.skills} disabled={f.contextMode !== 'budgeted'} onChange={(e) => set('skills', e.target.checked)} />Skills</label>
+            <label className="inline" title="When the run completes: mine, patch, optimize and shadow-evaluate skills automatically"><input type="checkbox" checked={f.autoCurate} disabled={!f.skills || f.contextMode !== 'budgeted'} onChange={(e) => set('autoCurate', e.target.checked)} />Curate after run</label>
+          </div>
+          {f.source !== 'carry' && carryBlock}
+        </div>
+      </details>
+      {err && <div className="notice error">{err}</div>}
+      <div><button className="primary big" type="submit">Start run</button></div>
     </form>
   );
 }
+
+/** A soft ring showing how much of the run is done. */
+function Ring({ value, label }: { value: number; label: string }) {
+  const r = 38;
+  const c = 2 * Math.PI * r;
+  const v = Math.max(0, Math.min(1, value));
+  return (
+    <div className="ring" role="img" aria-label={`${Math.round(v * 100)}% done`}>
+      <svg viewBox="0 0 88 88" aria-hidden="true">
+        <circle cx="44" cy="44" r={r} fill="none" stroke="var(--shade)" strokeOpacity=".35" strokeWidth="7" />
+        <circle cx="44" cy="44" r={r} fill="none" stroke="var(--accent)" strokeWidth="7" strokeLinecap="round" strokeDasharray={`${c * v} ${c}`} />
+      </svg>
+      <div><b>{Math.round(v * 100)}%</b><small>{label}</small></div>
+    </div>
+  );
+}
+
+type RunTab = 'overview' | 'batches' | 'packets' | 'details';
 
 function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: () => void; onDeleted: () => void }) {
   const [m, setM] = useState<Metrics | null>(null);
@@ -251,6 +287,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
   const [batches, setBatches] = useState<Batch[]>([]);
   const [filter, setFilter] = useState('');
   const [task, setTask] = useState<string | null>(null);
+  const [tab, setTab] = useState<RunTab | null>(null);
   const [retryingFailed, setRetryingFailed] = useState(false);
   const [retryFailedError, setRetryFailedError] = useState('');
   const [retryFailedMessage, setRetryFailedMessage] = useState('');
@@ -274,9 +311,9 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
     return () => clearInterval(t);
   }, [runId, filter]);
 
-  if (!m) return <div className="panel">loading…</div>;
+  if (!m) return <div className="panel muted">Loading the run…</div>;
   const f = m.functions;
-  const matched = (f.staged ?? 0) + (f.passed ?? 0);
+  const matched = (f.staged ?? 0) + (f.passed ?? 0) + (f.withheld ?? 0) + (f.set_aside ?? 0);
   const done = matched + (f.dead ?? 0) + (f.quarantined ?? 0);
   const act = async (a: 'pause' | 'resume' | 'cancel', body?: unknown) => {
     await api.runAction(runId, a, body);
@@ -290,7 +327,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
       const result = await api.retryFailedTasks(runId);
       setRetryFailedMessage(result.requeued
         ? `Requeued ${result.requeued} failed packet(s) at ${result.tierLabel}.`
-        : 'There are no dead packets to retry.');
+        : 'There are no failed packets to retry.');
       onChange();
     } catch (e) {
       setRetryFailedError((e as Error).message);
@@ -319,102 +356,159 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
     }
   };
   const status = m.run.status;
+  const finished = ['completed', 'cancelled', 'failed'].includes(status);
   const selectionShortfall = events.find((event) => event.kind === 'run.selection_shortfall');
   const deadTasks = m.tasks.dead ?? 0;
-  const retryUnavailable = ['cancelled', 'failed', 'created', 'discovering'].includes(status)
-    || (m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd);
+  const overBudget = m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd;
+  const retryUnavailable = ['cancelled', 'failed', 'created', 'discovering'].includes(status) || overBudget;
+  const inFlight = (f.leased ?? 0) + (f.gating ?? 0);
+  const left = Math.max(0, m.totalFunctions - done);
+  const view: RunTab = tab ?? (status === 'completed' && (batches.length > 0 || (m.tasks.passed ?? 0) > 0) ? 'batches' : 'overview');
+  const unbatched = m.tasks.passed ?? 0;
+  const sentence = (() => {
+    switch (status) {
+      case 'running': return `Working on it: ${inFlight} function(s) in progress, ${m.queueDepth} waiting${m.throughput.etaMinutes !== null ? `, about ${m.throughput.etaMinutes} min left` : ''}.`;
+      case 'paused': return overBudget ? 'Paused: the budget is used up. Raise it to continue.' : 'Paused. Resume to carry on where it stopped.';
+      case 'created': case 'discovering': return 'Getting the functions ready…';
+      case 'completed': return `Finished: ${matched} matched, ${f.dead ?? 0} failed.${unbatched || batches.length ? ' Next: the PR batches tab.' : ''}`;
+      case 'cancelled': return 'Cancelled. Matched functions are kept.';
+      default: return `The run ${status}.`;
+    }
+  })();
+  const tabs: Array<[RunTab, string, ReactNode?]> = [
+    ['overview', 'Overview'],
+    ['batches', 'PR batches', batches.filter((b) => b.status === 'branch_ready').length || null],
+    ['packets', 'Packets', m.totalFunctions ? Object.values(m.tasks).reduce((a, b) => a + b, 0) : null],
+    ['details', 'Telemetry'],
+  ];
   return (
-    <div style={{ display: 'grid', gap: 14 }}>
-      <div className="panel">
-        <div className="row" style={{ marginBottom: 10 }}>
-          <h2 className="grow" style={{ margin: 0 }}>{m.run.name} <span className={`chip ${status}`}>{status}</span></h2>
-          <button onClick={() => act('pause')} disabled={status !== 'running'}>Pause</button>
-          <button onClick={() => act('pause', { immediate: true })} disabled={status !== 'running'} title="Abort in-flight attempts (not counted against tasks)">Pause now</button>
-          <button onClick={() => act('resume')} disabled={status !== 'paused' || (m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd)} title={m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd ? 'Budget reached: set a new budget below to resume' : undefined}>Resume</button>
-          <ConfirmButton onConfirm={retryFailed} disabled={!deadTasks || retryingFailed || retryUnavailable} className="primary" confirmLabel={`Retry ${deadTasks} failed task(s) where each stopped?`} title="Retries only dead packets; successful and quarantined tasks are left alone. Retries use this run's remaining budget.">{retryingFailed ? 'Retrying…' : `Retry failed tasks (${deadTasks})`}</ConfirmButton>
-          <ConfirmButton onConfirm={() => act('cancel')} disabled={['completed', 'cancelled', 'failed'].includes(status)} confirmLabel="Cancel run? Open tasks stop">Cancel</ConfirmButton>
-          <button onClick={() => setEditing((x) => !x)}>{editing ? 'Close edit' : 'Edit'}</button>
-          <ConfirmButton onConfirm={applyFlow} disabled={['completed', 'cancelled', 'failed'].includes(status)} confirmLabel="Apply the flow template's current models and limits to this run?" title="Re-reads this run's flow template: models, capability, attempts and checks change from the next attempt on. Worker counts, tiers and routing stay as the run started.">Apply flow changes</ConfirmButton>
-          <ConfirmButton onConfirm={removeRun} disabled={m.engine.active || ['running', 'discovering'].includes(status)} confirmLabel="Delete run and its history? Claims go back" title={m.engine.active ? 'Cancel or finish the run first' : 'Deletes the run, its packets, attempts and events; local claims it still holds are released (not those in a submitted PR)'}>Delete</ConfirmButton>
+    <>
+      <div className="panel stack">
+        <div className="run-head">
+          <Ring value={done / Math.max(1, m.totalFunctions)} label={`${done}/${m.totalFunctions}`} />
+          <div className="stack" style={{ gap: 10, minWidth: 0 }}>
+            <div className="row">
+              <h2 className="grow" style={{ margin: 0 }}>{m.run.name} <span className={`chip ${status}`}>{status}</span></h2>
+              {status === 'running' && <button onClick={() => act('pause')}>Pause</button>}
+              {status === 'paused' && <button className="primary" onClick={() => act('resume')} disabled={overBudget} title={overBudget ? 'Budget reached: set a new budget under More → Edit to resume' : undefined}>Resume</button>}
+              {deadTasks > 0 && !retryUnavailable && (
+                <ConfirmButton onConfirm={retryFailed} disabled={retryingFailed} className={status === 'completed' ? '' : 'primary'} confirmLabel={`Retry ${deadTasks} failed packet(s)?`} title="Retries only failed packets, starting at the fast tier; matched and quarantined ones are left alone. Uses this run's remaining budget.">{retryingFailed ? 'Retrying…' : `Retry ${deadTasks} failed`}</ConfirmButton>
+              )}
+              <details className="menu">
+                <summary>More</summary>
+                <div className="menu-list">
+                  <button onClick={() => setEditing((x) => !x)}>{editing ? 'Close edit' : 'Edit run…'}</button>
+                  {status === 'running' && <button onClick={() => act('pause', { immediate: true })} title="Abort in-flight attempts (not counted against tasks)">Pause now</button>}
+                  {!finished && <ConfirmButton className="" onConfirm={applyFlow} confirmLabel="Apply the preset's models and limits?" title="Re-reads this run's flow template: models, capability, attempts and checks change from the next attempt on.">Apply flow changes</ConfirmButton>}
+                  {!finished && <ConfirmButton onConfirm={() => act('cancel')} confirmLabel="Cancel the run? Open tasks stop">Cancel run</ConfirmButton>}
+                  <ConfirmButton onConfirm={removeRun} disabled={m.engine.active || ['running', 'discovering'].includes(status)} confirmLabel="Delete the run and its history?" title={m.engine.active ? 'Cancel or finish the run first' : 'Deletes the run, its packets, attempts and events; local claims it still holds are released (not those in a submitted PR)'}>Delete run</ConfirmButton>
+                </div>
+              </details>
+            </div>
+            <div className="muted">{sentence}</div>
+            <div className="tiles">
+              <div className="tile ok"><b>{matched}</b><span>matched</span></div>
+              <div className={`tile ${f.dead ? 'bad' : ''}`}><b>{f.dead ?? 0}</b><span>failed{f.quarantined ? ` · ${f.quarantined} quarantined` : ''}</span></div>
+              <div className="tile"><b>{finished ? '—' : left}</b><span>{finished ? 'nothing left to do' : 'still to do'}</span></div>
+              <div className="tile"><b>${m.usage.costUsd.toFixed(2)}</b><span>spent{m.run.budgetUsd ? ` of $${m.run.budgetUsd}` : ''}</span></div>
+            </div>
+          </div>
         </div>
         {editing && <RunEditor runId={runId} status={status} onSaved={() => { setEditing(false); onChange(); api.metrics(runId).then(setM).catch(() => undefined); }} />}
-        {retryFailedError && <div className="lvl-error">{retryFailedError}</div>}
-        {retryFailedMessage && <div className="muted" role="status">{retryFailedMessage}</div>}
-        {deadTasks > 0 && <div className="muted" style={{ fontSize: 12 }}>Retrying starts dead packets at the fast tier. Passed packets remain complete; quarantined packets still need individual review.</div>}
-        {m.run.error && <div className="lvl-error">{m.run.error}</div>}
-        {selectionShortfall && <div className="lvl-warn" role="status">{selectionShortfall.msg}</div>}
-        {status === 'paused' && m.run.budgetUsd !== null && m.run.costUsd >= m.run.budgetUsd && <BudgetPausedBanner m={m} onChange={onChange} />}
-        <StackBar counts={f} total={m.totalFunctions} />
-        <div className="kpis" style={{ marginTop: 12 }}>
-          <Kpi l="Functions done" v={`${done}/${m.totalFunctions}`} />
-          <Kpi l="Matched" v={matched} c="var(--ok)" />
-          <Kpi l="Queue depth" v={m.queueDepth} />
-          <Kpi l="In flight" v={(f.leased ?? 0) + (f.gating ?? 0)} />
-          <Kpi l="Busy slots" v={`${m.engine.busySlots}/${m.engine.activeSlots}`} />
-          <Kpi l="Dead-lettered" v={f.dead ?? 0} c="var(--bad)" />
-          <Kpi l="Quarantined" v={f.quarantined ?? 0} c="#ff9e64" />
-          <Kpi l="Retries" v={m.routes.retry ?? 0} />
-          <Kpi l="Escalations" v={m.routes.escalate ?? 0} />
-          <Kpi l="Matched / min" v={m.throughput.passedPerMin5} />
-          <Kpi l="ETA" v={m.throughput.etaMinutes === null ? '—' : `${m.throughput.etaMinutes} min`} />
-          <Kpi l="Cost" v={`$${m.usage.costUsd.toFixed(2)}${m.run.budgetUsd ? ` / $${m.run.budgetUsd}` : ''}`} />
-          <Kpi l="Tokens in / out" v={`${fmt(m.usage.inputTokens)} / ${fmt(m.usage.outputTokens)}`} />
-          <Kpi l="Provider errors" v={m.usage.providerErrors} />
-        </div>
-        <Sparkline series={m.throughput.series} />
+        {retryFailedError && <div className="notice error">{retryFailedError}</div>}
+        {retryFailedMessage && <div className="notice" role="status">{retryFailedMessage}</div>}
+        {m.run.error && <div className="notice error">{m.run.error}</div>}
+        {selectionShortfall && <div className="notice lvl-warn" role="status">{selectionShortfall.msg}</div>}
+        {status === 'paused' && overBudget && <BudgetPausedBanner m={m} onChange={onChange} />}
       </div>
 
-      <TokenPanel m={m} />
-      {m.routing && <RoutingPanel r={m.routing} knowledge={m.knowledge} />}
-      {m.skills?.enabled && <RunSkillsPanel s={m.skills} />}
-      {m.workers?.list.length > 0 && <WorkerQuotaPanel m={m} onChange={onChange} />}
-      {m.gather && <div className="panel"><h2>Function gathering</h2><GatherSummary g={m.gather} /></div>}
+      <div><nav className="segmented" aria-label="Run sections">
+        {tabs.map(([k, l, n]) => <button key={k} className={view === k ? 'active' : ''} onClick={() => setTab(k)} aria-current={view === k ? 'page' : undefined}>{l}{n ? <span className="count">{n}</span> : null}</button>)}
+      </nav></div>
 
-      <div className="grid2">
+      {view === 'overview' && (
+        <>
+          <div className="panel stack">
+            <StackBar counts={f} total={m.totalFunctions} />
+            <div className="kpis">
+              <Kpi l="Functions done" v={`${done}/${m.totalFunctions}`} />
+              <Kpi l="Matched" v={matched} c="var(--ok)" />
+              <Kpi l="Waiting" v={m.queueDepth} />
+              <Kpi l="In progress" v={inFlight} />
+              <Kpi l="Busy slots" v={`${m.engine.busySlots}/${m.engine.activeSlots}`} />
+              <Kpi l="Failed" v={f.dead ?? 0} c="var(--bad)" />
+              <Kpi l="Quarantined" v={f.quarantined ?? 0} c="var(--warn)" />
+              <Kpi l="Retries" v={m.routes.retry ?? 0} />
+              <Kpi l="Escalations" v={m.routes.escalate ?? 0} />
+              <Kpi l="Matched / min" v={m.throughput.passedPerMin5} />
+              <Kpi l="ETA" v={m.throughput.etaMinutes === null ? '—' : `${m.throughput.etaMinutes} min`} />
+              <Kpi l="Tokens in / out" v={`${fmt(m.usage.inputTokens)} / ${fmt(m.usage.outputTokens)}`} />
+              <Kpi l="Provider errors" v={m.usage.providerErrors} />
+            </div>
+            <Sparkline series={m.throughput.series} />
+          </div>
+          <div className="panel">
+            <h2>What happened</h2>
+            <div className="log">{events.slice().reverse().map((e) => <div key={`${e.seq}-${e.ts}`} className={`lvl-${e.level}`}>{new Date(e.ts).toLocaleTimeString()} <b>{e.kind}</b> {e.msg}</div>)}</div>
+          </div>
+        </>
+      )}
+
+      {view === 'batches' && (
+        batches.length > 0 || (status === 'completed' && unbatched > 0)
+          ? <BatchesPanel runId={runId} status={status} passed={unbatched} withheld={m.tasks.withheld ?? 0} setAside={m.tasks.set_aside ?? 0} batches={batches} reload={() => api.batches(runId).then(setBatches).catch(() => undefined)} />
+          : <div className="hero"><span className="eyebrow">PR batches</span><h3>{finished ? 'Nothing to batch' : 'Batches come when the run finishes'}</h3><p>{finished ? 'This run has no matched functions waiting for a pull request.' : 'Matched functions are grouped into pull requests once the run has finished.'}</p></div>
+      )}
+
+      {view === 'packets' && (
         <div className="panel">
-          <h2>Account pool</h2>
-          <AccountsTable accounts={m.accounts} usage={m.byAccount} />
+          <div className="row" style={{ marginBottom: 8 }}>
+            <h2 className="grow" style={{ margin: 0 }}>Packets</h2>
+            <select value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter by state">
+              <option value="">all states</option>
+              {['pending', 'leased', 'gating', 'passed', 'staged', 'withheld', 'set_aside', 'dead', 'quarantined', 'cancelled'].map((s) => <option key={s} value={s}>{s} ({m.tasks[s] ?? 0})</option>)}
+            </select>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+            <table>
+              <thead><tr><th>Unit</th><th>Functions</th><th>Difficulty</th><th>State</th><th>Tier</th><th>Worker</th><th>Attempts</th><th>Best bytes</th></tr></thead>
+              <tbody>
+                {tasks.map((t) => {
+                  const tier = m.routing?.tiers[t.tier];
+                  return (
+                    <tr key={t.id} className="click" onClick={() => setTask(t.id)}>
+                      <td className="mono">{t.unit.replace(/^reconstruction\//, '')}</td>
+                      <td>{t.functions.map((x) => x.name ?? x.rva).join(', ')}</td>
+                      <td><DifficultyBadge d={t.difficulty} score={t.complexity} promoted={!!t.assessment && t.assessment.difficulty !== t.difficulty} /></td>
+                      <td><span className={`chip ${t.state}`}>{t.state}</span></td>
+                      <td>{tier ? <><span className={`cap ${tier.capability}`}>{tier.capability}</span> <span className="muted">{t.tier}</span></> : t.tier}</td>
+                      <td className="mono" style={{ fontSize: 11 }}>{(t as { assignedWorker?: string | null }).assignedWorker ?? <span className="muted">—</span>}</td>
+                      <td>{t.attemptsTotal}</td><td>{t.bestExactBytes}</td>
+                    </tr>
+                  );
+                })}
+                {tasks.length === 0 && <tr><td colSpan={8} className="muted">No packets in this state.</td></tr>}
+              </tbody>
+            </table>
+          </div>
         </div>
-        <div className="panel">
-          <h2>Live events</h2>
-          <div className="log">{events.slice().reverse().map((e) => <div key={`${e.seq}-${e.ts}`} className={`lvl-${e.level}`}>{new Date(e.ts).toLocaleTimeString()} <b>{e.kind}</b> {e.msg}</div>)}</div>
-        </div>
-      </div>
+      )}
 
-      <div className="panel">
-        <div className="row">
-          <h2 className="grow">Packets</h2>
-          <select value={filter} onChange={(e) => setFilter(e.target.value)}>
-            <option value="">all states</option>
-            {['pending', 'leased', 'gating', 'passed', 'staged', 'withheld', 'set_aside', 'dead', 'quarantined', 'cancelled'].map((s) => <option key={s} value={s}>{s} ({m.tasks[s] ?? 0})</option>)}
-          </select>
-        </div>
-        <table>
-          <thead><tr><th>Unit</th><th>Functions</th><th>Difficulty</th><th>State</th><th>Tier</th><th>Worker</th><th>Attempts</th><th>Best bytes</th></tr></thead>
-          <tbody>
-            {tasks.map((t) => {
-              const tier = m.routing?.tiers[t.tier];
-              return (
-                <tr key={t.id} className="click" onClick={() => setTask(t.id)}>
-                  <td className="mono">{t.unit.replace(/^reconstruction\//, '')}</td>
-                  <td>{t.functions.map((x) => x.name ?? x.rva).join(', ')}</td>
-                  <td><DifficultyBadge d={t.difficulty} score={t.complexity} promoted={!!t.assessment && t.assessment.difficulty !== t.difficulty} /></td>
-                  <td><span className={`chip ${t.state}`}>{t.state}</span></td>
-                  <td>{tier ? <><span className={`cap ${tier.capability}`}>{tier.capability}</span> <span className="muted">{t.tier}</span></> : t.tier}</td>
-                  <td className="mono" style={{ fontSize: 11 }}>{(t as { assignedWorker?: string | null }).assignedWorker ?? <span className="muted">—</span>}</td>
-                  <td>{t.attemptsTotal}</td><td>{t.bestExactBytes}</td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
-
-      {(batches.length > 0 || (status === 'completed' && (m.tasks.passed ?? 0) > 0)) && (
-        <BatchesPanel runId={runId} status={status} passed={m.tasks.passed ?? 0} withheld={m.tasks.withheld ?? 0} setAside={m.tasks.set_aside ?? 0} batches={batches} reload={() => api.batches(runId).then(setBatches).catch(() => undefined)} />
+      {view === 'details' && (
+        <>
+          <TokenPanel m={m} />
+          {m.routing && <RoutingPanel r={m.routing} knowledge={m.knowledge} />}
+          {m.skills?.enabled && <RunSkillsPanel s={m.skills} />}
+          {m.workers?.list.length > 0 && <WorkerQuotaPanel m={m} onChange={onChange} />}
+          {m.gather && <div className="panel"><h2>Function gathering</h2><GatherSummary g={m.gather} /></div>}
+          <div className="panel">
+            <h2>Account pool</h2>
+            <div style={{ overflowX: 'auto' }}><AccountsTable accounts={m.accounts} usage={m.byAccount} /></div>
+          </div>
+        </>
       )}
       {task && <TaskDrawer taskId={task} onClose={() => setTask(null)} />}
-    </div>
+    </>
   );
 }
 
@@ -492,73 +586,79 @@ const lapseText = (c: ClaimCollision, now = Date.now()) => {
 
 type StepState = 'done' | 'blocked' | 'next' | 'todo';
 
-/** Where a batch is on staged → claims → dry run → PR, and the one thing to do next. */
-function batchProgress(b: Batch): { steps: Array<{ label: string; state: StepState; title: string }>; next: string; tone: 'muted' | 'lvl-warn' | 'lvl-error' } {
+type Tone = 'ok' | 'warn' | 'bad' | 'next' | 'muted';
+type BatchAction = 'submit' | 'dry' | 'drop' | 'aside' | 'restage' | 'none';
+const isClaimBlocker = (x: string) => /another open claim or pull request/i.test(x);
+
+/**
+ * A batch in plain words: where it is on checked → claims → dry run → PR, what that means, and the
+ * one thing to do next.
+ */
+function batchView(b: Batch): { tone: Tone; title: string; why: string; action: BatchAction; steps: Array<{ label: string; state: StepState; title: string }> } {
   const d = b.detail;
   const last = d?.lastSubmit;
   const collisions = d?.claimCheck ? Object.keys(d.claimCheck.collisions).length : null;
-  const claimBlockers = last?.blockers.filter((x) => /another open claim or pull request/i.test(x)).length ?? 0;
-  const otherBlockers = (last?.blockers.length ?? 0) - claimBlockers;
-  const cleanDry = !!d?.dryRunFingerprint && !(d?.dryRunUncheckedClaims ?? []).length;
-  const steps: Array<{ label: string; state: StepState; title: string }> = [];
-  steps.push(b.status === 'failed'
-    ? { label: 'Staging failed', state: 'blocked', title: 'Re-verification in a clean tree failed: no branch was created and the packets stay passed' }
-    : { label: 'Staged', state: 'done', title: 'Re-verified in a clean tree and committed to a local branch' });
-  const claimsChecked = d?.claimCheck ? ` (checked ${new Date(d.claimCheck.at).toLocaleTimeString()})` : '';
-  steps.push(collisions === null
-    ? claimBlockers
-      ? { label: `${claimBlockers} claimed`, state: 'blocked', title: 'The last dry run found functions another contributor has claimed' }
-      : { label: 'Claims ?', state: 'todo', title: 'Not checked against other contributors\' open claims yet (Drop colliding packets checks; a dry run checks too)' }
-    : collisions
-      ? { label: `${collisions} claimed`, state: 'blocked', title: `Other contributors' open claims or PRs name ${collisions} function(s)${claimsChecked}` }
-      : { label: 'Claims clear', state: 'done', title: `No other open claim or PR names these functions${claimsChecked}` });
-  steps.push(cleanDry
-    ? { label: 'Dry run clean', state: 'done', title: 'sr submit --dry-run passed for exactly this batch' }
-    : last?.dryRun && !last.cancelled && !last.ok
-      ? { label: 'Dry run failed', state: 'blocked', title: 'The last dry run found problems (listed in the row)' }
-      : { label: 'Dry run', state: 'todo', title: 'Not dry-run yet (needed before Submit PR)' });
-  steps.push(b.status === 'submitted'
-    ? { label: 'PR open', state: 'done', title: d?.pr ?? '' }
-    : { label: 'PR', state: 'todo', title: 'Submit PR becomes available after a clean dry run' });
-
-  if (b.status === 'submitted') return { steps, next: 'Done: the pull request is open.', tone: 'muted' };
-  if (b.status === 'draft') {
-    steps[0] = { label: 'Re-verifying…', state: 'next', title: 'Being re-verified in a clean tree now' };
-    return { steps, tone: 'lvl-warn', next: 'Being re-verified now: see the progress above.' };
-  }
-  if (b.status === 'interrupted') {
-    steps[0] = { label: 'Interrupted', state: 'blocked', title: 'A server restart stopped its re-verification: no branch was created and its packets stay passed' };
-    return { steps, tone: 'lvl-error', next: 'A server restart interrupted its re-verification (nothing was committed). Next: Re-verify again.' };
-  }
-  if (b.status === 'superseded') {
-    const held = [d?.withheld ? `${d.withheld.taskIds.length} packet(s) withheld for claims` : '', d?.setAside ? `${d.setAside.taskIds.length} packet(s) set aside (${d.setAside.why})` : ''].filter(Boolean).join(', ');
-    return { steps, tone: 'muted', next: `Replaced: ${held || 'its packets were re-verified again'}${d?.supersededBy?.length ? `; the rest moved to batch ${d.supersededBy.join(', ')}` : ''}. Nothing to do here.` };
-  }
-  if (b.status === 'failed') return { steps, tone: 'lvl-error', next: 'Its packets stay passed. Next: Re-verify again (or Re-verify failed batches above). Packets that still fail end up in a new failed batch on their own.' };
-  const mark = (i: number) => {
+  const claimBlockers = last?.blockers.filter(isClaimBlocker).length ?? 0;
+  const otherFindings = (last?.blockers.length ?? 0) - claimBlockers + (last?.problems.length ?? 0);
+  const unchecked = d?.dryRunUncheckedClaims ?? [];
+  const cleanDry = !!d?.dryRunFingerprint && !unchecked.length;
+  const claimed = collisions ? collisions : collisions === null ? claimBlockers : 0;
+  const dryFailed = !!last?.dryRun && !last.cancelled && !last.ok && !cleanDry;
+  const steps: Array<{ label: string; state: StepState; title: string }> = [
+    b.status === 'failed' || b.status === 'interrupted'
+      ? { label: 'Check failed', state: 'blocked', title: 'Re-verification in a clean tree did not pass: nothing was committed' }
+      : b.status === 'draft'
+        ? { label: 'Checking…', state: 'next', title: 'Being re-verified in a clean tree now' }
+        : { label: 'Checked', state: 'done', title: 'Re-verified in a clean tree and committed to a local branch' },
+    claimed
+      ? { label: `${claimed} claimed`, state: 'blocked', title: 'Other contributors have open claims or PRs on some functions' }
+      : collisions === 0 || cleanDry
+        ? { label: 'Claims clear', state: 'done', title: 'No other open claim or PR names these functions' }
+        : { label: 'Claims', state: 'todo', title: 'Not checked yet: a dry run checks them' },
+    cleanDry
+      ? { label: 'Dry run clean', state: 'done', title: 'sr submit --dry-run passed for exactly this batch' }
+      : dryFailed
+        ? { label: 'Dry run failed', state: 'blocked', title: 'The last dry run found problems' }
+        : { label: 'Dry run', state: 'todo', title: 'Needed before Submit PR' },
+    b.status === 'submitted'
+      ? { label: 'PR open', state: 'done', title: d?.pr ?? '' }
+      : { label: 'PR', state: 'todo', title: 'Available after a clean dry run' },
+  ];
+  const next = (i: number) => {
     if (steps[i]!.state === 'todo') steps[i]!.state = 'next';
   };
-  if (collisions || (collisions === null && claimBlockers)) {
-    return { steps, tone: 'lvl-error', next: 'Next: Drop colliding packets (or Drop colliding packets in all batches). sr submit refuses a PR with claimed functions.' };
+  if (b.status === 'submitted') return { tone: 'ok', title: 'Pull request open', why: d?.pr ? 'Submitted upstream. Follow the review on GitHub.' : 'Submitted: open the pull request by hand from the link below.', action: 'none', steps };
+  if (b.status === 'draft') return { tone: 'next', title: 'Being checked now', why: 'Re-verifying it in a clean tree; see the progress at the top.', action: 'none', steps };
+  if (b.status === 'interrupted') return { tone: 'bad', title: 'Interrupted by a restart', why: 'A server restart stopped its check. Nothing was committed and nothing is lost: check it again.', action: 'restage', steps };
+  if (b.status === 'failed') return { tone: 'bad', title: 'Its check failed', why: 'Some packets did not match in a clean tree. Check again: packets that still fail are split off on their own.', action: 'restage', steps };
+  if (b.status === 'superseded') {
+    const held = [d?.withheld ? `${d.withheld.taskIds.length} packet(s) held back for claims` : '', d?.setAside ? `${d.setAside.taskIds.length} packet(s) set aside (${d.setAside.why})` : ''].filter(Boolean).join(', ');
+    return { tone: 'muted', title: 'Replaced', why: `${held || 'Its packets were checked again'}${d?.supersededBy?.length ? `; the rest moved to batch ${d.supersededBy.join(', ')}` : ''}.`, action: 'none', steps };
   }
-  if (last?.dryRun && !last.cancelled && !last.ok && !cleanDry) {
-    return { steps, tone: 'lvl-error', next: otherBlockers || last.problems.length ? 'Next: Set aside blocking units. It holds the units these findings name out of PRs and re-verifies the rest as a new batch.' : 'Dry run found problems (listed in the row): run it again after they are resolved.' };
+  if (claimed) return { tone: 'bad', title: 'Someone else claimed part of it', why: `Other contributors have open claims or PRs on ${claimed} function(s), so sr submit refuses it. Hold those units back; the rest becomes a new batch.`, action: 'drop', steps };
+  if (dryFailed && otherFindings) return { tone: 'bad', title: 'The dry run found problems', why: `${otherFindings} finding(s), listed under Details. Set aside the units they name; the rest becomes a new batch.`, action: 'aside', steps };
+  if (dryFailed) return { tone: 'bad', title: 'The dry run did not pass', why: last?.error ?? 'See the details, then run it again.', action: 'dry', steps };
+  if (unchecked.length) {
+    next(1);
+    return { tone: 'warn', title: 'Claims could not be checked', why: 'GitHub could not be reached for part of the batch. Run the dry run again.', action: 'dry', steps };
   }
   if (!cleanDry) {
-    if (collisions === null) mark(1);
-    mark(2);
-    return { steps, tone: 'lvl-warn', next: collisions === null ? 'Next: Dry run (it checks claims too), or Drop colliding packets to check claims first.' : 'Next: Dry run. Submit PR unlocks when it is clean.' };
+    next(2);
+    return { tone: 'next', title: 'Needs a dry run', why: 'A dry run rebuilds it from upstream and runs every check sr submit does. Nothing is pushed.', action: 'dry', steps };
   }
-  mark(3);
-  return { steps, tone: 'lvl-warn', next: 'Next: Submit PR.' };
+  next(3);
+  return { tone: 'ok', title: 'Ready to submit', why: 'The dry run is clean. Submitting pushes the branch to your fork and opens one pull request.', action: 'submit', steps };
 }
 
-function BatchProgress({ b }: { b: Batch }) {
-  const p = batchProgress(b);
+function StepDots({ steps }: { steps: Array<{ label: string; state: StepState; title: string }> }) {
   return (
-    <div>
-      <div className="steps">{p.steps.map((s) => <span key={s.label} className={`step ${s.state}`} title={s.title}>{s.state === 'done' ? '✓ ' : s.state === 'blocked' ? '✕ ' : ''}{s.label}</span>)}</div>
-      <div className={`next-hint ${p.tone}`}>{p.next}</div>
+    <div className="stepdots" aria-label="Progress">
+      {steps.map((s, i) => (
+        <span key={s.label} style={{ display: 'contents' }}>
+          {i > 0 && <span className="line" aria-hidden="true" />}
+          <span className={`s ${s.state}`} title={s.title}>{s.state === 'done' ? '✓' : s.state === 'blocked' ? '✕' : s.state === 'next' ? '→' : '○'} {s.label}</span>
+        </span>
+      ))}
     </div>
   );
 }
@@ -654,6 +754,7 @@ function OperationPanel({ op, runId }: { op: OperationProgress; runId: string })
       <div className="op-head">
         <span className="spinner" aria-hidden="true" />
         <div className="grow">
+          {op.label !== op.step && <div className="op-phase">{other ? 'Another run' : op.label}</div>}
           <div className="op-step">{op.step}</div>
           <div className="muted" style={{ fontSize: 12 }}>
             {other ? `Another run holds the worktree slots: ${op.label}. ` : ''}
@@ -663,13 +764,13 @@ function OperationPanel({ op, runId }: { op: OperationProgress; runId: string })
         </div>
       </div>
       {op.detail && <div className="op-detail">{op.detail}</div>}
-      {pct !== null && <div className="bar"><span style={{ width: `${pct}%`, background: 'var(--accent)' }} /></div>}
+      {pct !== null && <div className="bar"><span style={{ width: `${pct}%` }} /></div>}
       {op.log.length > 0 && (
         <ol start={Math.max(1, op.log.length - 5)}>
           {op.log.slice(-6).map((l) => <li key={`${l.at}-${l.step}`}>✓ {l.step} <span>({fmtDuration(l.ms)})</span></li>)}
         </ol>
       )}
-      <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>Runs on the server: you can leave or reload this page. Batch buttons wait until it finishes.</div>
+      <div className="muted" style={{ fontSize: 11 }}>Runs on the server: you can leave or reload this page. Buttons wait until it finishes.</div>
     </div>
   );
 }
@@ -689,7 +790,7 @@ function SetAsideList({ batches, locked, busy, putBack }: { batches: Batch[]; lo
   }
   if (!units.size) return null;
   return (
-    <details className="attention-list">
+    <details style={{ marginTop: 8 }}>
       <summary><b>{[...units.values()].reduce((n, u) => n + u.fns.length, 0)} function(s) set aside</b> in {units.size} unit(s)</summary>
       <p className="muted" style={{ margin: '4px 0' }}>Held out of every PR: each blocked a dry run, or upstream already has it. Upstream's work stays untouched. <b>Put back</b> once the cause is gone (e.g. upstream added the missing origin statements); it re-verifies the unit into a new batch.</p>
       <table className="fns">
@@ -712,37 +813,10 @@ function SetAsideList({ batches, locked, busy, putBack }: { batches: Batch[]; lo
   );
 }
 
-/** How many batches stand at each step. */
-function BatchPipeline({ batches, withheld, setAside }: { batches: Batch[]; withheld: number; setAside: number }) {
-  const live = batches.filter((b) => b.status === 'branch_ready');
-  const claimed = live.filter((b) => batchProgress(b).steps[1]!.state === 'blocked').length;
-  const clear = live.filter((b) => b.detail?.claimCheck && !Object.keys(b.detail.claimCheck.collisions).length).length;
-  const clean = live.filter((b) => !!b.detail?.dryRunFingerprint && !(b.detail.dryRunUncheckedClaims ?? []).length).length;
-  const submitted = batches.filter((b) => b.status === 'submitted').length;
-  const failed = batches.filter((b) => b.status === 'failed').length;
-  const fns = (list: Batch[]) => list.reduce((n, b) => n + b.functions.length, 0);
-  const stage = (n: number | string, label: string, title: string, tone = '') => (
-    <div className="stage" title={title}><b className={tone}>{n}</b><span>{label}</span></div>
-  );
-  return (
-    <div className="pipeline">
-      {stage(live.length, `staged batch(es) · ${fns(live)} fns`, 'Batches with a re-verified local branch, not submitted yet')}
-      <span className="arrow">→</span>
-      {stage(claimed ? `${claimed} ✕` : clear, claimed ? 'claimed by others' : 'claims clear', claimed ? 'Batches where other contributors claimed some functions: Drop colliding packets' : 'Batches checked with no colliding claims', claimed ? 'lvl-error' : '')}
-      <span className="arrow">→</span>
-      {stage(clean, 'clean dry run', 'Batches whose dry run passed: Submit PR is available')}
-      <span className="arrow">→</span>
-      {stage(submitted, 'PR open', 'Batches submitted as pull requests')}
-      {withheld > 0 && stage(withheld, 'packets withheld', 'Held out of PRs for other contributors\' claims: Recheck withheld when they lapse', 'lvl-warn')}
-      {setAside > 0 && stage(setAside, 'packets set aside', 'Held out of PRs because they blocked a dry run or upstream already has them: see Needs attention', 'lvl-warn')}
-      {failed > 0 && stage(failed, 'failed staging', 'Batches whose re-verification failed: their packets stay passed', 'lvl-error')}
-    </div>
-  );
-}
-
 /**
  * Passed functions → re-verified local branches (one per batch) → one pull request per batch with
- * the repository's own `sr submit`. Submitting is always an explicit click, after a clean dry run.
+ * the repository's own `sr submit`. The screen leads with the one next step (usually "Prepare all
+ * for PR", which runs every fix-up and dry run in order); submitting stays an explicit click per batch.
  */
 function BatchesPanel({ runId, status, passed, withheld, setAside, batches, reload }: { runId: string; status: string; passed: number; withheld: number; setAside: number; batches: Batch[]; reload: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
@@ -764,15 +838,19 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
   };
   const stage = () => run('stage', async () => {
     const r = await api.stageRun(runId);
-    return `${r.staged} batch(es) staged${r.failed ? `, ${r.failed} failed re-verification (their packets stay passed)` : ''}.`;
+    return `${r.staged} batch(es) made${r.failed ? `, ${r.failed} did not pass their check (their packets are kept)` : ''}.`;
+  });
+  const prepare = () => run('prepare', async () => {
+    await api.prepareAll(runId);
+    return 'Preparing the batches: follow the steps above. It runs on the server, so you can leave this page.';
   });
   const submit = (b: Batch, real: boolean, allowUncheckedClaims = false) => run(`${real ? 'submit' : 'dry'}-${b.id}`, async () => {
     const r = await api.submitBatch(runId, b.id, real, allowUncheckedClaims);
     if (r.cancelled) return `Dry run of batch ${b.seq} cancelled.`;
     if (real) return r.ok ? `Batch ${b.seq} submitted: ${r.pullRequest ?? r.link ?? 'see the events'}` : `Batch ${b.seq} was not submitted: ${r.error ?? r.blockers.join('; ')}`;
-    if (r.ok) return `Dry run of batch ${b.seq} is clean: Submit PR is now available.`;
-    if (r.uncheckedClaims?.length && !r.blockers.length && !r.problems.length) return `Dry run of batch ${b.seq}: claims of ${r.uncheckedClaims.length} task(s) could not be checked. Run it again, or explicitly submit the batch unchecked.`;
-    return `Dry run of batch ${b.seq} found problems (below).`;
+    if (r.ok) return `Dry run of batch ${b.seq} is clean: it is ready to submit.`;
+    if (r.uncheckedClaims?.length && !r.blockers.length && !r.problems.length) return `Dry run of batch ${b.seq}: claims of ${r.uncheckedClaims.length} task(s) could not be checked. Run it again, or submit it unchecked under Details.`;
+    return `Dry run of batch ${b.seq} found problems: see its card.`;
   });
   const cancel = async (b: Batch) => {
     setCancelling(b.id);
@@ -788,27 +866,49 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
   };
   const clear = (b: Batch, scope: 'preview' | 'batch') => run(`clear-${b.id}`, async () => {
     await api.clearBatchBranches(runId, b.id, scope);
-    return scope === 'preview' ? `Dry run of batch ${b.seq} cleared.` : `Branch for batch ${b.seq} deleted. Its packets are available to batch again.`;
+    return scope === 'preview' ? `Dry run of batch ${b.seq} cleared.` : `Branch for batch ${b.seq} deleted. Its packets can be batched again.`;
   });
   const issueRefs = (collisions: Record<string, ClaimCollision[]>) =>
     [...new Set(Object.values(collisions).flat().map((c) => `#${/\/(\d+)$/.exec(c.url)?.[1] ?? c.url}${c.author ? ` ${c.author}` : ''}`))].join(', ');
   const restaged = (r: { failed: number; seqs: number[] } | null) =>
-    r?.seqs.length ? ` Restaged as batch ${r.seqs.join(', ')}${r.failed ? ` (${r.failed} failed re-verification; their packets stay passed)` : ''}.` : '';
+    r?.seqs.length ? ` The rest is now batch ${r.seqs.join(', ')}${r.failed ? ` (${r.failed} did not pass their check)` : ''}.` : '';
   const dropCollisions = (b: Batch) => run(`drop-${b.id}`, async () => {
     const r = await api.dropCollisions(runId, b.id);
-    if (!r.withheldTasks) return `Batch ${b.seq}: no other open claim or pull request names its functions; nothing changed.`;
-    return `Batch ${b.seq}: withheld ${r.withheldFunctions} function(s) in ${r.units.length} unit(s) (claimed in ${issueRefs(r.collisions)}).${r.keptTasks ? restaged(r.staged) : ' No packets were left to restage.'}`;
+    if (!r.withheldTasks) return `Batch ${b.seq}: nobody else claims its functions now; nothing changed.`;
+    return `Batch ${b.seq}: held back ${r.withheldFunctions} function(s) in ${r.units.length} unit(s) (claimed in ${issueRefs(r.collisions)}).${r.keptTasks ? restaged(r.staged) : ''}`;
   });
   const dropAll = () => run('drop-all', async () => {
     const r = await api.dropAllCollisions(runId);
     const hit = r.batches.filter((x) => x.withheldTasks);
-    const clear = r.batches.filter((x) => !x.withheldTasks).map((x) => x.seq);
-    if (!hit.length) return `Checked ${r.batches.length} batch(es): no other open claim or pull request names their functions; nothing changed.`;
-    return `Checked ${r.batches.length} batch(es). Withheld ${r.withheldFunctions} function(s) from batch ${hit.map((x) => `${x.seq} (${x.withheldFunctions})`).join(', ')}; claims by ${issueRefs(r.collisions)}.${restaged(r.staged)}${clear.length ? ` Batch ${clear.join(', ')} ${clear.length === 1 ? 'is' : 'are'} clear.` : ''}`;
+    if (!hit.length) return `Checked ${r.batches.length} batch(es): nobody else claims their functions.`;
+    return `Held back ${r.withheldFunctions} function(s) from batch ${hit.map((x) => x.seq).join(', ')}; claims by ${issueRefs(r.collisions)}.${restaged(r.staged)}`;
   });
   const recheck = () => run('recheck', async () => {
     const r = await api.recheckWithheld(runId);
-    return `${r.returnedTasks} withheld packet(s) back into staging, ${r.stillWithheldTasks} still withheld${r.stillWithheldTasks ? ` (${issueRefs(r.collisions)})` : ''}.${restaged(r.staged)}`;
+    return `${r.returnedTasks} held-back packet(s) are free again, ${r.stillWithheldTasks} still claimed${r.stillWithheldTasks ? ` (${issueRefs(r.collisions)})` : ''}.${restaged(r.staged)}`;
+  });
+  const restage = (b: Batch) => run(`restage-${b.id}`, async () => {
+    const r = await api.restageBatch(runId, b.id);
+    return r.seqs.length ? `Batch ${b.seq} was checked again as batch ${r.seqs.join(', ')}${r.failed ? ` (${r.failed} still failing)` : ''}.` : `Batch ${b.seq}: nothing was staged.`;
+  });
+  const restageFailed = () => run('restage-failed', async () => {
+    const r = await api.restageFailed(runId);
+    return `Failed batches checked again: ${r.staged} batch(es) made${r.failed ? `, ${r.failed} still failing` : ''}.`;
+  });
+  const describeUnits = (units: Record<string, string[]>) => Object.keys(units).map((u) => u.slice(u.lastIndexOf('/') + 1)).join(', ');
+  const setAsideBlocking = (b: Batch) => run(`aside-${b.id}`, async () => {
+    const r = await api.setAsideBlocking(runId, b.id);
+    return `Batch ${b.seq}: set aside ${r.setAsideFunctions} function(s) in ${describeUnits(r.units)}.${r.keptTasks ? restaged(r.staged) : ''}${r.unattributed.length ? ` ${r.unattributed.length} finding(s) name no unit of the batch.` : ''}`;
+  });
+  const setAsideUpstream = () => run('upstream', async () => {
+    const r = await api.setAsideUpstream(runId);
+    const hit = r.batches.filter((x) => x.setAsideTasks);
+    if (!hit.length) return `Checked ${r.batches.length} batch(es) against upstream: nothing to set aside.`;
+    return `Set aside ${r.setAsideFunctions} function(s) upstream already has or changed, from batch ${hit.map((x) => x.seq).join(', ')}.${restaged(r.staged)}`;
+  });
+  const putBack = (units?: string[]) => run('put-back', async () => {
+    const r = await api.putBackSetAside(runId, units);
+    return `${r.returnedTasks} set-aside packet(s) put back.${restaged(r.staged)}`;
   });
   const [open, setOpen] = useState<Set<string>>(new Set());
   const toggle = (id: string) => setOpen((s) => {
@@ -817,8 +917,6 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
     else n.add(id);
     return n;
   });
-  const droppable = batches.filter((b) => b.status === 'branch_ready' && !b.detail?.pr && !b.detail?.link).length;
-  const busyBatch = batches.some((b) => b.dryRunState);
   // The server's slot-holding operation, polled: it survives reloads and clicks from other tabs.
   const [op, setOp] = useState<OperationProgress | null>(null);
   const reloadRef = useRef(reload);
@@ -844,173 +942,206 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
       clearInterval(t);
     };
   }, []);
-  const restage = (b: Batch) => run(`restage-${b.id}`, async () => {
-    const r = await api.restageBatch(runId, b.id);
-    return r.seqs.length ? `Batch ${b.seq}'s packets were re-verified as batch ${r.seqs.join(', ')}${r.failed ? ` (${r.failed} failed re-verification)` : ''}.` : `Batch ${b.seq}: nothing was staged.`;
-  });
-  const restageFailed = () => run('restage-failed', async () => {
-    const r = await api.restageFailed(runId);
-    return `Failed batches re-verified: ${r.staged} new batch(es) staged${r.failed ? `, ${r.failed} still failing (in a new failed batch with the current problems)` : ''}.`;
-  });
-  const describeUnits = (units: Record<string, string[]>) => Object.keys(units).map((u) => u.slice(u.lastIndexOf('/') + 1)).join(', ');
-  const setAsideBlocking = (b: Batch) => run(`aside-${b.id}`, async () => {
-    const r = await api.setAsideBlocking(runId, b.id);
-    return `Batch ${b.seq}: set aside ${r.setAsideFunctions} function(s) in ${Object.keys(r.units).length} unit(s) (${describeUnits(r.units)}).${r.keptTasks ? restaged(r.staged) : ' No packets were left to restage.'}${r.unattributed.length ? ` ${r.unattributed.length} finding(s) name no unit of the batch and stay as they are.` : ''}${r.claims ? ` ${r.claims} claim collision(s): use Drop colliding packets.` : ''}`;
-  });
-  const setAsideUpstream = () => run('upstream', async () => {
-    const r = await api.setAsideUpstream(runId);
-    const hit = r.batches.filter((x) => x.setAsideTasks);
-    if (!hit.length) return `Checked ${r.batches.length} batch(es) against upstream: none of their functions is matched there and none of their files changed. Nothing to set aside.`;
-    return `Checked ${r.batches.length} batch(es) against upstream. Set aside ${r.setAsideFunctions} function(s) from batch ${hit.map((x) => `${x.seq} (${x.setAsideFunctions})`).join(', ')}: upstream already matched them or changed their files.${restaged(r.staged)}${r.clear.length ? ` Batch ${r.clear.join(', ')} ${r.clear.length === 1 ? 'is' : 'are'} clear.` : ''}`;
-  });
-  const putBack = (units?: string[]) => run('put-back', async () => {
-    const r = await api.putBackSetAside(runId, units);
-    return `${r.returnedTasks} set-aside packet(s) put back.${restaged(r.staged)}`;
-  });
   const [nextLapse, setNextLapse] = useState<number | null>(null);
   useEffect(() => {
     if (!withheld) return setNextLapse(null);
     api.nextWithheldLapse(runId).then((r) => setNextLapse(r.at)).catch(() => undefined);
   }, [runId, withheld, batches]);
-  const failedBatches = batches.filter((b) => b.status === 'failed' || b.status === 'interrupted');
-  const failedFns = failedBatches.reduce((n, b) => n + b.functions.filter((f) => f.state === 'passed').length, 0);
-  const blockedBatches = batches.filter((b) => b.status === 'branch_ready' && !b.detail?.pr && b.detail?.lastSubmit && !b.detail.lastSubmit.ok
-    && (b.detail.lastSubmit.problems.length || b.detail.lastSubmit.blockers.some((x) => !/another open claim or pull request/i.test(x))));
+
+  const busyBatch = batches.some((b) => b.dryRunState);
   const locked = !!busy || busyBatch || !!op;
-  const attention = status === 'completed' && (failedFns > 0 || blockedBatches.length > 0 || withheld > 0 || setAside > 0);
+  const completed = status === 'completed';
+  const current = batches.filter((b) => b.status !== 'superseded');
+  const history = batches.filter((b) => b.status === 'superseded').sort((x, y) => y.seq - x.seq);
+  const views = new Map(current.map((b) => [b.id, batchView(b)]));
+  const actionOf = (b: Batch) => views.get(b.id)!.action;
+  const ready = current.filter((b) => actionOf(b) === 'submit');
+  const needsWork = current.filter((b) => ['dry', 'drop', 'aside', 'restage'].includes(actionOf(b)));
+  const failedCount = current.filter((b) => actionOf(b) === 'restage').length;
+  const submitted = current.filter((b) => b.status === 'submitted');
+  const order: Record<BatchAction, number> = { submit: 0, aside: 1, drop: 1, restage: 1, dry: 2, none: 3 };
+  const sorted = [...current].sort((x, y) => order[actionOf(x)] - order[actionOf(y)] || (x.status === 'submitted' ? 1 : 0) - (y.status === 'submitted' ? 1 : 0) || x.seq - y.seq);
+  const fnCount = (list: Batch[]) => list.reduce((n, b) => n + (b.functions.length || b.detail?.functions || 0), 0);
+  // Passed packets of a failed batch are that batch's to re-check; the rest have no batch at all.
+  const inFailed = new Set(current.filter((b) => actionOf(b) === 'restage').flatMap((b) => b.functions.filter((f) => f.state === 'passed').map((f) => f.taskId)));
+  const loose = Math.max(0, passed - inFailed.size);
+
+  const hero = (() => {
+    if (op) return <OperationPanel op={op} runId={runId} />;
+    if (busy) return <div className="op-panel"><div className="op-head"><span className="spinner" aria-hidden="true" /><div className="op-step">Starting…</div></div></div>;
+    if (!completed) return <div className="hero"><span className="eyebrow">PR batches</span><h3>Batches come when the run finishes</h3><p>Matched functions are grouped into pull requests once the run has finished.</p></div>;
+    if (needsWork.length || loose > 0) {
+      return (
+        <div className="hero">
+          <span className="eyebrow">Next step</span>
+          <h3>Get {needsWork.length ? (needsWork.length === 1 ? 'the batch' : `${needsWork.length} batches`) : 'the matched functions'} ready for pull requests</h3>
+          <p>One click does everything below, in order, and shows its progress here:</p>
+          <ol className="plan">
+            {loose > 0 && <li>Batch the {loose} matched packet{loose === 1 ? '' : 's'} that have no batch yet, checking each batch in a clean tree.</li>}
+            {failedCount > 0 && <li>Check {failedCount} failed batch{failedCount === 1 ? '' : 'es'} again in a clean tree.</li>}
+            <li>Set aside what upstream already has or changed (seconds, no compiling).</li>
+            <li>Dry-run each batch: only what changed is recompiled, on every idle slot at once.</li>
+            <li>Hold back units someone else claimed, and set aside units a dry run blames; the rest is dry-run again.</li>
+          </ol>
+          <p>Nothing is pushed: you still submit each pull request yourself.</p>
+          <div className="row"><button className="primary big" disabled={locked} onClick={prepare}>Prepare all for PR</button>{ready.length > 0 && <span className="muted small">{ready.length} batch{ready.length === 1 ? ' is' : 'es are'} already ready to submit.</span>}</div>
+        </div>
+      );
+    }
+    if (ready.length) {
+      return (
+        <div className="hero done">
+          <span className="eyebrow">Ready</span>
+          <h3>{ready.length} batch{ready.length === 1 ? '' : 'es'} ready to submit · {fnCount(ready)} functions</h3>
+          <p>Each one passed a clean dry run. <b>Submit PR</b> on a card pushes that batch to your fork and opens one pull request upstream.</p>
+        </div>
+      );
+    }
+    if (submitted.length) return <div className="hero done"><span className="eyebrow">All done</span><h3>Every batch is submitted</h3><p>{submitted.length} pull request{submitted.length === 1 ? '' : 's'} open.{withheld + setAside ? ' Some packets are still held back: see below.' : ''}</p></div>;
+    return <div className="hero"><span className="eyebrow">PR batches</span><h3>Nothing to submit right now</h3><p>{withheld + setAside ? 'Everything left is held back: see below.' : 'This run has no batches waiting.'}</p></div>;
+  })();
+
+  const primary = (b: Batch) => {
+    const v = views.get(b.id)!;
+    const d = b.detail;
+    if (b.dryRunState || busy === `dry-${b.id}`) {
+      return <button disabled={b.dryRunState !== 'running' || cancelling === b.id} onClick={() => cancel(b)}>{b.dryRunState === 'cancelling' || cancelling === b.id ? 'Cancelling…' : 'Cancel dry run'}</button>;
+    }
+    switch (v.action) {
+      case 'submit': return <ConfirmButton className="primary" disabled={locked} onConfirm={() => submit(b, true)} confirmLabel="Push to your fork and open the PR?" title="Runs sr submit: pushes the branch to your fork and opens one pull request upstream">{busy === `submit-${b.id}` ? 'Submitting…' : 'Submit PR'}</ConfirmButton>;
+      case 'dry': return <button className="primary" disabled={locked} onClick={() => submit(b, false)}>Dry run</button>;
+      case 'drop': return <ConfirmButton className="primary" disabled={locked} onConfirm={() => dropCollisions(b)} confirmLabel="Check claims and hold back claimed units?" title="Checks GitHub again; units with a function someone else claimed are held back (your local claims stay), and the rest becomes a new batch. Nothing is pushed.">{busy === `drop-${b.id}` ? 'Checking claims…' : 'Hold back claimed units'}</ConfirmButton>;
+      case 'aside': return <ConfirmButton className="primary" disabled={locked} onConfirm={() => setAsideBlocking(b)} confirmLabel="Set aside the units the findings name?" title="Holds the units the last dry run's findings name out of PRs and checks the rest as a new batch">{busy === `aside-${b.id}` ? 'Setting aside…' : 'Set aside blocking units'}</ConfirmButton>;
+      case 'restage': return <ConfirmButton className="primary" disabled={locked} onConfirm={() => restage(b)} confirmLabel={`Check batch ${b.seq} again?`} title="Re-verifies exactly this batch's packets in a clean tree and commits a new local branch. Nothing is pushed.">{busy === `restage-${b.id}` ? 'Checking…' : 'Check again'}</ConfirmButton>;
+      default:
+        return d?.pr ? <a href={d.pr} target="_blank" rel="noreferrer">Open the pull request ↗</a> : d?.link ? <a href={d.link} target="_blank" rel="noreferrer">Open the PR by hand ↗</a> : null;
+    }
+  };
+
+  const card = (b: Batch) => {
+    const v = views.get(b.id)!;
+    const d = b.detail;
+    const last = d?.lastSubmit;
+    const unchecked = d?.dryRunUncheckedClaims ?? [];
+    const canOverride = !!d?.dryRunFingerprint && unchecked.length > 0;
+    const canClear = b.status === 'branch_ready' && b.branch?.startsWith('decomp/') && !d?.pr && !d?.link && (last?.dryRun !== false || last.submissionStarted === false);
+    const findings = last && !last.ok ? [...last.problems, ...last.blockers, ...(last.uncheckedClaims ?? []), ...(last.error && !last.problems.length && !last.blockers.length ? [last.error] : [])] : [];
+    const units = new Set(b.functions.map((f) => f.unit)).size;
+    const idle = !(b.dryRunState || busy === `dry-${b.id}`);
+    return (
+      <article key={b.id} className="bcard" aria-label={`Batch ${b.seq}`}>
+        <div className="top"><h4>Batch {b.seq}</h4><span className="muted small grow">{b.functions.length || d?.functions || '?'} functions{units ? ` · ${units} unit${units === 1 ? '' : 's'}` : ''}</span></div>
+        <div className={`state ${v.tone}`}>{v.title}</div>
+        <p className="why">{v.why}</p>
+        <StepDots steps={v.steps} />
+        <div className="actions">{primary(b)}</div>
+        <details className="more">
+          <summary>Details and more actions</summary>
+          <div className="stack" style={{ gap: 10, marginTop: 8 }}>
+            {findings.length > 0 && (
+              <div>
+                <b className="small">What the last {last?.dryRun ? 'dry run' : 'submission'} found</b>
+                <ul className="findings">{findings.slice(0, 12).map((x) => <li key={x}>{x}</li>)}</ul>
+                {findings.length > 12 && <span className="muted small">and {findings.length - 12} more</span>}
+              </div>
+            )}
+            {d?.problems?.length ? <div className="small"><b>Check problems:</b> {d.problems.join('; ')}</div> : null}
+            <div className="muted small">
+              {b.branch && <div>Branch <span className="mono">{b.branch}</span></div>}
+              {d?.draftedBy && <div>Drafted by {d.draftedBy}</div>}
+              {last && <div>Last {last.dryRun ? 'dry run' : 'submit'}: {new Date(last.at).toLocaleString()} — {last.cancelled ? 'cancelled' : last.ok ? 'clean' : 'problems'}{last.compared != null ? ` · ${last.compared} recompiled, ${last.reused ?? 0} unchanged` : ''}{last.durationMs != null ? ` · took ${fmtDuration(last.durationMs)}` : ''}</div>}
+              {last?.warnings.length ? <details><summary>{last.warnings.length} warning(s)</summary><ul className="findings">{last.warnings.map((x) => <li key={x}>{x}</li>)}</ul></details> : null}
+              {last?.plan.length ? <details><summary>sr submit plan</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>{last.plan.join('\n')}</pre></details> : null}
+            </div>
+            {b.status === 'branch_ready' && idle && (
+              <div className="row">
+                {v.action !== 'dry' && <button className="tiny" disabled={locked} onClick={() => submit(b, false)}>Dry run again</button>}
+                {v.action !== 'drop' && <ConfirmButton className="tiny" disabled={locked} onConfirm={() => dropCollisions(b)} confirmLabel="Check claims now?" title="Checks GitHub for other contributors' claims on this batch and holds back claimed units">Check claims</ConfirmButton>}
+                {v.action !== 'aside' && findings.some((x) => !isClaimBlocker(x)) && <ConfirmButton className="tiny" disabled={locked} onConfirm={() => setAsideBlocking(b)} confirmLabel="Set aside the units the findings name?">Set aside blocking units</ConfirmButton>}
+                {canOverride && <ConfirmButton className="tiny" disabled={locked} onConfirm={() => submit(b, true, true)} confirmLabel={`Submit with ${unchecked.length} task(s) unchecked?`} title={`Not checked: ${unchecked.join('; ')}. The submission probes again and still refuses any known collision.`}>Submit with unchecked claims</ConfirmButton>}
+                {canClear && (last?.dryRun || d?.dryRunFingerprint) && <ConfirmButton className="tiny" disabled={locked} onConfirm={() => clear(b, 'preview')} confirmLabel="Clear the dry run?">Clear dry run</ConfirmButton>}
+                {canClear && <ConfirmButton className="tiny danger" disabled={locked} onConfirm={() => clear(b, 'batch')} confirmLabel="Delete its local branches?">Delete branch</ConfirmButton>}
+              </div>
+            )}
+            {b.functions.length > 0 && (
+              <div>
+                <button className="link" onClick={() => toggle(b.id)}>{open.has(b.id) ? 'Hide functions' : `Show its ${b.functions.length} functions`}</button>
+                {open.has(b.id) && <div style={{ overflowX: 'auto' }}><BatchFunctions b={b} /></div>}
+              </div>
+            )}
+          </div>
+        </details>
+      </article>
+    );
+  };
+
   return (
-    <div className="panel">
-      <div className="row">
-        <h2 className="grow" style={{ margin: 0 }}>PR batches</h2>
-        {status === 'completed' && passed > 0 && <button className="primary" disabled={locked} onClick={stage} title="Group passed packets into batches (whole units, up to the run's functions per PR), re-verify each in a clean tree and commit it to a local branch">{busy === 'stage' ? 'Batching…' : `Batch passed functions (${passed} packet${passed === 1 ? '' : 's'})`}</button>}
-        {status === 'completed' && droppable > 0 && <ConfirmButton disabled={locked} onConfirm={dropAll} confirmLabel={`Check GitHub claims for all ${droppable} staged batch(es), withhold colliding units and restage the rest?`} title="One claims check for every unsubmitted staged batch: units with a function another contributor's open claim or PR names are withheld, the affected batches' local branches are deleted, and their other packets are re-verified together as new batches. Nothing is pushed.">{busy === 'drop-all' ? 'Checking claims…' : `Drop colliding packets in all batches (${droppable})`}</ConfirmButton>}
-        {status === 'completed' && droppable > 0 && <ConfirmButton disabled={locked} onConfirm={setAsideUpstream} confirmLabel={`Check all ${droppable} staged batch(es) against upstream and set aside what it already has or changed?`} title="Reads upstream's data/progress.json and the files each batch writes, at the base (seconds, no compiling): units upstream already matched, no longer tracks, or changed since the batch was built are set aside, and the rest is re-verified. Nothing is pushed.">{busy === 'upstream' ? 'Checking upstream…' : 'Check against upstream'}</ConfirmButton>}
-        {status === 'completed' && withheld > 0 && <button disabled={locked} onClick={recheck} title="Check the withheld packets against open claims again and batch every unit that no other contributor's open claim or PR names any more (claims lapse after a day without activity)">{busy === 'recheck' ? 'Checking claims…' : `Recheck withheld (${withheld} packet${withheld === 1 ? '' : 's'})`}</button>}
-      </div>
-      <p className="muted" style={{ marginTop: 6 }}>
-        Each batch is re-verified in a clean tree and committed to a local branch. <b>Dry run</b> rebuilds the batch from the base, re-verifies it and runs <span className="mono">sr submit --dry-run</span>; nothing is pushed.
-        {' '}<b>Submit PR</b> (after a clean dry run) runs <span className="mono">sr submit</span>: it pushes the batch's branch to your fork and opens one pull request upstream.
-        {' '}<b>Drop colliding packets</b> checks GitHub for other contributors' open claims and PRs on the batch's functions, withholds those units and restages the rest as a new batch.
-        {' '}A dry run checks upstream first (seconds), recompiles only packets whose last compare no longer proves the tree, and checks every other packet's claims in one GitHub read.
-      </p>
-      {batches.length > 0 && <BatchPipeline batches={batches} withheld={withheld} setAside={setAside} />}
-      {attention && (
-        <div className="attention">
-          <b>Needs attention</b>
-          <ul>
-            {failedFns > 0 && (
-              <li>
-                <span className="lvl-error">{failedBatches.length} failed batch(es)</span>, {failedFns} function(s) waiting to be re-verified.{' '}
-                <ConfirmButton className="primary" disabled={locked} onConfirm={restageFailed} confirmLabel={`Re-verify the ${failedFns} functions of ${failedBatches.length} failed batch(es) as new batches?`} title="Re-verifies their passed packets in a clean tree (each unit's sr task is narrowed to the batch's own functions first, so dead sibling packets no longer fail it) and commits new local branches. Nothing is pushed.">{busy === 'restage-failed' ? 'Re-verifying…' : 'Re-verify failed batches'}</ConfirmButton>
-              </li>
-            )}
-            {blockedBatches.map((b) => (
-              <li key={b.id}>
-                Batch {b.seq}: its last dry run found {(b.detail!.lastSubmit!.blockers.length + b.detail!.lastSubmit!.problems.length)} finding(s) (listed in its row).{' '}
-                <ConfirmButton disabled={locked} onConfirm={() => setAsideBlocking(b)} confirmLabel={`Set aside the units batch ${b.seq}'s findings name and re-verify the rest?`} title="Holds the units the findings name out of PRs (a finding on an upstream file is blamed on the unit whose header it includes) and re-verifies the rest as a new batch. Claim collisions are left to Drop colliding packets.">{busy === `aside-${b.id}` ? 'Setting aside…' : 'Set aside blocking units'}</ConfirmButton>
-              </li>
-            ))}
-            {withheld > 0 && (
-              <li>
-                <span className="lvl-warn">{withheld} packet(s) claimed by others</span>, held out of PRs.{' '}
-                {nextLapse ? (nextLapse <= Date.now() ? 'A blocking claim has lapsed: the server rechecks on its own within minutes.' : `The server rechecks on its own when the first claim lapses, in ${fmtDuration(nextLapse - Date.now())} (${new Date(nextLapse).toLocaleString()}).`) : 'The server rechecks on its own when their claims lapse.'}{' '}
-                <button disabled={locked} onClick={recheck}>{busy === 'recheck' ? 'Checking claims…' : 'Recheck now'}</button>
-              </li>
-            )}
-            {setAside > 0 && <li><span className="lvl-warn">{setAside} packet(s) set aside</span>: see the list below for why, and Put back when the cause is gone.</li>}
-          </ul>
-          <SetAsideList batches={batches} locked={locked} busy={busy} putBack={putBack} />
+    <div className="stack">
+      {hero}
+      {msg && <div className="notice" role="status">{msg}</div>}
+      {err && <div className="notice error" role="alert">{err}</div>}
+      {current.length > 0 && (
+        <div className="tiles">
+          <div className="tile ok"><b>{ready.length}</b><span>ready to submit</span></div>
+          <div className={`tile ${needsWork.length ? 'next' : ''}`}><b>{needsWork.length}</b><span>need a dry run or a fix</span></div>
+          <div className={`tile ${withheld + setAside ? 'warn' : ''}`}><b>{withheld + setAside}</b><span>packets held back</span></div>
+          <div className="tile ok"><b>{submitted.length}</b><span>pull requests open</span></div>
         </div>
       )}
-      {msg && <div className="muted" role="status">{msg}</div>}
-      {err && <div className="lvl-error">{err}</div>}
-      {op ? <OperationPanel op={op} runId={runId} /> : busy ? <div className="op-panel"><div className="op-head"><span className="spinner" aria-hidden="true" /><div className="op-step">Starting…</div></div></div> : null}
-      {batches.length > 0 && (
-        <table>
-          <thead><tr><th>#</th><th>Progress</th><th>Branch</th><th>Functions</th><th>Drafted by</th><th>Findings / PR</th><th /></tr></thead>
-          <tbody>
-            {batches.map((b) => {
-              const d = b.detail;
-              const last = d?.lastSubmit;
-              // The server holds the prerequisite: a dry run of exactly this batch state.
-              const unchecked = d?.dryRunUncheckedClaims ?? [];
-              const cleanDry = !!d?.dryRunFingerprint && !unchecked.length;
-              const canOverride = !!d?.dryRunFingerprint && unchecked.length > 0;
-              const dryRunning = !!b.dryRunState || busy === `dry-${b.id}`;
-              const canClear = b.branch?.startsWith('decomp/') && !d?.pr && !d?.link
-                && (last?.dryRun !== false || last.submissionStarted === false);
-              const findings = last ? [...last.problems.map((x) => `re-verify: ${x}`), ...last.blockers.map((x) => `blocked: ${x}`), ...(last.uncheckedClaims ?? []), ...(last.error && !last.ok ? [last.error] : [])] : [];
-              const claimedHere = d?.claimCheck ? Object.keys(d.claimCheck.collisions).length : 0;
-              return [
-                <tr key={b.id} className={b.status === 'superseded' ? 'superseded' : ''}>
-                  <td>{b.seq}</td>
-                  <td style={{ minWidth: 280 }}><BatchProgress b={b} /></td>
-                  <td className="mono" style={{ fontSize: 11 }}>{b.branch ?? '—'}</td>
-                  <td>
-                    {b.functions.length || d?.functions || '?'}
-                    {b.functions.length > 0 && <div><button style={{ fontSize: 11, padding: '1px 6px', marginTop: 3 }} onClick={() => toggle(b.id)}>{open.has(b.id) ? 'Hide' : 'Show'}{claimedHere ? ` (${claimedHere} claimed)` : ''}</button></div>}
-                  </td>
-                  <td style={{ fontSize: 12 }}>{d?.draftedBy ?? <span className="muted">—</span>}</td>
-                  <td style={{ fontSize: 12, maxWidth: 420 }}>
-                    {d?.pr ? <a href={d.pr} target="_blank" rel="noreferrer">{d.pr}</a> : d?.link ? <a href={d.link} target="_blank" rel="noreferrer">open the PR by hand</a> : null}
-                    {d?.problems?.length ? <div className="muted">{d.problems.join('; ')}</div> : null}
-                    {d?.withheld && <div className="muted">claimed in {issueRefs(d.claimCheck?.collisions ?? {})}: open <b>Show</b> for the functions</div>}
-                    {d?.setAside && <div className="muted">set aside: {Object.keys(d.setAside.reasons).map((u) => u.slice(u.lastIndexOf('/') + 1)).join(', ')} ({d.setAside.why})</div>}
-                    {last && !d?.pr && (
-                      <div className={last.ok ? 'muted' : 'lvl-warn'}>
-                        {last.dryRun ? 'dry run' : 'submit'} {new Date(last.at).toLocaleString()}: {last.cancelled ? 'cancelled' : last.ok ? 'clean' : 'problems'}
-                        {(last.compared != null || last.durationMs != null) && <span className="muted"> · {last.compared != null ? `${last.compared} recompiled, ${last.reused ?? 0} unchanged` : ''}{last.durationMs != null ? `${last.compared != null ? ', ' : ''}took ${fmtDuration(last.durationMs)}` : ''}</span>}
-                        {findings.length > 0 && <ul style={{ margin: '2px 0 0 16px', padding: 0 }}>{findings.slice(0, 8).map((x) => <li key={x}>{x}</li>)}</ul>}
-                        {last.warnings.length > 0 && <details><summary>{last.warnings.length} warning(s)</summary><ul style={{ margin: 0, paddingLeft: 16 }}>{last.warnings.map((x) => <li key={x}>{x}</li>)}</ul></details>}
-                        {last.plan.length > 0 && <details><summary>plan</summary><pre className="mono" style={{ whiteSpace: 'pre-wrap', fontSize: 11 }}>{last.plan.join('\n')}</pre></details>}
-                      </div>
-                    )}
-                  </td>
-                  <td style={{ whiteSpace: 'nowrap' }}>
-                    {(b.status === 'interrupted' || b.status === 'failed') && (
-                      <ConfirmButton className="primary" disabled={locked} onConfirm={() => restage(b)} confirmLabel={`Re-verify the ${b.functions.length} functions of batch ${b.seq} as a new batch?`} title="Re-verifies exactly this batch's packets in a clean tree and commits a new local branch. Nothing is pushed.">{busy === `restage-${b.id}` ? 'Re-verifying…' : 'Re-verify again'}</ConfirmButton>
-                    )}
-                    {b.status === 'branch_ready' && (
-                      <>
-                        {dryRunning ? (
-                          <button disabled={b.dryRunState !== 'running' || cancelling === b.id} onClick={() => cancel(b)}>
-                            {b.dryRunState === 'cancelling' || cancelling === b.id ? 'Cancelling…' : 'Cancel dry run'}
-                          </button>
-                        ) : (
-                          <>
-                            <button disabled={locked} onClick={() => submit(b, false)}>Dry run</button>{' '}
-                            {blockedBatches.includes(b) && <><ConfirmButton disabled={locked} onConfirm={() => setAsideBlocking(b)} confirmLabel={`Set aside the units batch ${b.seq}'s findings name and re-verify the rest?`} title="Holds the units the last dry run's findings name out of PRs and re-verifies the rest as a new batch">{busy === `aside-${b.id}` ? 'Setting aside…' : 'Set aside blocking units'}</ConfirmButton>{' '}</>}
-                            <ConfirmButton disabled={locked} onConfirm={() => dropCollisions(b)} confirmLabel="Check GitHub claims, withhold colliding units and restage the rest?" title="Withholds every unit with a function that another contributor's open claim or PR names (the rule sr submit blocks on), deletes this batch's local branches and re-verifies the rest as a new batch. Nothing is pushed.">{busy === `drop-${b.id}` ? 'Checking claims…' : 'Drop colliding packets'}</ConfirmButton>{' '}
-                            <ConfirmButton className="primary" disabled={locked || !cleanDry} onConfirm={() => submit(b, true)} confirmLabel="Push to your fork and open the PR?" title={cleanDry ? 'Runs sr submit: pushes the branch to your fork and opens one pull request upstream' : 'Run a clean dry run first'}>{busy === `submit-${b.id}` ? 'Submitting…' : 'Submit PR'}</ConfirmButton>
-                            {canOverride && (
-                              <div style={{ marginTop: 4 }}>
-                                <ConfirmButton disabled={locked} onConfirm={() => submit(b, true, true)} confirmLabel={`Claims of ${unchecked.length} task(s) could not be checked against GitHub. Submit anyway?`} title={`Not checked: ${unchecked.join('; ')}. The submission probes again and still refuses any known collision.`}>Submit with unchecked claims</ConfirmButton>
-                              </div>
-                            )}
-                            {canClear && (
-                              <div className="row" style={{ marginTop: 4 }}>
-                                {(last?.dryRun || cleanDry) && <ConfirmButton disabled={locked} onConfirm={() => clear(b, 'preview')} confirmLabel="Clear check and delete preview branch?">Clear dry run</ConfirmButton>}
-                                <ConfirmButton disabled={locked} onConfirm={() => clear(b, 'batch')} confirmLabel="Delete local batch and preview branches?">Delete staged branch</ConfirmButton>
-                              </div>
-                            )}
-                          </>
-                        )}
-                      </>
-                    )}
-                  </td>
-                </tr>,
-                open.has(b.id) ? (
-                  <tr key={`${b.id}-fns`}>
-                    <td />
-                    <td colSpan={6}><BatchFunctions b={b} /></td>
-                  </tr>
-                ) : null,
-              ];
-            })}
-          </tbody>
-        </table>
+      {sorted.length > 0 && <div className="cards">{sorted.map(card)}</div>}
+      {(withheld > 0 || setAside > 0) && (
+        <div className="panel stack">
+          <div><h2 style={{ marginBottom: 4 }}>Held back</h2><span className="muted">These matched but are kept out of pull requests for now. Nothing is lost.</span></div>
+          <div className="held">
+            {withheld > 0 && (
+              <div className="group">
+                <div className="row"><b className="grow">{withheld} packet{withheld === 1 ? '' : 's'} claimed by someone else</b><button className="tiny" disabled={locked} onClick={recheck}>{busy === 'recheck' ? 'Checking…' : 'Recheck now'}</button></div>
+                <span className="muted small">
+                  Another contributor's open claim or PR names a function in their unit. The server checks again on its own{nextLapse ? (nextLapse <= Date.now() ? ': a claim has lapsed, so within minutes.' : ` when the first claim lapses, in ${fmtDuration(nextLapse - Date.now())}.`) : ' when their claims lapse.'}
+                </span>
+                <WithheldList batches={batches} />
+              </div>
+            )}
+            {setAside > 0 && (
+              <div className="group">
+                <b>{setAside} packet{setAside === 1 ? '' : 's'} set aside</b>
+                <div className="muted small">They blocked a dry run, or upstream already has them. Put a unit back once its cause is gone.</div>
+                <SetAsideList batches={batches} locked={locked} busy={busy} putBack={putBack} />
+              </div>
+            )}
+          </div>
+        </div>
       )}
-      <WithheldList batches={batches} />
+      {completed && (current.some((b) => b.status === 'branch_ready') || loose > 0 || failedCount > 0) && (
+        <details className="panel flat">
+          <summary><b>Run one step yourself</b> <span className="muted small">what Prepare all for PR does, one piece at a time</span></summary>
+          <div className="row" style={{ marginTop: 12 }}>
+            {loose > 0 && <button disabled={locked} onClick={stage} title="Group matched packets that have no batch into batches and check each in a clean tree">Batch matched packets</button>}
+            {failedCount > 0 && <ConfirmButton className="" disabled={locked} onConfirm={restageFailed} confirmLabel="Check every failed batch again?">Check failed batches again</ConfirmButton>}
+            <ConfirmButton className="" disabled={locked} onConfirm={setAsideUpstream} confirmLabel="Check every batch against upstream?" title="Reads upstream's data/progress.json and the files each batch writes (seconds, no compiling) and sets aside what it already has or changed">Check against upstream</ConfirmButton>
+            <ConfirmButton className="" disabled={locked} onConfirm={dropAll} confirmLabel="Check claims for every batch?" title="One GitHub claims check for every unsubmitted batch; claimed units are held back and the rest restaged. Nothing is pushed.">Check claims in all batches</ConfirmButton>
+          </div>
+        </details>
+      )}
+      {history.length > 0 && (
+        <details className="panel flat history">
+          <summary>History: {history.length} replaced batch{history.length === 1 ? '' : 'es'}</summary>
+          <div style={{ overflowX: 'auto', marginTop: 10 }}>
+            <table>
+              <thead><tr><th>#</th><th>Functions</th><th>What happened</th></tr></thead>
+              <tbody>
+                {history.map((b) => (
+                  <tr key={b.id}>
+                    <td>{b.seq}</td>
+                    <td>{b.functions.length || b.detail?.functions || '?'}</td>
+                    <td className="small">{batchView(b).why}{b.detail?.withheld ? ` Claimed in ${issueRefs(b.detail.claimCheck?.collisions ?? {})}.` : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
     </div>
   );
 }

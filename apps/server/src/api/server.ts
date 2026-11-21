@@ -297,6 +297,18 @@ export async function buildServer(app: App) {
     }
   });
   // Re-verify every failed or interrupted batch's passed packets, as new batches.
+  // Prepare all for PR: one operation that can take many minutes, so it answers once it has started
+  // (or refused) and reports through the operation panel and the run's events.
+  f.post('/api/runs/:id/prepare', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    const job = engine.prepareAll(req.params.id);
+    const early = await Promise.race([job.then(() => null, (e: Error) => e), new Promise<'running'>((r) => setTimeout(() => r('running'), 1500))]);
+    if (early instanceof Error) return reply.code(409).send({ ok: false, error: early.message });
+    if (early === 'running') {
+      job.catch((e: Error) => events.emit('run.prepare_failed', `Prepare all for PR stopped: ${e.message}`, { runId: req.params.id, level: 'error' }));
+    }
+    return { ok: true, started: true };
+  });
   f.post('/api/runs/:id/batches/restage-failed', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');
     try {

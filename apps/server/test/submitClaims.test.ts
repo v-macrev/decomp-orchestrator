@@ -157,4 +157,53 @@ describe('fast re-verification', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+  it('spreads compares over the idle worker slots only while the engine holds them all', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'decomp-lanes-'));
+    try {
+      const ids = ['u1', 'u2', 'u3', 'u4', 'u5'];
+      for (const [i, id] of ids.entries()) {
+        const dir = join(root, 'contrib', 'tasks', id);
+        mkdirSync(dir, { recursive: true });
+        writeFileSync(join(dir, 'task.json'), JSON.stringify({ contrib: { unit: [`${id}.cpp`] }, functions: [{ rva: `0x${i + 1}` }] }));
+        writeFileSync(join(dir, 'last-compare.json'), '{}');
+      }
+      const repo = new SrRepo({ repoPath: root, baseRef: 'main', worktreeRoot: root, localDir: root, python: 'python', slots: 3, sandbox: { mode: 'local' } });
+      vi.spyOn(repo.host, 'exists').mockReturnValue(true);
+      const reset = vi.spyOn(repo, 'reset').mockResolvedValue();
+      const writes = vi.spyOn(repo, 'writeFiles').mockResolvedValue();
+      let live = 0;
+      let peak = 0;
+      const slots = new Set<number>();
+      vi.spyOn(repo, 'compare').mockImplementation(async (slot) => {
+        slots.add(slot);
+        peak = Math.max(peak, ++live);
+        await new Promise((r) => setTimeout(r, 20));
+        live--;
+        return { completed: true, allPass: true, compileError: false, functions: [], infraError: null, durationMs: 1 };
+      });
+      vi.spyOn(repo.host, 'run').mockImplementation(async () => run('{}'));
+      const tasks = ids.map((id, i) => ({ id: `p${i}`, srTaskId: id, functions: [{ rva: `0x${i + 1}`, name: null }] as TaskRow['functions'], task: { functions: [] } as unknown as TaskRow }));
+      const files = [{ path: 'a.cpp', content: 'x' }];
+      // Off (a run may be using the worker slots): only the staging slot compares.
+      await repo.stageBatch({ runId: 'r', seq: 1, files, tasks, message: 'm' });
+      expect([...slots]).toEqual([3]);
+      expect(peak).toBe(1);
+      slots.clear();
+      peak = 0;
+      writes.mockClear();
+      reset.mockClear();
+      repo.useIdleSlots(true);
+      const r = await repo.stageBatch({ runId: 'r', seq: 2, files, tasks, message: 'm' });
+      expect(r).toMatchObject({ verified: true, compared: 5 });
+      expect(peak).toBeGreaterThan(1);
+      expect([...slots].sort()).toEqual([0, 1, 2, 3]);
+      // Each spare slot got the batch tree, and was put back afterwards.
+      for (const s of [0, 1, 2]) {
+        expect(writes.mock.calls.some((c) => c[0] === s)).toBe(true);
+        expect(reset.mock.calls.filter((c) => c[0] === s).length).toBeGreaterThanOrEqual(2);
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

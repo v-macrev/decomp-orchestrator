@@ -614,7 +614,7 @@ export class SrRepo implements RepoAdapter {
     }
     await this.writeFiles(slot, input.files);
     const ac = new AbortController();
-    const v = await this.verifyTree(slot, input.tasks, { signal: ac.signal, stagedAt: null, progress: (detail, done, total) => input.progress?.('re-verify', detail, done, total) });
+    const v = await this.verifyTree(slot, input.tasks, { signal: ac.signal, stagedAt: null, files: input.files, progress: (detail, done, total) => input.progress?.('re-verify', detail, done, total) });
     const { problems, failedTaskIds, compared, reused } = v;
     // A batch that does not re-verify is never committed: a branch is a claim that its code
     // matches. Put the staging worktree back so nothing unverified lingers there either.
@@ -640,7 +640,7 @@ export class SrRepo implements RepoAdapter {
    * `sr submit` itself accepts (all pass, pinned compiler, the unit's source closure and recipe
    * digests unchanged), compared at this base.
    */
-  private async verifyTree(slot: number, tasks: SubmitBatchInput['tasks'], opts: { signal: AbortSignal; stagedAt: number | null; progress?: (detail: string, done: number, total: number) => void }) {
+  private async verifyTree(slot: number, tasks: SubmitBatchInput['tasks'], opts: { signal: AbortSignal; stagedAt: number | null; files?: Array<{ path: string; content: string }>; progress?: (detail: string, done: number, total: number) => void }) {
     const problems: string[] = [];
     const failedTaskIds: string[] = [];
     const groups = new Map<string, SubmitBatchInput['tasks']>();
@@ -660,22 +660,60 @@ export class SrRepo implements RepoAdapter {
     for (const id of fresh) this.markVerified(id);
     let done = fresh.size;
     let compared = 0;
-    for (const [id, ts] of groups) {
-      opts.signal.throwIfAborted();
-      if (fresh.has(id)) continue;
-      const fns = ts.flatMap((t) => t.functions);
-      opts.progress?.(`sr compare ${id}: ${fns.map((f) => f.name ?? f.rva).join(', ')}${fresh.size ? ` (${fresh.size} unchanged, not recompiled)` : ''}`, done, groups.size);
-      const r = await this.compare(slot, { ...ts[0]!.task, functions: fns }, { srTaskId: id, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: opts.signal, timeoutMs: 600_000 });
-      compared++;
-      done++;
-      if (r.allPass) {
-        this.markVerified(id);
-        continue;
+    const queue = [...groups].filter(([id]) => !fresh.has(id));
+    // With every slot idle (see useIdleSlots), spare worker slots get the same tree and take sr
+    // tasks from one queue, so the compares run side by side; each compare reads only its own unit.
+    const spare = this.idleSlots && opts.files?.length ? Array.from({ length: Math.min(this.slotCount, queue.length - 1) }, (_, i) => i) : [];
+    const lanes = [slot, ...spare];
+    const prepared = new Set<number>([slot]);
+    const running = new Map<number, string>();
+    const say = () => {
+      const now = [...running.values()];
+      opts.progress?.(`${lanes.length > 1 ? `${now.length} compare(s) side by side: ` : 'sr compare '}${now.join(' · ')}${fresh.size ? ` (${fresh.size} unchanged, not recompiled)` : ''}`, done, groups.size);
+    };
+    const lane = async (s: number) => {
+      for (let job = queue.shift(); job; job = queue.shift()) {
+        opts.signal.throwIfAborted();
+        const [id, ts] = job;
+        if (!prepared.has(s)) {
+          try {
+            await this.ensureWorktree(s);
+            await this.writeFiles(s, opts.files!);
+            prepared.add(s);
+          } catch {
+            queue.unshift(job); // this slot cannot help: leave the work to the others
+            return;
+          }
+        }
+        const fns = ts.flatMap((t) => t.functions);
+        running.set(s, `${id} (${fns.map((f) => f.name ?? f.rva).join(', ')})`);
+        say();
+        const r = await this.compare(s, { ...ts[0]!.task, functions: fns }, { srTaskId: id, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: opts.signal, timeoutMs: 600_000 });
+        running.delete(s);
+        compared++;
+        done++;
+        say();
+        if (r.allPass) {
+          this.markVerified(id);
+          continue;
+        }
+        problems.push(`${ts.map((t) => t.id).join(',')}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
+        failedTaskIds.push(...ts.map((t) => t.id));
       }
-      problems.push(`${ts.map((t) => t.id).join(',')}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
-      failedTaskIds.push(...ts.map((t) => t.id));
+    };
+    try {
+      await Promise.all(lanes.map((s) => lane(s)));
+      // A lane that gave up hands its work back; the staging slot finishes whatever is left.
+      if (queue.length) await lane(slot);
+    } finally {
+      for (const s of prepared) if (s !== slot) await this.reset(s).catch(() => undefined);
     }
     return { problems, failedTaskIds, compared, reused: fresh.size };
+  }
+
+  private idleSlots = false;
+  useIdleSlots(on: boolean) {
+    this.idleSlots = on;
   }
 
   /**
@@ -776,7 +814,7 @@ export class SrRepo implements RepoAdapter {
       await this.writeFiles(slot, input.files);
       const stagedAt = await this.stagedAtThisBase(input.stagedBranch);
       const v = await this.verifyTree(slot, input.tasks, {
-        signal, stagedAt,
+        signal, stagedAt, files: input.files,
         progress: (detail, done, total) => input.progress?.('Rebuilding the batch from the base; re-comparing only packets whose last compare no longer proves it', detail, done, total),
       });
       out.compared = v.compared;

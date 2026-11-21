@@ -108,8 +108,10 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    check. Each batch row shows its progress (staged → claims → dry run → PR) and the next step, and
    **Show** lists its functions with the claims that name them and when they lapse. **Recheck withheld**
    (`POST /api/runs/:id/withheld/recheck`) batches them again once those claims lapse or close; the
-   server also does this on its own when the first claim lapses. **Needs attention** gathers what
-   still blocks the run, each with one button: re-verify failed batches, set aside the units a dry
+   server also does this on its own when the first claim lapses. **Prepare all for PR**
+   (`POST /api/runs/:id/prepare`) does every step below in order and dry-runs each batch, using
+   every idle worktree slot for compares; you then submit each clean batch yourself. One step at
+   a time: re-verify failed batches, set aside the units a dry
    run blamed (or that upstream already matched or changed: **Check against upstream**), and put
    them back later. A dry run checks upstream first and recompiles only packets whose last compare
    no longer proves the tree.

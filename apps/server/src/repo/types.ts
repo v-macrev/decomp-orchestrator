@@ -146,6 +146,11 @@ export interface RepoAdapter {
   claimCollisions?(rvas: string[], opts?: { signal?: AbortSignal }): Promise<ClaimCollisionCheck>;
   /** Read only: what the base already has of these functions and files (`branch` = the batch's staged branch, for its base). */
   upstreamState?(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState>;
+  /**
+   * While on, staging and dry runs may also use the worker slots to re-compare packets side by side.
+   * The engine turns it on only while it holds every slot (no run active) and off afterwards.
+   */
+  useIdleSlots?(on: boolean): void;
 }
 
 export interface ClaimCollision {
