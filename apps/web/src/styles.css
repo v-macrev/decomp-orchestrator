@@ -159,3 +159,10 @@ table.fns tr.unit-row > td { border-top: 1px solid var(--border); font-family: v
 .op-panel .op-detail { font-family: var(--mono); font-size: 12px; color: var(--muted); margin-top: 4px; word-break: break-word; }
 .op-panel .bar { margin-top: 6px; height: 8px; }
 .op-panel ol { margin: 6px 0 0; padding-left: 18px; font-size: 12px; color: var(--muted); }
+
+/* "Needs attention": the run's blocked work, each with its one-click way out. */
+.attention { border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent); border-radius: 10px; padding: 10px 12px; margin: 8px 0; background: color-mix(in srgb, var(--warn) 6%, var(--panel)); }
+.attention ul { margin: 6px 0 0; padding-left: 18px; }
+.attention li { margin: 4px 0; line-height: 1.7; }
+.attention-list { margin-top: 8px; }
+.chip.set_aside, .chip.withheld { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 50%, transparent); }

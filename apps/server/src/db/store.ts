@@ -449,7 +449,7 @@ export class Store {
   /** RVAs this tool is still working on (open in any run) or matched but not yet submitted. */
   rvasInFlight(excludeRunId: string | null): Set<string> {
     const rows = this.db.prepare(`SELECT DISTINCT json_extract(f.value, '$.rva') rva FROM tasks t, json_each(t.functions_json) f
-      WHERE t.state IN ('pending','leased','gating','passed','staged','withheld') AND t.run_id != COALESCE(?, '')`).all(excludeRunId) as Array<{ rva: string }>;
+      WHERE t.state IN ('pending','leased','gating','passed','staged','withheld','set_aside') AND t.run_id != COALESCE(?, '')`).all(excludeRunId) as Array<{ rva: string }>;
     return new Set(rows.map((r) => r.rva));
   }
   putGathered(runId: string, fns: Array<{ rva: string; name: string | null; nameOrigin?: string | null; size: number; unit: string; header: string | null; signature: string | null; draft: string; readiness?: number; xrefsIn: number | null; xrefsOut: number | null; basicBlocks: number | null; instructions: number | null; branches: number | null; sources: string[] }>) {
@@ -490,7 +490,7 @@ export class Store {
   }
   workerStats(runId: string) {
     return this.db.prepare(`SELECT w.worker_id, w.node_id, w.tier, w.capability, w.max_functions, w.assigned_function_count, w.assigned_tasks,
-        (SELECT COALESCE(SUM(json_array_length(t.functions_json)), 0) FROM tasks t WHERE t.run_id = w.run_id AND t.assigned_worker = w.worker_id AND t.state IN ('passed','staged','withheld')) passed_functions,
+        (SELECT COALESCE(SUM(json_array_length(t.functions_json)), 0) FROM tasks t WHERE t.run_id = w.run_id AND t.assigned_worker = w.worker_id AND t.state IN ('passed','staged','withheld','set_aside')) passed_functions,
         (SELECT COUNT(*) FROM attempts a WHERE a.run_id = w.run_id AND a.worker_id = w.worker_id) attempts
       FROM run_workers w WHERE w.run_id = ? ORDER BY w.tier, w.worker_id`).all(runId) as Array<{
         worker_id: string; node_id: string; tier: number; capability: string | null; max_functions: number; assigned_function_count: number; assigned_tasks: number; passed_functions: number; attempts: number;

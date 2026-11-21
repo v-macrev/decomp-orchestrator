@@ -144,6 +144,8 @@ export interface RepoAdapter {
    * rule `sr submit` blocks on (fresh claims only: lapsed ones and the operator's own do not count).
    */
   claimCollisions?(rvas: string[], opts?: { signal?: AbortSignal }): Promise<ClaimCollisionCheck>;
+  /** Read only: what the base already has of these functions and files (`branch` = the batch's staged branch, for its base). */
+  upstreamState?(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState>;
 }
 
 export interface ClaimCollision {
@@ -177,6 +179,8 @@ export interface SubmitBatchInput {
   /** After a real submit of a multi-packet batch: the PR's title and a section for the other functions. */
   title: string | null;
   extraBody: string | null;
+  /** The batch's verified branch: packets compared when it was staged at this base need no new compare. */
+  stagedBranch?: string | null;
   dryRun: boolean;
   allowUncheckedClaims?: boolean;
   signal?: AbortSignal;
@@ -187,6 +191,9 @@ export interface SubmitBatchResult {
   ok: boolean;
   dryRun: boolean;
   cancelled?: boolean;
+  /** Distinct sr tasks re-compared, and those whose last compare still proved this exact tree. */
+  compared?: number;
+  reused?: number;
   /** Whether the mutating sr submit command was started. */
   submissionStarted?: boolean;
   /** Re-verification or git problems found before `sr submit` ran. */
@@ -202,6 +209,18 @@ export interface SubmitBatchResult {
   error: string | null;
 }
 
+/** What upstream (the pinned base) already has of a batch: matched functions, untracked ones, files it changed since the batch was built. */
+export interface UpstreamState {
+  checked: boolean;
+  /** rva → the owner upstream records for it. */
+  matched: Record<string, string | null>;
+  /** Functions data/progress.json does not list. */
+  untracked: string[];
+  /** Files the batch writes that upstream changed between the batch's base and this one. */
+  changed: string[];
+  builtOn: string | null;
+}
+
 export interface StageBatchInput {
   runId: string;
   seq: number;
@@ -215,4 +234,8 @@ export interface StageBatchResult {
   branch: string | null;
   verified: boolean;
   problems: string[];
+  /** Packets whose re-verification failed (their sr task's compare did not pass). */
+  failedTaskIds?: string[];
+  compared?: number;
+  reused?: number;
 }

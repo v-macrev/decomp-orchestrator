@@ -656,7 +656,7 @@ describe('live progress and interrupted staging', () => {
     s.store.createBatch({ id: draftId, runId: run.id, seq: s.store.maxBatchSeq(run.id) + 1, taskIds: batch.taskIds });
     expect(s.engine.markInterruptedBatches()).toBe(1);
     expect(s.store.getBatch(draftId)!.status).toBe('interrupted');
-    await expect(s.engine.restageInterrupted(run.id, batch.id)).rejects.toThrow(/only an interrupted batch/);
+    await expect(s.engine.restageInterrupted(run.id, batch.id)).rejects.toThrow(/only an interrupted or failed batch/);
 
     const r = await s.engine.restageInterrupted(run.id, draftId);
     expect(r.staged).toBe(1);
@@ -664,5 +664,107 @@ describe('live progress and interrupted staging', () => {
     expect(fresh.status).toBe('branch_ready');
     expect(fresh.taskIds.sort()).toEqual([...batch.taskIds].sort());
     expect(s.store.getBatch(draftId)).toMatchObject({ status: 'superseded', detail: expect.objectContaining({ supersededBy: r.seqs }) });
+  }, 60_000);
+});
+
+describe('handling what blocks a batch', () => {
+  const batchOf = (s: ReturnType<typeof setup>, runId: string) => s.store.listBatches(runId).find((b) => b.status === 'branch_ready')!;
+
+  it('sets aside units upstream already matched or changed, restages the rest, and puts them back on request', async () => {
+    const s = setup();
+    const run = createRun(s, 'upstream', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = batchOf(s, run.id);
+    const tasks = batch.taskIds.map((id) => s.store.getTask(id)!);
+    const [a, b] = [...new Set(tasks.map((t) => t.unit))];
+    const matchedTask = tasks.find((t) => t.unit === a)!;
+    s.repo.upstreamMatched.set(matchedTask.functions[0]!.rva, 'someone');
+    s.repo.upstreamChanged.add(b!);
+
+    const r = await s.engine.setAsideUpstreamAll(run.id);
+    expect(r.setAsideTasks).toBe(tasks.filter((t) => t.unit === a || t.unit === b).length);
+    const old = s.store.getBatch(batch.id)!;
+    expect(old.status).toBe('superseded');
+    const d = old.detail as unknown as { setAside: { reasons: Record<string, string[]> }; supersededBy: number[] };
+    expect(d.setAside.reasons[a!]![0]).toMatch(/already matched upstream: 0x[0-9a-f]+ \(someone\)/);
+    expect(d.setAside.reasons[b!]![0]).toMatch(/upstream changed this file since the batch was built/);
+    for (const t of tasks) expect(s.store.getTask(t.id)!.state).toBe(t.unit === a || t.unit === b ? 'set_aside' : 'staged');
+    expect(d.supersededBy).toEqual(r.staged!.seqs);
+    // Set-aside packets are not 'passed': plain staging leaves them alone.
+    await expect(s.engine.restage(run.id)).rejects.toThrow(/no passed packets/);
+
+    const back = await s.engine.putBackSetAside(run.id, [a!]);
+    expect(back.returnedTasks).toBe(tasks.filter((t) => t.unit === a).length);
+    for (const t of tasks.filter((x) => x.unit === a)) expect(s.store.getTask(t.id)!.state).toBe('staged');
+    for (const t of tasks.filter((x) => x.unit === b)) expect(s.store.getTask(t.id)!.state).toBe('set_aside');
+  }, 60_000);
+
+  it('a dry run stops at upstream findings before any compile, and "set aside blocking units" acts on them', async () => {
+    const s = setup();
+    const run = createRun(s, 'upstream-dry', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = batchOf(s, run.id);
+    const tasks = batch.taskIds.map((id) => s.store.getTask(id)!);
+    let calls = 0;
+    (s.repo as RepoAdapter).submitBatch = async () => {
+      calls++;
+      throw new Error('must not be called');
+    };
+    const victim = tasks[0]!;
+    s.repo.upstreamMatched.set(victim.functions[0]!.rva, null);
+    const r = await s.engine.submitBatch(run.id, batch.id, { dryRun: true });
+    expect(r).toMatchObject({ ok: false, blockers: [expect.stringMatching(new RegExp(`^${victim.unit}:1: already matched upstream`))] });
+    expect(calls).toBe(0);
+    expect(await s.engine.blockingUnits(run.id, batch.id)).toMatchObject({ units: { [victim.unit]: [expect.any(String)] }, unattributed: [] });
+    const out = await s.engine.setAsideBlocking(run.id, batch.id);
+    expect(out.setAsideTasks).toBe(tasks.filter((t) => t.unit === victim.unit).length);
+    expect(s.store.getTask(victim.id)!.state).toBe('set_aside');
+  }, 60_000);
+
+  it('blames an upstream file the lint reaches through a header the batch changes', async () => {
+    const s = setup();
+    const run = createRun(s, 'lint-blame', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = batchOf(s, run.id);
+    const tasks = batch.taskIds.map((id) => s.store.getTask(id)!);
+    const victim = tasks[0]!;
+    const header = 'src/lib/Owned.h';
+    const dir = victim.unit.includes('/') ? victim.unit.slice(0, victim.unit.lastIndexOf('/')) : '';
+    // The victim's unit file is what the batch writes; an upstream file includes it by a relative name.
+    const unitName = victim.unit.slice(victim.unit.lastIndexOf('/') + 1);
+    s.repo.baseFile = async (p: string) => (p === `${dir}/Upstream.cpp` ? `// upstream\n#include "${unitName}"\n` : p === header ? '' : null);
+    s.store.updateBatch(batch.id, { detail: { ...(batch.detail as unknown as Record<string, unknown>), lastSubmit: { dryRun: true, ok: false, blockers: [
+      `${dir}/Upstream.cpp:1: missing reconstruction origin statement in leading header; fix: add one`,
+      'nowhere/Else.cpp:1: missing reconstruction origin statement',
+      'contrib-x: another open claim or pull request names 0x1: https://github.com/o/r/issues/1',
+    ], problems: [] } } });
+    const blame = await s.engine.blockingUnits(run.id, batch.id);
+    expect(Object.keys(blame.units)).toEqual([victim.unit]);
+    expect(blame.unattributed).toEqual(['nowhere/Else.cpp:1: missing reconstruction origin statement']);
+    expect(blame.claims).toHaveLength(1);
+  }, 60_000);
+
+  it('re-verifies every failed batch as new batches and knows when a withheld claim lapses', async () => {
+    const s = setup();
+    const run = createRun(s, 'refail', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = batchOf(s, run.id);
+    // As if re-verification had failed: no branch, packets still passed.
+    s.store.unstageBatch(batch, { problems: ['x'] });
+    s.store.updateBatch(batch.id, { status: 'failed' });
+    const r = await s.engine.restageFailedAll(run.id);
+    expect(r.staged).toBeGreaterThan(0);
+    expect(s.store.getBatch(batch.id)).toMatchObject({ status: 'superseded', detail: expect.objectContaining({ supersededBy: r.seqs }) });
+    await expect(s.engine.restageFailedAll(run.id)).rejects.toThrow(/no failed batch/);
+
+    const next = s.store.listBatches(run.id).find((b) => b.seq === r.seqs[0])!;
+    const t = s.store.getTask(next.taskIds[0]!)!;
+    s.repo.claimedByOthers.set(t.functions[0]!.rva, [{ url: 'https://github.com/o/r/issues/9', author: 'x', updatedAt: '2026-11-20T10:00:00Z' }]);
+    await s.engine.dropCollidingPackets(run.id, next.id);
+    expect(s.engine.nextWithheldLapse(run.id)).toBe(Date.parse('2026-11-20T10:00:00Z') + 24 * 3_600_000);
   }, 60_000);
 });

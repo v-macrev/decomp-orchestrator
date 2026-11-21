@@ -296,6 +296,57 @@ export async function buildServer(app: App) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
+  // Re-verify every failed or interrupted batch's passed packets, as new batches.
+  f.post('/api/runs/:id/batches/restage-failed', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.restageFailedAll(req.params.id)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  // Which units the batch's last dry run blamed (read only).
+  f.get('/api/runs/:id/batches/:batchId/blocking', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.blockingUnits(req.params.id, req.params.batchId)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  // Set those units aside (held out of PRs) and re-verify the rest of the batch.
+  f.post('/api/runs/:id/batches/:batchId/set-aside', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.setAsideBlocking(req.params.id, req.params.batchId)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  // Check every unsubmitted batch against upstream; set aside units it already matched, no longer tracks, or changed.
+  f.post('/api/runs/:id/batches/set-aside-upstream', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.setAsideUpstreamAll(req.params.id)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  // Put set-aside units back (all, or the units named) and re-verify them.
+  f.post('/api/runs/:id/set-aside/put-back', async (req: FastifyRequest<{ Params: { id: string }; Body: { units?: string[] } | undefined }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    const units = Array.isArray(req.body?.units) ? req.body.units.filter((u): u is string => typeof u === 'string') : undefined;
+    try {
+      return { ok: true, ...(await engine.putBackSetAside(req.params.id, units)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  // When the first withheld packet's blocking claim lapses (the server rechecks on its own then).
+  f.get('/api/runs/:id/withheld/next-lapse', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    return { at: engine.nextWithheldLapse(req.params.id) };
+  });
   f.post('/api/runs/:id/batches/:batchId/cancel-dry-run', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
     try {
       engine.cancelBatchDryRun(req.params.id, req.params.batchId);

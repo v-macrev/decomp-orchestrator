@@ -107,7 +107,12 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    (`POST /api/runs/:id/batches/drop-collisions`) does it for every staged batch with one claims
    check. Each batch row shows its progress (staged → claims → dry run → PR) and the next step, and
    **Show** lists its functions with the claims that name them and when they lapse. **Recheck withheld**
-   (`POST /api/runs/:id/withheld/recheck`) batches them again once those claims lapse or close.
+   (`POST /api/runs/:id/withheld/recheck`) batches them again once those claims lapse or close; the
+   server also does this on its own when the first claim lapses. **Needs attention** gathers what
+   still blocks the run, each with one button: re-verify failed batches, set aside the units a dry
+   run blamed (or that upstream already matched or changed: **Check against upstream**), and put
+   them back later. A dry run checks upstream first and recompiles only packets whose last compare
+   no longer proves the tree.
 6. Runs can be edited (`PATCH /api/runs/:id`: name, drafted-by, budget, functions per PR) and
    deleted (`DELETE /api/runs/:id`, which releases the local claims the run still holds). A new
    run can carry the dead functions of earlier runs (`config.carry.fromRuns`). Set

@@ -224,7 +224,13 @@ export interface Batch {
     /** Packets this batch withheld for colliding claims, and the batches its other packets went to. */
     withheld?: { taskIds: string[]; units: string[] };
     supersededBy?: number[];
-    lastSubmit?: { at: number; dryRun: boolean; ok: boolean; cancelled?: boolean; submissionStarted?: boolean; problems: string[]; blockers: string[]; uncheckedClaims?: string[]; warnings: string[]; plan: string[]; error: string | null; branch: string };
+    /** Units this batch set aside (held out of PRs), with the findings that blocked each. */
+    setAside?: { at: number; why: string; taskIds: string[]; units: string[]; reasons: Record<string, string[]> };
+    lastSubmit?: {
+      at: number; dryRun: boolean; ok: boolean; cancelled?: boolean; submissionStarted?: boolean; problems: string[]; blockers: string[]; uncheckedClaims?: string[]; warnings: string[]; plan: string[]; error: string | null; branch: string;
+      /** sr tasks recompiled, and those whose last compare still proved the tree (not recompiled). */
+      compared?: number | null; reused?: number | null; durationMs?: number;
+    };
   } | null;
 }
 
@@ -283,6 +289,33 @@ export interface RecheckWithheldResult {
   staged: StageResult | null;
 }
 
+export interface BatchSetAside {
+  seq: number;
+  batchId: string;
+  setAsideTasks: number;
+  setAsideFunctions: number;
+  keptTasks: number;
+  keptFunctions: number;
+  units: Record<string, string[]>;
+  deleted: string[];
+}
+
+export interface SetAsideResult extends BatchSetAside {
+  ok: true;
+  staged: StageResult | null;
+  unattributed: string[];
+  claims: number;
+}
+
+export interface SetAsideUpstreamResult {
+  ok: true;
+  batches: BatchSetAside[];
+  setAsideTasks: number;
+  setAsideFunctions: number;
+  staged: StageResult | null;
+  clear: number[];
+}
+
 export interface SubmitResult {
   ok: boolean;
   dryRun: boolean;
@@ -339,6 +372,11 @@ export const api = {
   restageBatch: (id: string, batchId: string) => req<{ ok: true } & StageResult>('POST', `/api/runs/${id}/batches/${batchId}/restage`, {}),
   dropAllCollisions: (id: string) => req<DropAllCollisionsResult>('POST', `/api/runs/${id}/batches/drop-collisions`, {}),
   recheckWithheld: (id: string) => req<RecheckWithheldResult>('POST', `/api/runs/${id}/withheld/recheck`, {}),
+  nextWithheldLapse: (id: string) => req<{ at: number | null }>('GET', `/api/runs/${id}/withheld/next-lapse`),
+  restageFailed: (id: string) => req<{ ok: true } & StageResult>('POST', `/api/runs/${id}/batches/restage-failed`, {}),
+  setAsideBlocking: (id: string, batchId: string) => req<SetAsideResult>('POST', `/api/runs/${id}/batches/${batchId}/set-aside`, {}),
+  setAsideUpstream: (id: string) => req<SetAsideUpstreamResult>('POST', `/api/runs/${id}/batches/set-aside-upstream`, {}),
+  putBackSetAside: (id: string, units?: string[]) => req<{ ok: true; returnedTasks: number; staged: StageResult }>('POST', `/api/runs/${id}/set-aside/put-back`, units ? { units } : {}),
   cancelBatchDryRun: (id: string, batchId: string) => req<{ ok: true }>('POST', `/api/runs/${id}/batches/${batchId}/cancel-dry-run`, {}),
   clearBatchBranches: (id: string, batchId: string, scope: 'preview' | 'batch') => req<{ deleted: string[] }>('DELETE', `/api/runs/${id}/batches/${batchId}/branches`, { scope }),
   knowledge: (id: string) => req<KnowledgeEntry[]>('GET', `/api/runs/${id}/knowledge`),

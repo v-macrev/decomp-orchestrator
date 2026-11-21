@@ -25,7 +25,7 @@ import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
-import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult } from './types.js';
+import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
 
 interface ProgressInventory {
   target_build_id?: string;
@@ -325,7 +325,7 @@ export class SrRepo implements RepoAdapter {
 
   // ---------------------------------------------------------------- per-task
 
-  private localClaims(): Record<string, { status?: string; url?: string | null }> {
+  private localClaims(): Record<string, { status?: string; url?: string | null; model?: string }> {
     const path = this.host.fsPath(this.p.join(this.cfg.localDir, 'contrib', 'claims.json'));
     try {
       const claims = parseJsonOutput(readFileSync(path, 'utf8'));
@@ -398,7 +398,8 @@ export class SrRepo implements RepoAdapter {
     await this.srMutex.run('sr-local', async () => {
       // Re-claiming one's own local claim only rewrites its record, now with the finishing model.
       const existing = this.localClaims();
-      const local = rvas.filter((rva) => existing[rva]?.status !== 'published' && !existing[rva]?.url);
+      // A claim that already records this model needs no new `sr claim` (it stores only the model).
+      const local = rvas.filter((rva) => existing[rva]?.status !== 'published' && !existing[rva]?.url && existing[rva]?.model !== input.model);
       if (local.length) {
         const claim = await this.sr(this.wt(input.slot ?? 0), ['claim', ...local, '--offline-ok', '--model', input.model, '--drafted-by', input.draftedBy], { timeoutMs: 120_000 });
         if (claim.run.code !== 0 || claim.json?.claim !== 'unpublished') problems.push(`claim: ${claim.json?.error ?? (claim.run.stderr || claim.run.stdout).trim().slice(-200)}`);
@@ -571,6 +572,38 @@ export class SrRepo implements RepoAdapter {
     return claimCollisionResult(run, wanted);
   }
 
+  async upstreamState(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState> {
+    const out: UpstreamState = { checked: false, matched: {}, untracked: [], changed: [], builtOn: null };
+    const text = await this.baseFile('data/progress.json');
+    if (!text) return out;
+    let fns: Array<{ rva?: unknown; status?: unknown; owner?: unknown }>;
+    try {
+      const j = JSON.parse(text) as { functions?: unknown };
+      fns = Array.isArray(j.functions) ? j.functions : [];
+    } catch {
+      return out;
+    }
+    const byRva = new Map(fns.map((f) => [typeof f.rva === 'number' ? f.rva : Number.parseInt(String(f.rva), 16), f]));
+    for (const rva of new Set(input.rvas)) {
+      const e = byRva.get(Number.parseInt(rva, 16));
+      if (!e) out.untracked.push(rva);
+      else if (e.status === 'matched') out.matched[rva] = typeof e.owner === 'string' ? e.owner : null;
+    }
+    if (input.branch && /^[A-Za-z0-9._/-]+$/.test(input.branch)) {
+      const r = await this.git(this.cfg.repoPath, ['log', '-1', '--format=%P', input.branch, '--']);
+      const parent = r.code === 0 ? r.stdout.trim().split(/\s+/)[0] : '';
+      if (/^[0-9a-f]{40}$/.test(parent ?? '')) out.builtOn = parent!;
+    }
+    const files = [...new Set(input.files)].filter((f) => /^[\w./-]+$/.test(f));
+    if (out.builtOn && out.builtOn !== this.sha && files.length) {
+      const d = await this.git(this.cfg.repoPath, ['diff', '--name-only', out.builtOn, this.sha, '--', ...files]);
+      if (d.code !== 0) return out;
+      out.changed = d.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+    }
+    out.checked = true;
+    return out;
+  }
+
   async stageBatch(input: StageBatchInput): Promise<StageBatchResult> {
     const slot = this.slotCount; // dedicated staging worktree after the worker slots
     const p = this.wt(slot);
@@ -580,22 +613,14 @@ export class SrRepo implements RepoAdapter {
       return { branch: null, verified: false, problems: [`staging worktree: ${(e as Error).message.slice(0, 200)}`] };
     }
     await this.writeFiles(slot, input.files);
-    const problems: string[] = [];
     const ac = new AbortController();
-    for (const [i, t] of input.tasks.entries()) {
-      if (!t.srTaskId) {
-        problems.push(`${t.id}: no sr task id`);
-        continue;
-      }
-      input.progress?.('re-verify', `sr compare ${t.srTaskId}: ${t.functions.map((f) => f.name ?? f.rva).join(', ')}`, i, input.tasks.length);
-      const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: ac.signal, timeoutMs: 600_000 });
-      if (!r.allPass) problems.push(`${t.id}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
-    }
+    const v = await this.verifyTree(slot, input.tasks, { signal: ac.signal, stagedAt: null, progress: (detail, done, total) => input.progress?.('re-verify', detail, done, total) });
+    const { problems, failedTaskIds, compared, reused } = v;
     // A batch that does not re-verify is never committed: a branch is a claim that its code
     // matches. Put the staging worktree back so nothing unverified lingers there either.
     if (problems.length) {
       await this.reset(slot).catch(() => undefined);
-      return { branch: null, verified: false, problems };
+      return { branch: null, verified: false, problems, failedTaskIds, compared, reused };
     }
     const branch = `decomp/${input.runId}-b${input.seq}`;
     input.progress?.('commit', `all packets match: committing ${branch}`, input.tasks.length, input.tasks.length);
@@ -606,7 +631,119 @@ export class SrRepo implements RepoAdapter {
       await this.reset(slot).catch(() => undefined);
       return { branch: null, verified: false, problems: [`git: ${(commit.stderr || commit.stdout).slice(0, 300)}`] };
     }
-    return { branch, verified: true, problems };
+    return { branch, verified: true, problems, compared, reused };
+  }
+
+  /**
+   * Re-verify the batch tree written into `slot`: one `sr compare` per sr task (a unit's packets
+   * share one), skipped where the task's last compare still proves this exact tree — the same proof
+   * `sr submit` itself accepts (all pass, pinned compiler, the unit's source closure and recipe
+   * digests unchanged), compared at this base.
+   */
+  private async verifyTree(slot: number, tasks: SubmitBatchInput['tasks'], opts: { signal: AbortSignal; stagedAt: number | null; progress?: (detail: string, done: number, total: number) => void }) {
+    const problems: string[] = [];
+    const failedTaskIds: string[] = [];
+    const groups = new Map<string, SubmitBatchInput['tasks']>();
+    for (const t of tasks) {
+      if (!t.srTaskId || !/^[A-Za-z0-9._-]+$/.test(t.srTaskId)) {
+        problems.push(`${t.id}: no plain sr task id`);
+        failedTaskIds.push(t.id);
+        continue;
+      }
+      groups.set(t.srTaskId, [...(groups.get(t.srTaskId) ?? []), t]);
+    }
+    if (problems.length) return { problems, failedTaskIds, compared: 0, reused: 0 };
+    const focus = await this.focusTasks(groups);
+    if (focus.problems.length) return { problems: focus.problems, failedTaskIds: focus.failedTaskIds, compared: 0, reused: 0 };
+    opts.progress?.(`checking which packets' last compare still proves this tree (${groups.size} sr task(s))`, 0, groups.size);
+    const fresh = await this.freshCompares(slot, groups, opts.stagedAt, opts.signal);
+    for (const id of fresh) this.markVerified(id);
+    let done = fresh.size;
+    let compared = 0;
+    for (const [id, ts] of groups) {
+      opts.signal.throwIfAborted();
+      if (fresh.has(id)) continue;
+      const fns = ts.flatMap((t) => t.functions);
+      opts.progress?.(`sr compare ${id}: ${fns.map((f) => f.name ?? f.rva).join(', ')}${fresh.size ? ` (${fresh.size} unchanged, not recompiled)` : ''}`, done, groups.size);
+      const r = await this.compare(slot, { ...ts[0]!.task, functions: fns }, { srTaskId: id, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: opts.signal, timeoutMs: 600_000 });
+      compared++;
+      done++;
+      if (r.allPass) {
+        this.markVerified(id);
+        continue;
+      }
+      problems.push(`${ts.map((t) => t.id).join(',')}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
+      failedTaskIds.push(...ts.map((t) => t.id));
+    }
+    return { problems, failedTaskIds, compared, reused: fresh.size };
+  }
+
+  /**
+   * An sr task lists every function ever started in its unit, dead packets' too, and `sr compare`
+   * checks all of them: narrow each to exactly the batch's packets, so it checks what the batch carries.
+   */
+  private async focusTasks(groups: Map<string, SubmitBatchInput['tasks']>) {
+    const problems: string[] = [];
+    const failedTaskIds: string[] = [];
+    const num = (rva: unknown) => Number.parseInt(String(rva), 16);
+    await this.srMutex.run('sr-local', async () => {
+      for (const [id, ts] of groups) {
+        const file = this.host.fsPath(this.p.join(this.cfg.localDir, 'contrib', 'tasks', id, 'task.json'));
+        try {
+          const task = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown> & { functions?: Array<{ rva?: string }> };
+          const want = new Set(ts.flatMap((t) => t.functions.map((f) => num(f.rva))));
+          const all = Array.isArray(task.functions) ? task.functions : [];
+          const kept = all.filter((f) => want.has(num(f.rva)));
+          const missing = [...want].filter((r) => !kept.some((f) => num(f.rva) === r));
+          if (missing.length) throw new Error(`sr task ${id} does not list ${missing.map((r) => `0x${r.toString(16)}`).join(', ')}`);
+          if (kept.length !== all.length) writeFileSync(file, `${JSON.stringify({ ...task, functions: kept }, null, 2)}\n`, 'utf8');
+        } catch (e) {
+          problems.push(`${ts.map((t) => t.id).join(',')}: task.json: ${(e as Error).message.slice(0, 200)}`);
+          failedTaskIds.push(...ts.map((t) => t.id));
+        }
+      }
+    });
+    return { problems, failedTaskIds };
+  }
+
+  /** The sr tasks whose last compare still proves the tree in `slot` (see FRESH_COMPARES_PY). */
+  private async freshCompares(slot: number, groups: Map<string, SubmitBatchInput['tasks']>, stagedAt: number | null, signal: AbortSignal): Promise<Set<string>> {
+    const arg = {
+      tasksDir: this.p.join(this.cfg.localDir, 'contrib', 'tasks'), base: this.sha, stagedAt,
+      tasks: Object.fromEntries([...groups].map(([id, ts]) => [id, ts.flatMap((t) => t.functions.map((f) => f.rva))])),
+    };
+    const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_CONTRIB_OFFLINE: '1', SR_NO_SIBLING_NAMES: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' };
+    const run = await this.host.run(this.cfg.python, ['-c', FRESH_COMPARES_PY, JSON.stringify(arg)], { cwd: this.wt(slot), env, signal, timeoutMs: 300_000, maxOutputBytes: 4 * 1024 * 1024 });
+    const j = parseJsonOutput(run.stdout) as Record<string, { fresh?: unknown }> | null;
+    if (run.code !== 0 || !j || typeof j !== 'object') return new Set();
+    return new Set(Object.entries(j).filter(([id, v]) => groups.has(id) && v?.fresh === true).map(([id]) => id));
+  }
+
+  /** Record that this task's last compare passed at this base (what freshCompares trusts next time). */
+  private markVerified(srTaskId: string) {
+    const dir = this.p.join(this.cfg.localDir, 'contrib', 'tasks', srTaskId);
+    try {
+      const raw = readFileSync(this.host.fsPath(this.p.join(dir, 'last-compare.json')));
+      const mark = { base: this.sha, summary_sha256: createHash('sha256').update(raw).digest('hex'), at: new Date().toISOString() };
+      writeFileSync(this.host.fsPath(this.p.join(dir, 'orch-verified.json')), `${JSON.stringify(mark)}\n`, 'utf8');
+    } catch {
+      // Without the mark the next re-verification simply compares again.
+    }
+  }
+
+  /**
+   * The latest time the batch's staged branch or its dry-run branch (`-pr`) was committed on this
+   * base: every compare written before it ran at this base (both are committed after their compares).
+   */
+  private async stagedAtThisBase(branch: string | null | undefined): Promise<number | null> {
+    if (!branch || !/^[A-Za-z0-9._/-]+$/.test(branch)) return null;
+    let at: number | null = null;
+    for (const b of [branch, `${branch}-pr`]) {
+      const r = await this.git(this.cfg.repoPath, ['log', '-1', '--format=%ct %P', b, '--']);
+      const [ct, parent] = r.stdout.trim().split(/\s+/);
+      if (r.code === 0 && parent === this.sha && Number(ct) > 0) at = Math.max(at ?? 0, Number(ct));
+    }
+    return at;
   }
 
   async submitBatch(input: SubmitBatchInput): Promise<SubmitBatchResult> {
@@ -637,16 +774,14 @@ export class SrRepo implements RepoAdapter {
       // writes each task's last-compare.json, which `sr submit` checks against the unit's digest.
       signal.throwIfAborted();
       await this.writeFiles(slot, input.files);
-      for (const [i, t] of input.tasks.entries()) {
-        signal.throwIfAborted();
-        if (!t.srTaskId) {
-          out.problems.push(`${t.id}: no sr task id`);
-          continue;
-        }
-        input.progress?.('Rebuilding the batch from the base and re-verifying every packet', `sr compare ${t.srTaskId}: ${t.functions.map((f) => f.name ?? f.rva).join(', ')}`, i, input.tasks.length);
-        const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal, timeoutMs: 600_000 });
-        if (!r.allPass) out.problems.push(`${t.id}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
-      }
+      const stagedAt = await this.stagedAtThisBase(input.stagedBranch);
+      const v = await this.verifyTree(slot, input.tasks, {
+        signal, stagedAt,
+        progress: (detail, done, total) => input.progress?.('Rebuilding the batch from the base; re-comparing only packets whose last compare no longer proves it', detail, done, total),
+      });
+      out.compared = v.compared;
+      out.reused = v.reused;
+      out.problems.push(...v.problems);
       if (out.problems.length) return out;
       const git = async (args: string[]) => {
         signal.throwIfAborted();
@@ -664,28 +799,30 @@ export class SrRepo implements RepoAdapter {
       // credentials: it runs on the host, never in the sandbox, and without SR_CONTRIB_OFFLINE.
       const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_NO_SIBLING_NAMES: '1', SR_UPSTREAM: this.upstream, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', GIT_TERMINAL_PROMPT: '0' };
       const list = (v: unknown) => (Array.isArray(v) ? v.map((x) => (typeof x === 'string' ? x : JSON.stringify(x)).slice(0, 400)) : []);
-      // Probe every task before the mutating command. The final task also supplies the dry-run plan.
-      const ids = new Set(input.tasks.slice(0, -1).map((t) => t.srTaskId).filter((id) => id !== last.srTaskId));
-      ids.add(last.srTaskId);
+      // Before the mutating command: `sr submit --dry-run` on the task submitted through (its gates,
+      // claims and the plan), and for every other packet the same claims rule (`open_items` +
+      // `claim_state`) in one GitHub read, run side by side.
       const args = ['tools/contrib.py', '--json', 'submit'];
       const attribution = ['--drafted-by', input.draftedBy];
       const unchecked: string[] = [];
-      for (const [i, id] of [...ids].entries()) {
-        signal.throwIfAborted();
-        input.progress?.('Checking claims and gates with sr submit --dry-run for every task', `sr submit --dry-run ${id}`, i, ids.size);
-        if (!id || !/^[A-Za-z0-9._-]+$/.test(id)) {
-          unchecked.push(`${id ?? 'unknown task'}: invalid sr task ID for claims check`);
-          continue;
-        }
-        const probe = await this.host.run(this.cfg.python, [...args, id, ...attribution, '--dry-run'], { cwd: p, env, signal, timeoutMs: 300_000, maxOutputBytes: 8 * 1024 * 1024 });
-        const check = submitClaimsCheck(probe);
-        unchecked.push(...check.unchecked.map((issue) => `${id}: ${issue}`));
-        if (id === last.srTaskId) {
-          out.blockers.push(...check.blockers);
-          out.warnings.push(...check.warnings);
-          out.plan = check.plan;
-        } else {
-          out.blockers.push(...check.blockers.filter((b) => /another open claim or pull request/i.test(b)).map((b) => `${id}: ${b}`));
+      const otherTasks = input.tasks.filter((t) => t.srTaskId !== last.srTaskId);
+      const otherRvas = otherTasks.flatMap((t) => t.functions.map((f) => f.rva));
+      signal.throwIfAborted();
+      input.progress?.('Checking claims and gates', `sr submit --dry-run ${last.srTaskId}${otherRvas.length ? `, and one GitHub claims check for the other ${otherRvas.length} function(s)` : ''}`, null, null);
+      const [probe, claims] = await Promise.all([
+        this.host.run(this.cfg.python, [...args, last.srTaskId, ...attribution, '--dry-run'], { cwd: p, env, signal, timeoutMs: 300_000, maxOutputBytes: 8 * 1024 * 1024 }),
+        otherRvas.length ? this.claimCollisions(otherRvas, { signal }) : Promise.resolve<ClaimCollisionCheck>({ checked: true, error: null, collisions: {} }),
+      ]);
+      const check = submitClaimsCheck(probe);
+      unchecked.push(...check.unchecked.map((issue) => `${last.srTaskId}: ${issue}`));
+      out.blockers.push(...check.blockers);
+      out.warnings.push(...check.warnings);
+      out.plan = check.plan;
+      if (!claims.checked) unchecked.push(...[...new Set(otherTasks.map((t) => t.srTaskId))].map((id) => `${id}: ${claims.error ?? 'claims not checked'}`));
+      for (const t of otherTasks) {
+        for (const f of t.functions) {
+          const hit = claims.collisions[f.rva];
+          if (hit?.length) out.blockers.push(`${t.srTaskId}: another open claim or pull request names ${f.rva}: ${hit.map((h) => h.url).join(', ')} (talk to them, or pass --ack-collision)`);
         }
       }
       out.uncheckedClaims = unchecked;
@@ -944,6 +1081,56 @@ export const CLAIM_COLLISIONS_PY = [
   '    if fresh:',
   "        out[rva] = [{'url': i.get('url'), 'author': i.get('author'), 'updated_at': str(i.get('updated_at'))} for i in fresh]",
   "print(json.dumps({'checked': True, 'me': me, 'collisions': out}))",
+].join('\n');
+
+/**
+ * For each sr task, whether its last `sr compare` still proves the tree in the cwd: every function
+ * passed with the pinned compiler, exactly the wanted functions, and the unit's source closure and
+ * recipe hash as they are on disk now (what `sr submit` checks), compared at this base — by our
+ * mark written after a passing compare at this base, or no later than a branch verified at this
+ * base was committed. argv: JSON {tasksDir, base, stagedAt, tasks: {srTaskId: [rva]}}.
+ */
+export const FRESH_COMPARES_PY = [
+  'import hashlib, json, os, sys',
+  'from pathlib import Path',
+  "sys.path.insert(0, 'tools')",
+  'import contrib',
+  'from source_digest import include_closure',
+  'try:',
+  '    from digest_v2 import tu_digest',
+  'except ImportError:',
+  '    from source_digest import tu_digest',
+  // `sr submit`'s own per-task check where the tools have it, so the digest method always agrees.
+  "check = getattr(contrib, 'submit_task_blockers', None)",
+  'ctx = contrib.Ctx(as_json=True)',
+  'a = json.loads(sys.argv[1])',
+  'out = {}',
+  "for tid, rvas in a['tasks'].items():",
+  "    d = os.path.join(a['tasksDir'], tid)",
+  '    why = None',
+  '    try:',
+  "        task = json.load(open(os.path.join(d, 'task.json')))",
+  "        last = os.path.join(d, 'last-compare.json')",
+  "        raw = open(last, 'rb').read()",
+  '        s = json.loads(raw)',
+  "        fns = s.get('functions') or []",
+  '        blockers = check(ctx, Path(d), task)[0] if check else []',
+  '        if blockers: why = str(blockers[0])[:200]',
+  "        elif s.get('compiler') != 'pinned': why = 'stand-in compiler'",
+  "        elif not fns or not all(f.get('result') == 'pass' for f in fns): why = 'not every function passed'",
+  "        elif sorted(int(str(f['rva']), 16) for f in fns) != sorted(int(r, 16) for r in rvas): why = 'it compared other functions'",
+  "        elif tu_digest(ctx.repo, include_closure(ctx.repo, task['compiled'])) != s.get('source_revision'): why = 'the unit changed since'",
+  "        elif hashlib.sha256(open(task['recipe'], 'rb').read()).hexdigest() != s.get('recipe_sha256'): why = 'the recipe changed since'",
+  '        else:',
+  "            mark = os.path.join(d, 'orch-verified.json')",
+  '            m = json.load(open(mark)) if os.path.exists(mark) else None',
+  "            ok = isinstance(m, dict) and m.get('base') == a['base'] and m.get('summary_sha256') == hashlib.sha256(raw).hexdigest()",
+  "            if not ok and a.get('stagedAt'): ok = os.path.getmtime(last) <= a['stagedAt'] + 2",
+  "            if not ok: why = 'not compared at this base'",
+  '    except Exception as exc:',
+  "        why = (type(exc).__name__ + ': ' + str(exc))[:200]",
+  "    out[tid] = {'fresh': why is None, 'why': why}",
+  'print(json.dumps(out))',
 ].join('\n');
 
 /** Parse the collision probe; anything short of a complete report counts as "not checked". */

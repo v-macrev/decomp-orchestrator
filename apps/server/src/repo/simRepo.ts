@@ -10,7 +10,7 @@ import { simIdent, type SimOracle } from '../providers/mock.js';
 import { sleep } from '../util/async.js';
 import { clipMiddle } from './srRepo.js';
 import { hashUnit as hashUnitSim, simDocs, simFeatures, simPack, simSharedHeader, simTrap, simTrapRecipes, type SimTrapInfo } from './simContent.js';
-import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, InventoryEntry, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
+import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, InventoryEntry, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, UpstreamState } from './types.js';
 
 export interface SimRepoOptions {
   slots: number;
@@ -51,6 +51,9 @@ export class SimRepo implements RepoAdapter, SimOracle {
   compares = 0;
   /** Open claims by other contributors, by RVA (tests set it; the simulator has none). */
   claimedByOthers = new Map<string, ClaimCollision[]>();
+  /** Test hooks: what upstream already matched (rva → owner), and files it changed since a batch was built. */
+  upstreamMatched = new Map<string, string | null>();
+  upstreamChanged = new Set<string>();
 
   constructor(private opts: SimRepoOptions) {
     this.realistic = opts.realisticContext ?? true;
@@ -213,6 +216,11 @@ export class SimRepo implements RepoAdapter, SimOracle {
       if (hit?.length) collisions[rva] = hit;
     }
     return { checked: true, error: null, collisions };
+  }
+
+  async upstreamState(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState> {
+    const matched = Object.fromEntries(input.rvas.filter((r) => this.upstreamMatched.has(r)).map((r) => [r, this.upstreamMatched.get(r)!]));
+    return { checked: true, matched, untracked: [], changed: input.files.filter((p) => this.upstreamChanged.has(p)), builtOn: null };
   }
 
   /** Re-verify every packet against the combined final unit files (what a PR would contain). */
