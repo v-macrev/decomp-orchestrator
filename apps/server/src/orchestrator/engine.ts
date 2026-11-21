@@ -1369,7 +1369,7 @@ export class RunEngine {
         warnings: r.warnings, plan: r.plan, error: r.error, branch,
       } };
       if (r.ok && !opts.dryRun) {
-        store.updateBatch(batchId, { status: 'submitted', detail: { ...detail, pr: r.pullRequest, link: r.link, prBranch: branch, prTitle: r.title ?? null, submittedAt: Date.now() } });
+        store.updateBatch(batchId, { status: 'submitted', detail: { ...detail, pr: r.pullRequest, link: r.link, prBranch: branch, prTitle: r.title ?? null, claims: r.claims ?? [], submittedAt: Date.now() } });
         events.emit('batch.submitted', `batch ${batch.seq}: ${all.fnCount} functions submitted → ${r.pullRequest ?? r.link ?? branch}`, { runId, data: { pr: r.pullRequest, link: r.link, branch, uncheckedClaims: r.uncheckedClaims ?? [], allowUncheckedClaims: input.allowUncheckedClaims } });
       } else {
         store.updateBatch(batchId, { detail });
@@ -1391,7 +1391,7 @@ export class RunEngine {
     const { store, events, repo } = this.deps;
     const batch = store.getBatch(batchId);
     if (!batch || batch.runId !== runId) throw new Error('batch not found');
-    const d = { ...(batch.detail as Record<string, unknown> | null) } as Record<string, unknown> & { pr?: string | null; prBranch?: string };
+    const d = { ...(batch.detail as Record<string, unknown> | null) } as Record<string, unknown> & { pr?: string | null; prBranch?: string; claims?: string[] };
     if (batch.status !== 'submitted' || !d.prBranch) throw new Error(`batch ${batch.seq} has no open pull request`);
     if (!repo.tidyPullRequest) throw new Error('this repository adapter cannot rewrite pull requests');
     const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
@@ -1403,10 +1403,10 @@ export class RunEngine {
     return this.exclusive(`tidying the pull request of ${runId} b${batch.seq}`, async () => {
       this.progress(`Batch ${batch.seq}: one commit, and a title and description naming every function`, d.pr ?? d.prBranch ?? null);
       const r = await repo.tidyPullRequest!({
-        branch: d.prBranch!, draftedBy: all.draftedBy ?? (all.person ?? 'not stated'), pullRequest: d.pr ?? null,
+        branch: d.prBranch!, draftedBy: all.draftedBy ?? (all.person ?? 'not stated'), pullRequest: d.pr ?? null, claimUrls: d.claims ?? [],
         tasks: sequence.map((t) => ({ id: t.id, srTaskId: t.srTaskId, functions: t.functions, task: t })),
       });
-      if (r.ok) store.updateBatch(batchId, { detail: { ...d, prTitle: r.title, tidiedAt: Date.now() } });
+      if (r.ok) store.updateBatch(batchId, { detail: { ...d, prTitle: r.title, claims: r.claims?.length ? r.claims : d.claims ?? [], tidiedAt: Date.now() } });
       events.emit(r.ok ? 'batch.pr_tidied' : 'batch.pr_tidy_failed', `batch ${batch.seq}: ${r.ok ? `pull request is one commit titled "${r.title}"` : `pull request not rewritten: ${r.error}`}`, { runId, level: r.ok ? 'info' : 'warn', data: { pr: d.pr, warnings: r.warnings } });
       return r;
     });

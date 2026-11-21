@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskRow } from '../src/db/store.js';
-import { batchPrText, type CompareSummary } from '../src/repo/batchPr.js';
-import { CLAIM_COLLISIONS_PY, FRESH_COMPARES_PY, SrRepo } from '../src/repo/srRepo.js';
+import { batchPrText, withClaimLine, type CompareSummary } from '../src/repo/batchPr.js';
+import { CLAIM_COLLISIONS_PY, CLAIM_PUBLISH_PY, FRESH_COMPARES_PY, SrRepo } from '../src/repo/srRepo.js';
 import type { RunResult } from '../src/util/proc.js';
 
 const run = (stdout: string, extra: Partial<RunResult> = {}): RunResult => ({
@@ -73,6 +73,15 @@ describe('batch pull request text', () => {
   });
 });
 
+describe('claim line', () => {
+  it('links the claim right under the intake line, once', () => {
+    const body = ['Function intake: review follows.', '', '## Reconstructed function(s)', ''].join('\n');
+    const once = withClaimLine(body, ['https://github.com/o/r/issues/5']);
+    expect(once).toBe(['Function intake: review follows.', '', 'Claim issue for these functions: https://github.com/o/r/issues/5', '', '## Reconstructed function(s)', ''].join('\n'));
+    expect(withClaimLine(once, ['https://github.com/o/r/issues/6'])).toBe(once.replace('issues/5', 'issues/6'));
+  });
+});
+
 describe('submitting a batch of several units', () => {
   it('makes one commit of every file, names every function, and restores the sr task afterwards', async () => {
     const root = mkdtempSync(join(tmpdir(), 'decomp-onepr-'));
@@ -93,7 +102,14 @@ describe('submitting a batch of several units', () => {
       const gitCalls: string[][] = [];
       let unitDuringSubmit: string[] = [];
       let patch: { args: string[]; body: string } | null = null;
+      const claimCalls: Array<{ rvas: string[]; pr: string }> = [];
+      let dryRun = true;
       vi.spyOn(repo.host, 'run').mockImplementation(async (cmd, args) => {
+        if (args[1] === CLAIM_PUBLISH_PY) {
+          expect(dryRun).toBe(false);
+          claimCalls.push(JSON.parse(args[2]!));
+          return run(JSON.stringify({ ok: true, urls: ['https://github.com/Mudcrab-Team/skyrim_decomp/issues/42'] }));
+        }
         if (cmd === 'git') {
           gitCalls.push(args);
           const [verb] = args;
@@ -121,12 +137,19 @@ describe('submitting a batch of several units', () => {
         writeFileSync(join(root, 'contrib', 'tasks', 'last', 'pr-body.md'), srBody(sums.last));
         return run(JSON.stringify({ ok: true, pull_request: 'https://github.com/Mudcrab-Team/skyrim_decomp/pull/9' }));
       });
-      const r = await repo.submitBatch({
+      const input = {
         runId: 'run_test', seq: 1, branch: 'decomp/run_test-b1-pr', files: [{ path: 'first.cpp', content: 'a' }, { path: 'first.h', content: 'b' }, { path: 'last.cpp', content: 'c' }],
         tasks: (['first', 'last'] as const).map((id) => ({ id, srTaskId: id, functions: sums[id].functions.map((f) => ({ rva: f.rva, name: f.name })) as TaskRow['functions'], task: {} as TaskRow })),
-        message: 'unused', draftedBy: 'me', title: null, extraBody: null, dryRun: false,
-      });
-      expect(r).toMatchObject({ ok: true, title: 'Reconstruct First::Fn, Last::Fn (0x1234, 0x5678)' });
+        message: 'unused', draftedBy: 'me', title: null, extraBody: null, dryRun: true,
+      };
+      // A dry run publishes nothing (the mock fails the test if it tries).
+      expect(await repo.submitBatch(input)).toMatchObject({ ok: true });
+      expect(claimCalls).toEqual([]);
+      dryRun = false;
+      const r = await repo.submitBatch({ ...input, dryRun: false });
+      expect(r).toMatchObject({ ok: true, title: 'Reconstruct First::Fn, Last::Fn (0x1234, 0x5678)', claims: ['https://github.com/Mudcrab-Team/skyrim_decomp/issues/42'] });
+      // One claim, for exactly the PR's functions, naming the PR.
+      expect(claimCalls).toEqual([{ rvas: ['0x1234', '0x5678'], pr: 'https://github.com/Mudcrab-Team/skyrim_decomp/pull/9' }]);
       // sr committed the whole batch: its unit named every file while it ran; nothing was committed before it.
       expect(new Set(unitDuringSubmit)).toEqual(new Set(['last.cpp', 'first.cpp', 'first.h']));
       const commitIndex = gitCalls.findIndex((x) => x[0] === 'commit');
@@ -140,6 +163,7 @@ describe('submitting a batch of several units', () => {
       expect(patch!.args).toContain('title=Reconstruct First::Fn, Last::Fn (0x1234, 0x5678)');
       expect(patch!.body).toContain(`| ${tick}0x1234${tick} |`);
       expect(patch!.body).toContain(`| ${tick}0x5678${tick} |`);
+      expect(patch!.body).toContain('Claim issue for these functions: https://github.com/Mudcrab-Team/skyrim_decomp/issues/42');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -168,6 +192,7 @@ describe('submitting a batch of several units', () => {
       expect(r).toMatchObject({ ok: false, error: expect.stringMatching(/already merged: nothing was rewritten/) });
       expect(calls.some((c) => c[0] === 'git' && ['reset', 'commit', 'push'].includes(c[1]!))).toBe(false);
       expect(calls.some((c) => c.includes('PATCH'))).toBe(false);
+      expect(calls.some((c) => c.includes(CLAIM_PUBLISH_PY))).toBe(false);
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

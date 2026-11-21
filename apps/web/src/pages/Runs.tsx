@@ -1039,7 +1039,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
         <div className={`state ${v.tone}`}>{v.title}</div>
         <p className="why">{v.why}</p>
         <StepDots steps={v.steps} />
-        <div className="actions">{primary(b)}</div>
+        <div className="actions">{primary(b)}{d?.claims?.length ? <span className="small">Claim: {d.claims.map((u, i) => <span key={u}>{i ? ', ' : ''}<a href={u} target="_blank" rel="noreferrer">{issueNo(u)} ↗</a></span>)}</span> : null}</div>
         <details className="more">
           <summary>Details and more actions</summary>
           <div className="stack" style={{ gap: 10, marginTop: 8 }}>
@@ -1068,9 +1068,9 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
                 {canClear && <ConfirmButton className="tiny danger" disabled={locked} onConfirm={() => clear(b, 'batch')} confirmLabel="Delete its local branches?">Delete branch</ConfirmButton>}
               </div>
             )}
-            {b.status === 'submitted' && d?.prBranch && units > 1 && (
+            {b.status === 'submitted' && d?.prBranch && (units > 1 || !d.claims?.length) && (
               <div className="row">
-                <ConfirmButton className="tiny" disabled={locked} onConfirm={() => tidyPr(b)} confirmLabel="Rewrite the PR as one commit (force-push)?" title="Squashes the PR branch into one commit and retitles the commit and the pull request with every function of the batch. Refused if anyone else pushed to the branch.">{busy === `tidy-${b.id}` ? 'Rewriting…' : d.tidiedAt ? 'Rewrite the PR again' : 'Make it one commit naming every function'}</ConfirmButton>
+                <ConfirmButton className="tiny" disabled={locked} onConfirm={() => tidyPr(b)} confirmLabel="Rewrite the PR as one commit (force-push)?" title="Squashes the PR branch into one commit, retitles the commit and the pull request with every function of the batch, and opens the claim issue for them if it has none (linked both ways). Refused for a merged or closed PR, or if anyone else pushed to the branch.">{busy === `tidy-${b.id}` ? 'Rewriting…' : d.tidiedAt ? 'Rewrite the PR again' : units > 1 ? 'One commit, every function, and its claim' : 'Open its claim issue'}</ConfirmButton>
                 {d.prTitle && <span className="muted small">Title: {d.prTitle}</span>}
               </div>
             )}

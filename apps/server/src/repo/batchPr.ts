@@ -35,6 +35,17 @@ const report = (s: CompareSummary) => {
   return out;
 };
 
+const CLAIM_LINE = /^Claim issue for these functions: .*\n\n?/m;
+
+/** The PR description with one line linking its claim issue(s), right under the intake line. */
+export function withClaimLine(body: string, claimUrls: string[]) {
+  const text = body.replace(CLAIM_LINE, '');
+  if (!claimUrls.length) return text;
+  const line = `Claim issue for these functions: ${claimUrls.join(', ')}\n\n`;
+  const first = text.indexOf('\n\n');
+  return first >= 0 ? `${text.slice(0, first + 2)}${line}${text.slice(first + 2)}` : `${line}${text}`;
+}
+
 export function batchPrText(summaries: CompareSummary[], draftedBy: string) {
   const fns = summaries.flatMap((s) => s.functions);
   const units = summaries.length;

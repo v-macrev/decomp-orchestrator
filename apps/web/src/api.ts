@@ -218,6 +218,8 @@ export interface Batch {
     pr?: string | null; link?: string | null; prBranch?: string; submittedAt?: number;
     /** The batch PR's title (every function), and when an open PR was rewritten as one commit. */
     prTitle?: string | null; tidiedAt?: number;
+    /** The claim issue(s) opened with the PR for its functions (each links the PR; the PR links them). */
+    claims?: string[];
     dryRunFingerprint?: string;
     dryRunBase?: string | null;
     /** Tasks whose claims the last dry run could not check: a real submission must accept them explicitly. */

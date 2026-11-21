@@ -139,7 +139,7 @@ export interface RepoAdapter {
    */
   submitBatch?(input: SubmitBatchInput): Promise<SubmitBatchResult>;
   /** Rewrite an open batch PR as one commit, titled and described with every function of the batch. */
-  tidyPullRequest?(input: { branch: string; tasks: SubmitBatchInput['tasks']; draftedBy: string; pullRequest: string | null }): Promise<{ ok: boolean; title: string | null; warnings: string[]; error: string | null }>;
+  tidyPullRequest?(input: { branch: string; tasks: SubmitBatchInput['tasks']; draftedBy: string; pullRequest: string | null; claimUrls?: string[] }): Promise<{ ok: boolean; title: string | null; warnings: string[]; error: string | null; claims?: string[] }>;
   /** Delete an orchestrator-owned local batch ref. */
   deleteBatchBranch?(branch: string): Promise<boolean>;
   /**
@@ -214,6 +214,8 @@ export interface SubmitBatchResult {
   pullRequest: string | null;
   /** The title the batch PR was given (every function of the batch), when it was renamed. */
   title?: string | null;
+  /** The claim issue(s) opened for the PR's functions after a real submit (each links the PR; the PR links them). */
+  claims?: string[];
   /** When gh could not open the PR: the compare link to open it by hand. */
   link: string | null;
   error: string | null;

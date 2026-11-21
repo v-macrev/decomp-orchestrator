@@ -26,7 +26,7 @@ import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
 import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
-import { batchPrText, type CompareSummary } from './batchPr.js';
+import { batchPrText, withClaimLine, type CompareSummary } from './batchPr.js';
 
 interface ProgressInventory {
   target_build_id?: string;
@@ -896,12 +896,25 @@ export class SrRepo implements RepoAdapter {
             out.warnings.push(`${t.srTaskId}: could not record the submission: ${(e as Error).message.slice(0, 200)}`);
           }
         }
+        // The PR exists, so the claim goes public now: one claim issue for exactly its functions,
+        // linking the PR, and the PR's description links the claim (below).
+        const claimUrls: string[] = [];
+        if (out.pullRequest) {
+          input.progress?.('Opening the claim issue for this pull request\'s functions', out.pullRequest, null, null);
+          const claim = await this.publishPrClaim(slot, input.tasks.flatMap((t) => t.functions.map((f) => f.rva)), out.pullRequest);
+          claimUrls.push(...claim.urls);
+          out.claims = claim.urls;
+          if (claim.error) out.warnings.push(`claim issue: ${claim.error}`);
+        }
         // `sr submit` titles the commit and the PR from the submitted task alone: name the whole batch.
         if (new Set(input.tasks.map((t) => t.srTaskId)).size > 1) {
           input.progress?.('Naming the whole batch: one commit, and the PR title and description list every function', input.branch, null, null);
-          const tidy = await this.tidyCheckedOut(slot, { branch: input.branch, tasks: input.tasks, draftedBy: input.draftedBy, pullRequest: out.pullRequest, bodyDir: tdir });
+          const tidy = await this.tidyCheckedOut(slot, { branch: input.branch, tasks: input.tasks, draftedBy: input.draftedBy, pullRequest: out.pullRequest, bodyDir: tdir, claimUrls });
           out.warnings.push(...tidy.warnings);
           if (tidy.title) out.title = tidy.title;
+        } else if (claimUrls.length && out.pullRequest) {
+          const linked = await this.setPrBody(p, out.pullRequest, tdir, (body) => withClaimLine(body, claimUrls));
+          if (linked) out.warnings.push(linked);
         }
       }
       return out;
@@ -911,6 +924,33 @@ export class SrRepo implements RepoAdapter {
       await restoreUnit?.().catch((e: Error) => out.warnings.push(`could not restore the sr task's unit list: ${e.message.slice(0, 200)}`));
       // The pushed branch stays (it is the PR); the staging worktree goes back to the base.
       await this.reset(slot).catch(() => undefined);
+    }
+  }
+
+  /** Publish the claim issue for a just-opened PR's functions (see CLAIM_PUBLISH_PY). */
+  private async publishPrClaim(slot: number, rvas: string[], pullRequest: string): Promise<{ urls: string[]; error: string | null }> {
+    const wanted = [...new Set(rvas)].filter((r) => /^0x[0-9a-f]+$/.test(r));
+    if (!wanted.length) return { urls: [], error: 'no functions to claim' };
+    const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_NO_SIBLING_NAMES: '1', SR_UPSTREAM: this.upstream, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', GIT_TERMINAL_PROMPT: '0' };
+    const run = await this.srMutex.run('sr-local', () => this.host.run(this.cfg.python, ['-c', CLAIM_PUBLISH_PY, JSON.stringify({ rvas: wanted, pr: pullRequest })], { cwd: this.wt(slot), env, timeoutMs: 300_000, maxOutputBytes: 1024 * 1024 }));
+    const j = parseJsonOutput(run.stdout) as { ok?: boolean; urls?: unknown; error?: unknown } | null;
+    const urls = Array.isArray(j?.urls) ? j.urls.filter((u): u is string => typeof u === 'string' && /^https:\/\/github\.com\//.test(u)) : [];
+    if (!j) return { urls, error: `could not open it (exit ${run.code}): ${(run.stderr || run.stdout).trim().slice(-300)}` };
+    return { urls, error: j.ok ? null : String(j.error ?? 'not opened') };
+  }
+
+  /** Replace an open PR's description (sr's pr-body.md in `bodyDir`, transformed) through the REST API. null when done, else why not. */
+  private async setPrBody(cwd: string, pullRequest: string, bodyDir: string, transform: (body: string) => string): Promise<string | null> {
+    const m = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(pullRequest);
+    if (!m) return `not a pull request URL: ${pullRequest}`;
+    try {
+      const body = transform(readFileSync(this.host.fsPath(this.p.join(bodyDir, 'pr-body.md')), 'utf8'));
+      const file = this.p.join(bodyDir, 'pr-body-batch.md');
+      writeFileSync(this.host.fsPath(file), body, 'utf8');
+      const edit = await this.host.run('gh', ['api', '-X', 'PATCH', `repos/${m[1]}/${m[2]}/pulls/${m[3]}`, '-F', `body=@${file}`], { cwd, timeoutMs: 120_000 });
+      return edit.code === 0 ? null : `gh api: ${(edit.stderr || edit.stdout).trim().slice(0, 300)}; the PR description does not link the claim yet`;
+    } catch (e) {
+      return `PR description: ${(e as Error).message.slice(0, 200)}`;
     }
   }
 
@@ -930,7 +970,7 @@ export class SrRepo implements RepoAdapter {
    * its message, and a title and description that list every function (per-unit comparator reports
    * included). Works on the branch's local copy and refuses when the fork's branch moved since.
    */
-  async tidyPullRequest(input: { branch: string; tasks: SubmitBatchInput['tasks']; draftedBy: string; pullRequest: string | null }): Promise<{ ok: boolean; title: string | null; warnings: string[]; error: string | null }> {
+  async tidyPullRequest(input: { branch: string; tasks: SubmitBatchInput['tasks']; draftedBy: string; pullRequest: string | null; claimUrls?: string[] }): Promise<{ ok: boolean; title: string | null; warnings: string[]; error: string | null; claims?: string[] }> {
     const slot = this.slotCount;
     const p = this.wt(slot);
     if (!/^decomp\/run_[a-z0-9]+-b[1-9]\d*-pr$/.test(input.branch)) return { ok: false, title: null, warnings: [], error: 'not a batch PR branch' };
@@ -940,8 +980,8 @@ export class SrRepo implements RepoAdapter {
       await this.ensureWorktree(slot);
       const co = await this.git(p, ['checkout', '-q', input.branch]);
       if (co.code !== 0) return { ok: false, title: null, warnings: [], error: `git checkout: ${co.stderr.trim().slice(0, 300)}` };
-      const r = await this.tidyCheckedOut(slot, { ...input, bodyDir: this.p.join(this.cfg.localDir, 'contrib', 'tasks', last.srTaskId) });
-      return { ok: r.ok, title: r.title, warnings: r.warnings, error: r.ok ? null : r.warnings.at(-1) ?? 'not tidied' };
+      const r = await this.tidyCheckedOut(slot, { ...input, bodyDir: this.p.join(this.cfg.localDir, 'contrib', 'tasks', last.srTaskId), openClaim: !input.claimUrls?.length });
+      return { ok: r.ok, title: r.title, warnings: r.warnings, error: r.ok ? null : r.warnings.at(-1) ?? 'not tidied', claims: r.claims };
     } catch (e) {
       return { ok: false, title: null, warnings: [], error: (e as Error).message.slice(0, 300) };
     } finally {
@@ -950,7 +990,7 @@ export class SrRepo implements RepoAdapter {
   }
 
   /** See tidyPullRequest: `branch` is checked out in `slot`. */
-  private async tidyCheckedOut(slot: number, input: { branch: string; tasks: SubmitBatchInput['tasks']; draftedBy: string; pullRequest: string | null; bodyDir: string }): Promise<{ ok: boolean; title: string | null; warnings: string[] }> {
+  private async tidyCheckedOut(slot: number, input: { branch: string; tasks: SubmitBatchInput['tasks']; draftedBy: string; pullRequest: string | null; bodyDir: string; claimUrls?: string[]; openClaim?: boolean }): Promise<{ ok: boolean; title: string | null; warnings: string[]; claims?: string[] }> {
     const p = this.wt(slot);
     const warnings: string[] = [];
     const fail = (why: string) => ({ ok: false, title: null, warnings: [...warnings, why] });
@@ -975,6 +1015,13 @@ export class SrRepo implements RepoAdapter {
         const [st, merged] = state.stdout.trim().split(/\s+/);
         if (state.code !== 0) return fail(`could not read the pull request's state (${(state.stderr || state.stdout).trim().slice(0, 200)}): nothing was rewritten`);
         if (st !== 'open') return fail(`the pull request is ${merged === 'true' ? 'already merged' : st}: nothing was rewritten`);
+      }
+      // An open PR from before claims were published with it gets its claim issue now.
+      const claimUrls = [...(input.claimUrls ?? [])];
+      if (input.openClaim && m && !claimUrls.length) {
+        const claim = await this.publishPrClaim(slot, input.tasks.flatMap((t) => t.functions.map((f) => f.rva)), input.pullRequest!);
+        claimUrls.push(...claim.urls);
+        if (claim.error) warnings.push(`claim issue: ${claim.error}`);
       }
       const base = await git(['merge-base', 'HEAD', this.sha]);
       const head = await git(['rev-parse', 'HEAD']);
@@ -1009,14 +1056,14 @@ export class SrRepo implements RepoAdapter {
         warnings.push('sr submit\'s pr-body.md is gone: the description is rebuilt from the template without the label and origin checks');
       }
       const template = srBody || ((await this.baseFile('.github/PULL_REQUEST_TEMPLATE/function.md')) ?? '');
-      const body = pr.body(template, this.sha.slice(0, 12));
+      const body = withClaimLine(pr.body(template, this.sha.slice(0, 12)), claimUrls);
       const bodyFile = this.p.join(input.bodyDir, 'pr-body-batch.md');
       writeFileSync(this.host.fsPath(bodyFile), body, 'utf8');
-      if (!m) return { ok: true, title: pr.title, warnings: [...warnings, `no pull request URL: title it "${pr.title}" and paste ${bodyFile} as its description`] };
+      if (!m) return { ok: true, title: pr.title, claims: claimUrls, warnings: [...warnings, `no pull request URL: title it "${pr.title}" and paste ${bodyFile} as its description`] };
       // REST, not `gh pr edit`: that one reads the retired Projects (classic) API and fails.
       const edit = await this.host.run('gh', ['api', '-X', 'PATCH', `repos/${m[1]}/${m[2]}/pulls/${m[3]}`, '-f', `title=${pr.title}`, '-F', `body=@${bodyFile}`], { cwd: p, timeoutMs: 120_000 });
       if (edit.code !== 0) return fail(`gh api: ${(edit.stderr || edit.stdout).trim().slice(0, 300)}; the commit is tidied, the PR keeps its title and description`);
-      return { ok: true, title: pr.title, warnings };
+      return { ok: true, title: pr.title, warnings, claims: claimUrls };
     } catch (e) {
       return fail(`tidying the PR: ${(e as Error).message.slice(0, 300)}`);
     }
@@ -1224,6 +1271,45 @@ export const CLAIM_COLLISIONS_PY = [
   '    if fresh:',
   "        out[rva] = [{'url': i.get('url'), 'author': i.get('author'), 'updated_at': str(i.get('updated_at'))} for i in fresh]",
   "print(json.dumps({'checked': True, 'me': me, 'collisions': out}))",
+].join('\n');
+
+/**
+ * Run from the checkout root, only after a real submit opened a pull request: publish the claim for
+ * exactly that PR's functions with sr's own claim-issue builder (`claims.parts`: the project's title,
+ * body and versioned marker block), the PR linked under it, and record the local claims as published.
+ * (`sr claim` itself would answer "already yours" here: it counts a PR naming the functions as a
+ * claim, and files no issue.) argv: JSON {rvas, pr}. Prints {ok, urls} or {ok: false, error}.
+ */
+export const CLAIM_PUBLISH_PY = [
+  'import json, sys, types',
+  "sys.path.insert(0, 'tools')",
+  'import contrib',
+  'a = json.loads(sys.argv[1])',
+  'ctx = contrib.Ctx(as_json=True)',
+  'try:',
+  '    gh = ctx.github()',
+  '    data = contrib.inventory(ctx.repo)',
+  "    functions, entries = contrib.claim_selection(ctx, types.SimpleNamespace(rva=a['rvas'], lists=[], classes=[], ranges=[]), data)",
+  "    build = functions[0]['build_id']",
+  '    me = gh.user()',
+  '    public = contrib.batch_claims.git_json(ctx.repo)',
+  "    counts = {e: sum(e[0] <= f['rva'] < e[1] and f['build_id'] == build for f in data['functions']) for e in entries}",
+  '    urls = []',
+  '    for title, text, chunk in contrib.batch_claims.parts(build, entries, public, me, counts=counts):',
+  "        url = gh.create_issue(title, text.rstrip('\\n') + '\\n\\nPull request: ' + a['pr'] + '\\n')",
+  '        if not url:',
+  "            print(json.dumps({'ok': False, 'urls': urls, 'error': 'gh is not signed in: no claim issue was opened'}))",
+  '            sys.exit(0)',
+  '        urls.append(url)',
+  "        for fn in functions:",
+  "            if any(x <= fn['rva'] < y for x, y in chunk):",
+  "                old = contrib.local_claims(ctx).get('0x%x' % fn['rva'], {})",
+  "                contrib.save_local_claim(ctx, fn['rva'], dict(old, status='published', url=url))",
+  "    print(json.dumps({'ok': True, 'urls': urls}))",
+  'except contrib.Stop as exc:',
+  "    print(json.dumps({'ok': False, 'urls': [], 'error': str(getattr(exc, 'message', None) or exc)}))",
+  'except Exception as exc:',
+  "    print(json.dumps({'ok': False, 'urls': [], 'error': f'{type(exc).__name__}: {exc}'}))",
 ].join('\n');
 
 /**
