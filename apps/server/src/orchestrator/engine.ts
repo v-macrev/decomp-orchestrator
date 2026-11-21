@@ -16,7 +16,7 @@ import {
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
 import { posix } from 'node:path';
-import type { RunRow, Store, TaskRow } from '../db/store.js';
+import type { BatchFix, RunRow, Store, TaskRow } from '../db/store.js';
 import { GateKeeper, type Reviewer } from '../gatekeeper/gatekeeper.js';
 import { LlmReviewer, extractJson } from '../gatekeeper/review.js';
 import { ComplexityClassifier } from '../intel/complexity.js';
@@ -1124,6 +1124,88 @@ export class RunEngine {
   }
 
   /**
+   * What fixing a batch with the AI agents would send back to the workers. A batch that failed
+   * re-verification: the packets its combined tree no longer matched, with the comparator's lines. A
+   * staged batch whose dry run failed: the packets of the units the dry run blamed, with its lines.
+   * Other contributors' claims and upstream findings are not code problems, so they are left out.
+   */
+  async fixPlan(runId: string, batchId: string): Promise<{ check: BatchFix['check']; targets: Array<{ task: TaskRow; reasons: string[] }>; why: string | null }> {
+    const { store } = this.deps;
+    const batch = store.getBatch(batchId);
+    if (!batch || batch.runId !== runId) throw new Error('batch not found');
+    const named = (p: string) => (/^(task_[\w,]+):/.exec(p)?.[1] ?? '').split(',').filter(Boolean);
+    if (batch.status === 'failed') {
+      const d = (batch.detail ?? {}) as { problems?: string[]; failedTaskIds?: string[] };
+      const problems = d.problems ?? [];
+      const ids = new Set(d.failedTaskIds?.length ? d.failedTaskIds : problems.flatMap(named));
+      const passed = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t && t.state === 'passed');
+      const targets = passed.filter((t) => ids.has(t.id)).map((task) => {
+        const own = problems.filter((p) => named(p).includes(task.id));
+        return { task, reasons: own.length ? own : problems };
+      });
+      return { check: 're-verify', targets, why: targets.length ? null : 'its re-verification names no packet that is still matched (a git or tooling problem, not the code): re-verify it again instead' };
+    }
+    if (batch.status !== 'branch_ready') return { check: 're-verify', targets: [], why: `it is ${batch.status}` };
+    const [work] = this.changeableBatches(runId, [batchId]);
+    const last = (batch.detail as { lastSubmit?: { ok?: boolean; dryRun?: boolean } } | null)?.lastSubmit;
+    if (!last || last.ok !== false) return { check: 'dry-run', targets: [], why: 'its last dry run did not fail' };
+    const blame = await this.blockingUnits(runId, batchId);
+    const units = new Map(Object.entries(blame.units).map(([u, rs]) => [u, rs.filter((r) => !/upstream/i.test(r))] as const).filter(([, rs]) => rs.length));
+    const targets = work!.tasks.filter((t) => units.has(t.unit)).map((task) => ({ task, reasons: units.get(task.unit)! }));
+    const why = targets.length ? null
+      : Object.keys(blame.units).length ? 'upstream already has or changed what the dry run blamed: set those units aside'
+      : blame.claims.length ? 'only other contributors\' claims block it, and no code change fixes that'
+      : `the dry run names no unit of this batch${blame.unattributed.length ? `: ${blame.unattributed[0]!.slice(0, 200)}` : ''}`;
+    return { check: 'dry-run', targets, why };
+  }
+
+  /**
+   * Fix a batch that failed a check with the run's AI workers: its failing packets go back to the
+   * worker queue at the tier that matched them, with what the check reported, and the run runs again
+   * through its own flow (workers, Gate Keeper, escalation). The batch is superseded; its other
+   * packets stay matched and, with the fixed ones, are batched and re-verified when the run finishes.
+   */
+  async fixBatchWithAgents(runId: string, batchId: string) {
+    const { store, repo, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be fixed`);
+    if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
+    if (budgetReached(row)) throw new Error(`run budget $${row.config.budgetUsd} reached ($${row.costUsd.toFixed(2)} spent): raise it before fixing with the agents`);
+    const batch = store.getBatch(batchId);
+    if (!batch || batch.runId !== runId) throw new Error('batch not found');
+    const plan = await this.fixPlan(runId, batchId);
+    if (!plan.targets.length) throw new Error(`batch ${batch.seq} has nothing the agents can fix: ${plan.why}`);
+    const fns = plan.targets.reduce((n, t) => n + t.task.functions.length, 0);
+    const r = await this.exclusive(`sending batch ${batch.seq} of ${runId} to the AI agents`, async () => {
+      const b = store.getBatch(batchId)!;
+      const at = Date.now();
+      const prior = { ...(b.detail as Record<string, unknown> | null) };
+      delete prior.dryRunFingerprint;
+      delete prior.dryRunUncheckedClaims;
+      const fixed = { at, check: plan.check, taskIds: plan.targets.map((t) => t.task.id), functions: fns, reasons: Object.fromEntries(plan.targets.map((t) => [t.task.id, t.reasons])) };
+      if (b.status === 'branch_ready') {
+        if (repo.deleteBatchBranch && b.branch === `decomp/${runId}-b${b.seq}`) for (const branch of [`${b.branch}-pr`, b.branch]) await repo.deleteBatchBranch(branch);
+        store.unstageBatch(b, { ...prior, fixed });
+      } else {
+        store.updateBatch(batchId, { detail: { ...prior, fixed } });
+      }
+      store.updateBatch(batchId, { status: 'superseded' });
+      let requeued = 0;
+      for (const { task, reasons } of plan.targets) {
+        if (store.requeueForFix(runId, task.id, { batchId, seq: b.seq, check: plan.check, reasons, at, verdictId: task.lastVerdictId })) requeued++;
+      }
+      store.setRunStatus(runId, 'running', ['completed']);
+      events.emit('batch.sent_to_agents', `batch ${b.seq}: ${fns} function(s) in ${requeued} packet(s) sent back to the AI agents to fix what its ${plan.check === 're-verify' ? 're-verification' : 'dry run'} reported; the rest stays matched and is batched again when the run finishes`, {
+        runId, level: 'warn', data: { seq: b.seq, check: plan.check, requeued, functions: fns },
+      });
+      return { requeued, functions: fns, kept: b.taskIds.length - requeued };
+    });
+    await this.start(runId);
+    return { ok: true as const, seq: batch.seq, check: plan.check, ...r, status: store.getRun(runId)?.status ?? 'running' };
+  }
+
+  /**
    * When a withheld packet's blocking claim has lapsed (a day without activity), recheck the run's
    * withheld packets on its own: only while nothing else holds the slots, at most every 30 minutes.
    */
@@ -2037,7 +2119,9 @@ export class RunEngine {
     if (!task.lastVerdictId) return null;
     const verdict = this.deps.store.getVerdict(task.lastVerdictId);
     const attempt = verdict ? this.deps.store.getAttempt(verdict.attemptId) : null;
-    return verdict && attempt ? { verdict, attempt, history } : null;
+    // A packet sent back from a failed batch check: its first fix attempt reads what the check reported.
+    const fix = task.fix && task.fix.verdictId === task.lastVerdictId ? task.fix : undefined;
+    return verdict && attempt ? { verdict, attempt, history, ...(fix ? { fix } : {}) } : null;
   }
 
   /** Latest accepted files per path for packets of the same unit in this run. */

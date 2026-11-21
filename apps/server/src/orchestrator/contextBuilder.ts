@@ -36,7 +36,7 @@ import { charsFor, clipToTokens, estimateTokens } from '../util/tokens.js';
 import { collapsePlaceholderSlots, elideBodies } from './edits.js';
 import { FINDING_GUIDANCE, failureCategory, failureSignals } from './lessons.js';
 import { bestScore, renderHistory } from './history.js';
-import { WORKER_CONTRACT_V2, buildStaticPrefix, type Feedback } from './prompts.js';
+import { WORKER_CONTRACT_V2, buildStaticPrefix, fixSummary, type Feedback } from './prompts.js';
 
 export interface BuildOptionsV2 {
   runId: string;
@@ -388,7 +388,12 @@ export function findSignature(qualified: string, sources: string[]): string | nu
 
 
 /** Structured verdict + only the failing functions' previous bodies — never the whole previous file. */
-export function renderRetryDelta({ verdict, attempt, history }: Feedback, task: TaskRow, maxTokens: number): { text: string; category: string; rawTokens: number; failing: string[] } {
+export function renderRetryDelta({ verdict, attempt, history, fix }: Feedback, task: TaskRow, maxTokens: number): { text: string; category: string; rawTokens: number; failing: string[] } {
+  if (fix) {
+    const lines = ['<retry category="BATCH_FIX">', ...fixSummary(fix, task, attempt.n), '</retry>'];
+    const failing = task.functions.map((f) => f.name).filter((n): n is string => !!n);
+    return { text: clipToTokens(lines.join('\n'), maxTokens).text, category: 'BATCH_FIX', rawTokens: estimateTokens(lines.join('\n')), failing };
+  }
   const blocks = verdict.findings.filter((f) => f.severity === 'block');
   const cats = [...new Set(blocks.map((f) => failureCategory(f.code)))];
   const category = cats[0] ?? (verdict.decision === 'pass' ? 'PASS' : 'OTHER');

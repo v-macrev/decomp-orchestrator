@@ -231,6 +231,10 @@ export interface Batch {
     supersededBy?: number[];
     /** Units this batch set aside (held out of PRs), with the findings that blocked each. */
     setAside?: { at: number; why: string; taskIds: string[]; units: string[]; reasons: Record<string, string[]> };
+    /** Packets whose re-verification failed in the batch's combined tree. */
+    failedTaskIds?: string[];
+    /** Packets sent back to the AI agents to fix what a check of this batch reported. */
+    fixed?: { at: number; check: 're-verify' | 'dry-run'; taskIds: string[]; functions: number; reasons: Record<string, string[]> };
     lastSubmit?: {
       at: number; dryRun: boolean; ok: boolean; cancelled?: boolean; submissionStarted?: boolean; problems: string[]; blockers: string[]; uncheckedClaims?: string[]; warnings: string[]; plan: string[]; error: string | null; branch: string;
       /** sr tasks recompiled, and those whose last compare still proved the tree (not recompiled). */
@@ -380,6 +384,7 @@ export const api = {
   nextWithheldLapse: (id: string) => req<{ at: number | null }>('GET', `/api/runs/${id}/withheld/next-lapse`),
   restageFailed: (id: string) => req<{ ok: true } & StageResult>('POST', `/api/runs/${id}/batches/restage-failed`, {}),
   prepareAll: (id: string) => req<{ ok: true; started: true }>('POST', `/api/runs/${id}/prepare`, {}),
+  fixBatch: (id: string, batchId: string) => req<{ ok: boolean; seq: number; check: 're-verify' | 'dry-run'; requeued: number; functions: number; kept: number; status: string }>('POST', `/api/runs/${id}/batches/${batchId}/fix`, {}),
   tidyPullRequest: (id: string, batchId: string) => req<{ ok: boolean; title: string | null; warnings: string[]; error: string | null }>('POST', `/api/runs/${id}/batches/${batchId}/tidy-pr`, { confirm: true }),
   setAsideBlocking: (id: string, batchId: string) => req<SetAsideResult>('POST', `/api/runs/${id}/batches/${batchId}/set-aside`, {}),
   setAsideUpstream: (id: string) => req<SetAsideUpstreamResult>('POST', `/api/runs/${id}/batches/set-aside-upstream`, {}),

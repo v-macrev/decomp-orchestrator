@@ -41,6 +41,20 @@ export interface TaskRow extends Task {
   providerFailures: number;
   /** Worker instance that last leased the packet (per-worker function cap). */
   assignedWorker?: string | null;
+  /** Set when the packet was sent back to the worker tiers because its batch failed a check. */
+  fix?: BatchFix | null;
+}
+
+/** Why a matched packet went back to the AI workers: the batch check it failed and what it reported. */
+export interface BatchFix {
+  batchId: string;
+  seq: number;
+  /** 're-verify': the batch's combined tree no longer matched it; 'dry-run': `sr submit --dry-run` blamed its unit. */
+  check: 're-verify' | 'dry-run';
+  reasons: string[];
+  at: number;
+  /** The passing verdict it had: its first fix attempt reads these reasons; later ones the Gate Keeper's. */
+  verdictId: string | null;
 }
 
 type Raw = Record<string, any>;
@@ -58,6 +72,7 @@ function toTask(r: Raw): TaskRow {
     difficulty: (r.difficulty ?? 'medium') as Difficulty, complexity: r.complexity ?? 0,
     attemptsAtDifficulty: r.attempts_at_difficulty ?? 0, assessment: p<ComplexityAssessment | null>(r.assessment_json, null),
     assignedWorker: r.assigned_worker ?? null,
+    fix: p<BatchFix | null>(r.fix_json, null),
   };
 }
 
@@ -404,6 +419,16 @@ export class Store {
   getBatch(id: string) {
     const runId = (this.db.prepare('SELECT run_id FROM pr_batches WHERE id = ?').get(id) as Raw | undefined)?.run_id as string | undefined;
     return runId ? (this.listBatches(runId).find((b) => b.id === id) ?? null) : null;
+  }
+  /**
+   * Send a matched packet back to the worker queue at its tier to be fixed: fresh per-tier counters,
+   * the fix reasons kept on the packet. Its accepted attempt stays its last verdict until a new one.
+   */
+  requeueForFix(runId: string, taskId: string, fix: BatchFix): boolean {
+    return this.db.prepare(`UPDATE tasks SET state = 'pending', attempts_at_tier = 0, attempts_at_difficulty = 0, no_improvement_streak = 0,
+        best_exact_bytes = 0, infra_failures = 0, provider_failures = 0, not_before = 0, lease_id = NULL, lease_expires_at = NULL,
+        fix_json = ?, updated_at = ?
+      WHERE id = ? AND run_id = ? AND state = 'passed'`).run(j(fix), Date.now(), taskId, runId).changes > 0;
   }
   unstageBatch(batch: NonNullable<ReturnType<Store['getBatch']>>, detail: unknown) {
     this.tx(() => {

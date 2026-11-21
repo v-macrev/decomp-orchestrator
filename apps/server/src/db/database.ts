@@ -337,6 +337,10 @@ const MIGRATIONS: string[] = [
   CREATE VIEW task_complexity AS SELECT id AS task_id, run_id, difficulty AS complexity_tier, complexity AS complexity_score, assigned_worker FROM tasks;
   CREATE VIEW shared_run_discoveries AS SELECT * FROM run_knowledge_cache;
   `,
+  // A packet sent back to the worker tiers because its batch failed a check: what the check reported.
+  `
+  ALTER TABLE tasks ADD COLUMN fix_json TEXT;
+  `,
 ];
 
 export function openDatabase(path: string): DB {

@@ -62,7 +62,7 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
         progress: (_s, detail, done, total) => opts.progress?.(step, detail, done, total),
       });
       const ok = r.verified && !!r.branch;
-      store.updateBatch(id, { status: ok ? 'branch_ready' : 'failed', branch: ok ? r.branch : null, detail: { problems: r.problems, functions: fnCount, draftedBy, models } });
+      store.updateBatch(id, { status: ok ? 'branch_ready' : 'failed', branch: ok ? r.branch : null, detail: { problems: r.problems, ...(r.failedTaskIds?.length ? { failedTaskIds: r.failedTaskIds } : {}), functions: fnCount, draftedBy, models } });
       if (!ok) {
         summary.failed++;
         events.emit('batch.failed', `batch ${seq}: ${fnCount} functions NOT staged, no branch created; packets stay passed and can be staged again: ${r.problems.join('; ') || 'no branch'}`, { runId, level: 'warn', data: { seq, problems: r.problems } });

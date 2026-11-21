@@ -630,9 +630,13 @@ function batchView(b: Batch): { tone: Tone; title: string; why: string; action: 
   if (b.status === 'submitted') return { tone: 'ok', title: 'Pull request open', why: d?.pr ? 'Submitted upstream. Follow the review on GitHub.' : 'Submitted: open the pull request by hand from the link below.', action: 'none', steps };
   if (b.status === 'draft') return { tone: 'next', title: 'Being checked now', why: 'Re-verifying it in a clean tree; see the progress at the top.', action: 'none', steps };
   if (b.status === 'interrupted') return { tone: 'bad', title: 'Interrupted by a restart', why: 'A server restart stopped its check. Nothing was committed and nothing is lost: check it again.', action: 'restage', steps };
-  if (b.status === 'failed') return { tone: 'bad', title: 'Its check failed', why: 'Some packets did not match in a clean tree. Check again: packets that still fail are split off on their own.', action: 'restage', steps };
+  if (b.status === 'failed') return { tone: 'bad', title: 'Its check failed', why: 'Some packets did not match in a clean tree. Check again (a restart or a flaky compile clears on its own), or let the AI agents fix the packets that fail.', action: 'restage', steps };
   if (b.status === 'superseded') {
-    const held = [d?.withheld ? `${d.withheld.taskIds.length} packet(s) held back for claims` : '', d?.setAside ? `${d.setAside.taskIds.length} packet(s) set aside (${d.setAside.why})` : ''].filter(Boolean).join(', ');
+    const held = [
+      d?.withheld ? `${d.withheld.taskIds.length} packet(s) held back for claims` : '',
+      d?.setAside ? `${d.setAside.taskIds.length} packet(s) set aside (${d.setAside.why})` : '',
+      d?.fixed ? `${d.fixed.functions} function(s) in ${d.fixed.taskIds.length} packet(s) sent back to the AI agents to fix its ${d.fixed.check === 're-verify' ? 'check' : 'dry run'}; the rest is batched again when the run finishes` : '',
+    ].filter(Boolean).join(', ');
     return { tone: 'muted', title: 'Replaced', why: `${held || 'Its packets were checked again'}${d?.supersededBy?.length ? `; the rest moved to batch ${d.supersededBy.join(', ')}` : ''}.`, action: 'none', steps };
   }
   if (claimed) return { tone: 'bad', title: 'Someone else claimed part of it', why: `Other contributors have open claims or PRs on ${claimed} function(s), so sr submit refuses it. Hold those units back; the rest becomes a new batch.`, action: 'drop', steps };
@@ -775,6 +779,93 @@ function OperationPanel({ op, runId }: { op: OperationProgress; runId: string })
   );
 }
 
+type HeldReason = 'merged' | 'untracked' | 'changed' | 'dryrun' | 'claimed' | 'fixing';
+const HELD_LABEL: Record<HeldReason, string> = {
+  merged: 'Already merged upstream',
+  untracked: 'No longer tracked upstream',
+  changed: 'Upstream changed the file',
+  dryrun: 'Blocked a dry run',
+  claimed: 'Claimed by someone else',
+  fixing: 'Being fixed by AI agents',
+};
+const HELD_HINT: Record<HeldReason, string> = {
+  merged: 'Upstream data/progress.json already records these functions as matched: nothing to submit for them.',
+  untracked: 'Upstream data/progress.json no longer lists these functions.',
+  changed: 'Upstream changed a file these units write since they were batched: submitting would overwrite their version.',
+  dryrun: 'sr submit --dry-run blamed their unit (lint, origin statements, a failed compare…).',
+  claimed: "Another contributor's open claim or PR names a function in their unit.",
+  fixing: 'Sent back to the AI agents from a failed check: they come back to a batch when the run finishes.',
+};
+
+/** Why each held-back function is out of the PRs, from the set-aside findings, the withheld claims and the agents' fixes. */
+function heldBackReasons(batches: Batch[]) {
+  const byFn = new Map<string, { reason: HeldReason; rva: string; name: string | null; unit: string; detail: string }>();
+  const latest = [...batches].sort((x, y) => y.seq - x.seq);
+  for (const b of latest) {
+    const sa = b.detail?.setAside;
+    for (const f of b.functions) {
+      const key = `${f.taskId}:${f.rva}`;
+      if (byFn.has(key)) continue;
+      if (f.state === 'withheld') {
+        const claims = b.detail?.claimCheck?.collisions[f.rva] ?? [];
+        byFn.set(key, { reason: 'claimed', rva: f.rva, name: f.name, unit: f.unit, detail: claims.map((c) => issueNo(c.url)).join(', ') || 'held back with its unit' });
+      } else if (f.state === 'set_aside' && sa?.units.includes(f.unit)) {
+        const reasons = sa.reasons[f.unit] ?? [];
+        const names = (re: RegExp) => reasons.find((r) => re.test(r) && r.toLowerCase().includes(f.rva.toLowerCase()));
+        const merged = names(/already matched upstream/i);
+        const untracked = names(/no longer tracked upstream/i);
+        const changed = reasons.find((r) => /upstream changed this file/i.test(r));
+        const reason: HeldReason = merged ? 'merged' : untracked ? 'untracked' : changed ? 'changed' : 'dryrun';
+        byFn.set(key, { reason, rva: f.rva, name: f.name, unit: f.unit, detail: merged ?? untracked ?? changed ?? reasons[0] ?? sa.why });
+      } else if (['pending', 'leased', 'gating'].includes(f.state) && b.detail?.fixed?.taskIds.includes(f.taskId)) {
+        byFn.set(key, { reason: 'fixing', rva: f.rva, name: f.name, unit: f.unit, detail: `from batch ${b.seq}` });
+      }
+    }
+  }
+  const counts = Object.fromEntries((Object.keys(HELD_LABEL) as HeldReason[]).map((k) => [k, 0])) as Record<HeldReason, number>;
+  for (const v of byFn.values()) counts[v.reason]++;
+  return { counts, rows: [...byFn.values()] };
+}
+
+/** KPIs: why matched functions are not in a pull request yet, each with the functions behind it. */
+function HeldBackKpis({ batches }: { batches: Batch[] }) {
+  const { counts, rows } = heldBackReasons(batches);
+  const [show, setShow] = useState<HeldReason | null>(null);
+  if (!rows.length) return null;
+  const tone: Record<HeldReason, string | undefined> = { merged: 'var(--ok)', untracked: undefined, changed: 'var(--warn)', dryrun: 'var(--bad)', claimed: 'var(--warn)', fixing: undefined };
+  const list = show ? rows.filter((r) => r.reason === show) : [];
+  return (
+    <div className="panel stack" style={{ gap: 8 }}>
+      <div><h2 style={{ marginBottom: 4 }}>Why functions are held back</h2><span className="muted small">{rows.length} matched function(s) are not in a pull request yet. Click a number to see them.</span></div>
+      <div className="kpis">
+        {(Object.keys(HELD_LABEL) as HeldReason[]).map((k) => (
+          <button key={k} type="button" className={`kpi kpi-btn${show === k ? ' on' : ''}`} title={HELD_HINT[k]} disabled={!counts[k]} onClick={() => setShow(show === k ? null : k)} aria-pressed={show === k}>
+            <div className="v" style={counts[k] && tone[k] ? { color: tone[k] } : undefined}>{counts[k]}</div>
+            <div className="l">{HELD_LABEL[k]}</div>
+          </button>
+        ))}
+      </div>
+      {show && (
+        <div style={{ overflowX: 'auto' }}>
+          <p className="muted small" style={{ margin: '2px 0 6px' }}>{HELD_HINT[show]}</p>
+          <table className="fns">
+            <thead><tr><th>Function</th><th>Unit</th><th>Reason</th></tr></thead>
+            <tbody>
+              {list.map((r) => (
+                <tr key={`${r.unit}-${r.rva}`}>
+                  <td><span className="mono">{r.rva}</span> {r.name ?? ''}</td>
+                  <td className="mono" style={{ fontSize: 12 }}>{r.unit.slice(r.unit.lastIndexOf('/') + 1)}</td>
+                  <td style={{ fontSize: 12 }}>{r.detail}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Set-aside units across the run, with the findings that blocked each, and Put back. */
 function SetAsideList({ batches, locked, busy, putBack }: { batches: Batch[]; locked: boolean; busy: string | null; putBack: (units?: string[]) => void }) {
   // The latest batch that set a unit aside knows why.
@@ -911,6 +1002,10 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
     if (!r.ok) throw new Error(`Batch ${b.seq}'s pull request was not rewritten: ${r.error ?? 'unknown error'}`);
     return `Batch ${b.seq}'s pull request is now one commit titled "${r.title}".${r.warnings.length ? ` ${r.warnings.join(' ')}` : ''}`;
   });
+  const fix = (b: Batch) => run(`fix-${b.id}`, async () => {
+    const r = await api.fixBatch(runId, b.id);
+    return `Batch ${b.seq}: ${r.functions} function(s) in ${r.requeued} packet(s) went back to the AI agents with what its ${r.check === 're-verify' ? 'check' : 'dry run'} reported. The run is running again through its flow${r.kept ? `; its other ${r.kept} packet(s) stay matched` : ''}, and everything is batched again when it finishes.`;
+  });
   const putBack = (units?: string[]) => run('put-back', async () => {
     const r = await api.putBackSetAside(runId, units);
     return `${r.returnedTasks} set-aside packet(s) put back.${restaged(r.staged)}`;
@@ -1033,13 +1128,21 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
     const findings = last && !last.ok ? [...last.problems, ...last.blockers, ...(last.uncheckedClaims ?? []), ...(last.error && !last.problems.length && !last.blockers.length ? [last.error] : [])] : [];
     const units = new Set(b.functions.map((f) => f.unit)).size;
     const idle = !(b.dryRunState || busy === `dry-${b.id}`);
+    // A failed check the code can fix: re-verification, or dry-run findings other than claims and upstream.
+    const fixable = completed && idle && (b.status === 'failed' || (b.status === 'branch_ready' && !!last?.dryRun && !last.ok && findings.some((x) => !isClaimBlocker(x) && !/upstream/i.test(x))));
+    const fixButton = fixable && (
+      <ConfirmButton className="" disabled={locked} onConfirm={() => fix(b)} confirmLabel="Send the failing packets back to the AI agents? The run starts again."
+        title="The packets this check failed go back to the run's AI workers, at the tier that matched them, with what the check reported; they run through the flow again (workers, Gate Keeper, escalation). The other packets stay matched, and everything is batched and checked again when the run finishes. Nothing is pushed.">
+        {busy === `fix-${b.id}` ? 'Sending to the agents…' : 'Fix with AI agents'}
+      </ConfirmButton>
+    );
     return (
       <article key={b.id} className="bcard" aria-label={`Batch ${b.seq}`}>
         <div className="top"><h4>Batch {b.seq}</h4><span className="muted small grow">{b.functions.length || d?.functions || '?'} functions{units ? ` · ${units} unit${units === 1 ? '' : 's'}` : ''}</span></div>
         <div className={`state ${v.tone}`}>{v.title}</div>
         <p className="why">{v.why}</p>
         <StepDots steps={v.steps} />
-        <div className="actions">{primary(b)}{d?.claims?.length ? <span className="small">Claim: {d.claims.map((u, i) => <span key={u}>{i ? ', ' : ''}<a href={u} target="_blank" rel="noreferrer">{issueNo(u)} ↗</a></span>)}</span> : null}</div>
+        <div className="actions">{primary(b)}{fixButton}{d?.claims?.length ? <span className="small">Claim: {d.claims.map((u, i) => <span key={u}>{i ? ', ' : ''}<a href={u} target="_blank" rel="noreferrer">{issueNo(u)} ↗</a></span>)}</span> : null}</div>
         <details className="more">
           <summary>Details and more actions</summary>
           <div className="stack" style={{ gap: 10, marginTop: 8 }}>
@@ -1100,6 +1203,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
         </div>
       )}
       {sorted.length > 0 && <div className="cards">{sorted.map(card)}</div>}
+      <HeldBackKpis batches={batches} />
       {(withheld > 0 || setAside > 0) && (
         <div className="panel stack">
           <div><h2 style={{ marginBottom: 4 }}>Held back</h2><span className="muted">These matched but are kept out of pull requests for now. Nothing is lost.</span></div>

@@ -802,4 +802,64 @@ describe('handling what blocks a batch', () => {
     await s.engine.dropCollidingPackets(run.id, next.id);
     expect(s.engine.nextWithheldLapse(run.id)).toBe(Date.parse('2026-11-20T10:00:00Z') + 24 * 3_600_000);
   }, 60_000);
+
+  it('"Fix with AI agents" sends a failed batch\'s failing packets through the flow again and batches them when the run finishes', async () => {
+    const s = setup();
+    const run = createRun(s, 'fix', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = batchOf(s, run.id);
+    const [victim, ...rest] = batch.taskIds.map((id) => s.store.getTask(id)!);
+    const passedVerdict = victim!.lastVerdictId;
+    const attemptsBefore = victim!.attemptsTotal;
+    // As if re-verification had failed for one packet in the combined tree.
+    s.store.unstageBatch(batch, { problems: [`${victim!.id}: ${victim!.functions[0]!.rva} mismatch at +0x12`], failedTaskIds: [victim!.id] });
+    s.store.updateBatch(batch.id, { status: 'failed' });
+    const plan = await s.engine.fixPlan(run.id, batch.id);
+    expect(plan.targets.map((t) => t.task.id)).toEqual([victim!.id]);
+    expect(plan.targets[0]!.reasons[0]).toMatch(/mismatch at \+0x12/);
+
+    const r = await s.engine.fixBatchWithAgents(run.id, batch.id);
+    expect(r).toMatchObject({ ok: true, check: 're-verify', requeued: 1, kept: rest.length });
+    expect(s.store.getTask(victim!.id)!.fix).toMatchObject({ batchId: batch.id, check: 're-verify', verdictId: passedVerdict });
+    expect(s.store.getBatch(batch.id)).toMatchObject({ status: 'superseded', detail: expect.objectContaining({ fixed: expect.objectContaining({ taskIds: [victim!.id] }) }) });
+    await s.engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    const after = s.store.getTask(victim!.id)!;
+    expect(after.attemptsTotal).toBeGreaterThan(attemptsBefore);
+    expect(after.lastVerdictId).not.toBe(passedVerdict);
+    // The fixed packet and the ones kept matched are batched and re-verified again.
+    expect(after.state).toBe('staged');
+    for (const t of rest) expect(s.store.getTask(t.id)!.state).toBe('staged');
+    await expect(s.engine.fixBatchWithAgents(run.id, batch.id)).rejects.toThrow(/nothing the agents can fix/);
+  }, 60_000);
+
+  it('"Fix with AI agents" takes the units a failed dry run blamed, never claims or upstream findings', async () => {
+    const s = setup();
+    const run = createRun(s, 'fix-dry', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = batchOf(s, run.id);
+    const tasks = batch.taskIds.map((id) => s.store.getTask(id)!);
+    const victim = tasks[0]!;
+    const withDry = (blockers: string[]) => s.store.updateBatch(batch.id, { detail: { ...(s.store.getBatch(batch.id)!.detail as Record<string, unknown>), lastSubmit: { dryRun: true, ok: false, blockers, problems: [] } } });
+    withDry(['contrib-x: another open claim or pull request names 0x1: https://github.com/o/r/issues/1']);
+    await expect(s.engine.fixBatchWithAgents(run.id, batch.id)).rejects.toThrow(/claims block it/);
+    withDry([`${victim.unit}:1: already matched upstream: ${victim.functions[0]!.rva}; nothing to submit for it`]);
+    await expect(s.engine.fixBatchWithAgents(run.id, batch.id)).rejects.toThrow(/upstream already has/);
+    withDry([`${victim.unit}:1: missing reconstruction origin statement in leading header`]);
+    const plan = await s.engine.fixPlan(run.id, batch.id);
+    expect(new Set(plan.targets.map((t) => t.task.unit))).toEqual(new Set([victim.unit]));
+    const r = await s.engine.fixBatchWithAgents(run.id, batch.id);
+    expect(r.check).toBe('dry-run');
+    expect(r.requeued).toBe(tasks.filter((t) => t.unit === victim.unit).length);
+    await s.engine.waitFor(run.id);
+    // Back through the flow: attempted again by the workers (the simulator's agent repeats its passing
+    // candidate, which the Gate Keeper refuses as a repeat; a model reads the dry-run finding instead).
+    const after = s.store.getTask(victim.id)!;
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    expect(after.attemptsTotal).toBeGreaterThan(victim.attemptsTotal);
+    expect(['staged', 'dead']).toContain(after.state);
+    for (const t of tasks.filter((x) => x.unit !== victim.unit)) expect(s.store.getTask(t.id)!.state).toBe('staged');
+  }, 60_000);
 });

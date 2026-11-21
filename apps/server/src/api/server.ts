@@ -309,6 +309,15 @@ export async function buildServer(app: App) {
     }
     return { ok: true, started: true };
   });
+  // Fix a batch that failed a check with the run's AI workers: its failing packets run through the flow again.
+  f.post('/api/runs/:id/batches/:batchId/fix', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return await engine.fixBatchWithAgents(req.params.id, req.params.batchId);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   // Rewrite a submitted batch's open PR as one commit naming every function (force-pushes the fork's PR branch).
   f.post('/api/runs/:id/batches/:batchId/tidy-pr', async (req: FastifyRequest<{ Params: { id: string; batchId: string }; Body: { confirm?: boolean } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');

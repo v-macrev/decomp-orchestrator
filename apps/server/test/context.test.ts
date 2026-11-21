@@ -119,6 +119,18 @@ describe('retry delta', () => {
     expect(r.text).not.toContain('Other40');
     expect(r.rawTokens).toBeGreaterThan(r.text.length / 3.3 * 3);
   });
+
+  it('tells a packet sent back from a failed batch check what the check reported, not that it was rejected', () => {
+    const attempt = { n: 3, files: [] } as unknown as Attempt;
+    const verdict = { decision: 'pass', findings: [], compare: [] } as unknown as Verdict;
+    const fix = { batchId: 'b', seq: 7, check: 're-verify' as const, reasons: ['task_a,task_b: 0x100010 fail code-mismatch first mismatch at +0x8'], at: 1, verdictId: 'v' };
+    const r = renderRetryDelta({ verdict, attempt, fix }, task(), 600);
+    expect(r.category).toBe('BATCH_FIX');
+    expect(r.text).toContain('batch 7 was re-verified');
+    expect(r.text).toContain('- 0x100010 fail code-mismatch first mismatch at +0x8');
+    expect(r.text).not.toContain('task_a');
+    expect(r.text).not.toContain('rejected');
+  });
 });
 
 describe('budgeted bundle', () => {

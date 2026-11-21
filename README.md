@@ -114,7 +114,12 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    a time: re-verify failed batches, set aside the units a dry
    run blamed (or that upstream already matched or changed: **Check against upstream**), and put
    them back later. A dry run checks upstream first and recompiles only packets whose last compare
-   no longer proves the tree.
+   no longer proves the tree. **Fix with AI agents** on a batch whose check or dry run failed
+   (`POST /api/runs/:id/batches/:batchId/fix`) sends the packets it failed back to the run's worker
+   tiers with what the check reported, and the run goes through its flow again; claims and upstream
+   findings are not code problems and are never sent. **Why functions are held back** counts the
+   matched functions not in a PR by cause: already merged upstream, no longer tracked, upstream
+   changed the file, blocked a dry run, claimed by someone else, being fixed by the agents.
 6. Runs can be edited (`PATCH /api/runs/:id`: name, drafted-by, budget, functions per PR) and
    deleted (`DELETE /api/runs/:id`, which releases the local claims the run still holds). A new
    run can carry the dead functions of earlier runs (`config.carry.fromRuns`). Set

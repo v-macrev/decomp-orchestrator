@@ -10,7 +10,7 @@
 // prefix, and packet skills use packet-static triggers only, so retries re-read breakpoint 2.
 import { createHash } from 'node:crypto';
 import type { Attempt, ContextBundle, TaskContextBundle, Verdict } from '@decomp/core';
-import type { TaskRow } from '../db/store.js';
+import type { BatchFix, TaskRow } from '../db/store.js';
 import type { PromptBlock } from '../providers/types.js';
 import type { HistoryEntry } from './history.js';
 
@@ -60,6 +60,23 @@ export interface Feedback {
   attempt: Attempt;
   /** Every earlier attempt of the packet (oldest first); the last entry is `attempt`. */
   history?: HistoryEntry[];
+  /** The packet matched (`verdict` is its pass) but its batch failed a check: fix that, not a rejection. */
+  fix?: BatchFix;
+}
+
+/** What to tell a worker about a batch check its matched packet failed. */
+export function fixSummary(fix: BatchFix, task: TaskRow, attemptNo: number): string[] {
+  const names = task.functions.map((f) => f.name ?? f.rva).join(', ');
+  const what = fix.check === 're-verify'
+    ? `when batch ${fix.seq} was re-verified as one tree with the other packets of this run, the comparator no longer matched it`
+    : `the repository's \`sr submit --dry-run\` of batch ${fix.seq} blamed this unit`;
+  return [
+    `Attempt ${attemptNo} matched on its own and was accepted, but ${what}.`,
+    `The unit files you are given already hold the other packets' accepted functions. Make ${names} pass again in this combined unit, fix exactly what the check reports, and keep every other function as it is.`,
+    'What the check reported:',
+    ...fix.reasons.slice(0, 8).map((r) => `- ${r.replace(/^task_[\w,]+:\s*/, '').slice(0, 600)}`),
+    ...(fix.reasons.length > 8 ? [`- … ${fix.reasons.length - 8} more`] : []),
+  ];
 }
 
 export function buildWorkerPrompt(task: TaskRow, bundle: ContextBundle, attemptNo: number, feedback: Feedback | null, pitfalls: string[]): string {
@@ -76,7 +93,7 @@ export function buildWorkerPrompt(task: TaskRow, bundle: ContextBundle, attemptN
     parts.push(`<${tag} title="${s.title.replace(/"/g, "'")}" source="${s.source.replace(/"/g, "'")}">\n${s.content}\n</${tag}>`);
   }
   if (pitfalls.length) parts.push(`<repository title="Common rejections in this run">\n${pitfalls.map((p) => `- ${p}`).join('\n')}\n</repository>`);
-  if (feedback) parts.push(renderFeedback(feedback));
+  if (feedback) parts.push(renderFeedback(feedback, task));
   parts.push(attemptNo === 1 ? 'Produce the unit now.' : `This is attempt ${attemptNo}. Fix the specific problems in <feedback>; keep what already matched.`);
   return parts.join('\n\n');
 }
@@ -172,9 +189,9 @@ export function renderBundle(bundle: TaskContextBundle, attemptNo: number, cache
   return { system, blocks, prompt: blocks.map((b) => b.text).join('\n\n') };
 }
 
-function renderFeedback({ verdict, attempt }: Feedback): string {
-  const lines: string[] = [`Previous attempt ${attempt.n}: ${verdict.decision}.`];
-  if (verdict.compare?.length) {
+function renderFeedback({ verdict, attempt, fix }: Feedback, task: TaskRow): string {
+  const lines: string[] = fix ? fixSummary(fix, task, attempt.n) : [`Previous attempt ${attempt.n}: ${verdict.decision}.`];
+  if (verdict.compare?.length && !fix) {
     lines.push('Comparator results:');
     for (const c of verdict.compare) {
       lines.push(`- ${c.rva} ${c.name ?? ''}: ${c.result}${c.reason ? ` (${c.reason})` : ''}${c.firstMismatch ? `, first mismatch ${c.firstMismatch}` : ''}, ${c.exactBytes ?? '?'}/${c.targetSize ?? c.totalBytes ?? '?'} bytes exact${c.candidateSize != null ? `, candidate ${c.candidateSize} B` : ''}${c.hint ? `. Hint: ${c.hint}` : ''}`);
