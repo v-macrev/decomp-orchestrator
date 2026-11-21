@@ -309,6 +309,16 @@ export async function buildServer(app: App) {
     }
     return { ok: true, started: true };
   });
+  // Rewrite a submitted batch's open PR as one commit naming every function (force-pushes the fork's PR branch).
+  f.post('/api/runs/:id/batches/:batchId/tidy-pr', async (req: FastifyRequest<{ Params: { id: string; batchId: string }; Body: { confirm?: boolean } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    if (req.body?.confirm !== true) return reply.code(400).send({ ok: false, error: 'rewriting a pull request needs { "confirm": true }' });
+    try {
+      return await engine.tidyPullRequest(req.params.id, req.params.batchId);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   f.post('/api/runs/:id/batches/restage-failed', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');
     try {

@@ -216,6 +216,8 @@ export interface Batch {
   detail: {
     functions?: number; problems?: string[]; draftedBy?: string | null; models?: string[];
     pr?: string | null; link?: string | null; prBranch?: string; submittedAt?: number;
+    /** The batch PR's title (every function), and when an open PR was rewritten as one commit. */
+    prTitle?: string | null; tidiedAt?: number;
     dryRunFingerprint?: string;
     dryRunBase?: string | null;
     /** Tasks whose claims the last dry run could not check: a real submission must accept them explicitly. */
@@ -376,6 +378,7 @@ export const api = {
   nextWithheldLapse: (id: string) => req<{ at: number | null }>('GET', `/api/runs/${id}/withheld/next-lapse`),
   restageFailed: (id: string) => req<{ ok: true } & StageResult>('POST', `/api/runs/${id}/batches/restage-failed`, {}),
   prepareAll: (id: string) => req<{ ok: true; started: true }>('POST', `/api/runs/${id}/prepare`, {}),
+  tidyPullRequest: (id: string, batchId: string) => req<{ ok: boolean; title: string | null; warnings: string[]; error: string | null }>('POST', `/api/runs/${id}/batches/${batchId}/tidy-pr`, { confirm: true }),
   setAsideBlocking: (id: string, batchId: string) => req<SetAsideResult>('POST', `/api/runs/${id}/batches/${batchId}/set-aside`, {}),
   setAsideUpstream: (id: string) => req<SetAsideUpstreamResult>('POST', `/api/runs/${id}/batches/set-aside-upstream`, {}),
   putBackSetAside: (id: string, units?: string[]) => req<{ ok: true; returnedTasks: number; staged: StageResult }>('POST', `/api/runs/${id}/set-aside/put-back`, units ? { units } : {}),

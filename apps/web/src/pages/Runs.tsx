@@ -906,6 +906,11 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
     if (!hit.length) return `Checked ${r.batches.length} batch(es) against upstream: nothing to set aside.`;
     return `Set aside ${r.setAsideFunctions} function(s) upstream already has or changed, from batch ${hit.map((x) => x.seq).join(', ')}.${restaged(r.staged)}`;
   });
+  const tidyPr = (b: Batch) => run(`tidy-${b.id}`, async () => {
+    const r = await api.tidyPullRequest(runId, b.id);
+    if (!r.ok) throw new Error(`Batch ${b.seq}'s pull request was not rewritten: ${r.error ?? 'unknown error'}`);
+    return `Batch ${b.seq}'s pull request is now one commit titled "${r.title}".${r.warnings.length ? ` ${r.warnings.join(' ')}` : ''}`;
+  });
   const putBack = (units?: string[]) => run('put-back', async () => {
     const r = await api.putBackSetAside(runId, units);
     return `${r.returnedTasks} set-aside packet(s) put back.${restaged(r.staged)}`;
@@ -1061,6 +1066,12 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
                 {canOverride && <ConfirmButton className="tiny" disabled={locked} onConfirm={() => submit(b, true, true)} confirmLabel={`Submit with ${unchecked.length} task(s) unchecked?`} title={`Not checked: ${unchecked.join('; ')}. The submission probes again and still refuses any known collision.`}>Submit with unchecked claims</ConfirmButton>}
                 {canClear && (last?.dryRun || d?.dryRunFingerprint) && <ConfirmButton className="tiny" disabled={locked} onConfirm={() => clear(b, 'preview')} confirmLabel="Clear the dry run?">Clear dry run</ConfirmButton>}
                 {canClear && <ConfirmButton className="tiny danger" disabled={locked} onConfirm={() => clear(b, 'batch')} confirmLabel="Delete its local branches?">Delete branch</ConfirmButton>}
+              </div>
+            )}
+            {b.status === 'submitted' && d?.prBranch && units > 1 && (
+              <div className="row">
+                <ConfirmButton className="tiny" disabled={locked} onConfirm={() => tidyPr(b)} confirmLabel="Rewrite the PR as one commit (force-push)?" title="Squashes the PR branch into one commit and retitles the commit and the pull request with every function of the batch. Refused if anyone else pushed to the branch.">{busy === `tidy-${b.id}` ? 'Rewriting…' : d.tidiedAt ? 'Rewrite the PR again' : 'Make it one commit naming every function'}</ConfirmButton>
+                {d.prTitle && <span className="muted small">Title: {d.prTitle}</span>}
               </div>
             )}
             {b.functions.length > 0 && (

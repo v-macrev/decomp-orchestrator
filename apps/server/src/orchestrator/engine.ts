@@ -1369,7 +1369,7 @@ export class RunEngine {
         warnings: r.warnings, plan: r.plan, error: r.error, branch,
       } };
       if (r.ok && !opts.dryRun) {
-        store.updateBatch(batchId, { status: 'submitted', detail: { ...detail, pr: r.pullRequest, link: r.link, prBranch: branch, submittedAt: Date.now() } });
+        store.updateBatch(batchId, { status: 'submitted', detail: { ...detail, pr: r.pullRequest, link: r.link, prBranch: branch, prTitle: r.title ?? null, submittedAt: Date.now() } });
         events.emit('batch.submitted', `batch ${batch.seq}: ${all.fnCount} functions submitted → ${r.pullRequest ?? r.link ?? branch}`, { runId, data: { pr: r.pullRequest, link: r.link, branch, uncheckedClaims: r.uncheckedClaims ?? [], allowUncheckedClaims: input.allowUncheckedClaims } });
       } else {
         store.updateBatch(batchId, { detail });
@@ -1379,6 +1379,36 @@ export class RunEngine {
       return r;
     }).finally(() => {
       if (dryRun && this.dryRuns.get(batchId) === dryRun) this.dryRuns.delete(batchId);
+    });
+  }
+
+  /**
+   * Rewrite a submitted batch's open PR as one commit on its base, with a commit message, title and
+   * description that name every function of the batch (PRs opened before submissions did this).
+   * Force-pushes the fork's PR branch only while it still matches the local copy.
+   */
+  async tidyPullRequest(runId: string, batchId: string) {
+    const { store, events, repo } = this.deps;
+    const batch = store.getBatch(batchId);
+    if (!batch || batch.runId !== runId) throw new Error('batch not found');
+    const d = { ...(batch.detail as Record<string, unknown> | null) } as Record<string, unknown> & { pr?: string | null; prBranch?: string };
+    if (batch.status !== 'submitted' || !d.prBranch) throw new Error(`batch ${batch.seq} has no open pull request`);
+    if (!repo.tidyPullRequest) throw new Error('this repository adapter cannot rewrite pull requests');
+    const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
+    const ordered = [...tasks].sort((a, b) => a.unit.localeCompare(b.unit));
+    const lastUnit = ordered.at(-1)!.unit;
+    const submitTask = [...ordered].reverse().find((t) => t.unit === lastUnit)!;
+    const sequence = [...ordered.filter((t) => t !== submitTask), submitTask];
+    const all = batchContent(store, runId, sequence);
+    return this.exclusive(`tidying the pull request of ${runId} b${batch.seq}`, async () => {
+      this.progress(`Batch ${batch.seq}: one commit, and a title and description naming every function`, d.pr ?? d.prBranch ?? null);
+      const r = await repo.tidyPullRequest!({
+        branch: d.prBranch!, draftedBy: all.draftedBy ?? (all.person ?? 'not stated'), pullRequest: d.pr ?? null,
+        tasks: sequence.map((t) => ({ id: t.id, srTaskId: t.srTaskId, functions: t.functions, task: t })),
+      });
+      if (r.ok) store.updateBatch(batchId, { detail: { ...d, prTitle: r.title, tidiedAt: Date.now() } });
+      events.emit(r.ok ? 'batch.pr_tidied' : 'batch.pr_tidy_failed', `batch ${batch.seq}: ${r.ok ? `pull request is one commit titled "${r.title}"` : `pull request not rewritten: ${r.error}`}`, { runId, level: r.ok ? 'info' : 'warn', data: { pr: d.pr, warnings: r.warnings } });
+      return r;
     });
   }
 

@@ -26,6 +26,7 @@ import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
 import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
+import { batchPrText, type CompareSummary } from './batchPr.js';
 
 interface ProgressInventory {
   target_build_id?: string;
@@ -807,6 +808,7 @@ export class SrRepo implements RepoAdapter {
     } catch (e) {
       return { ...out, problems: [`staging worktree: ${(e as Error).message.slice(0, 200)}`] };
     }
+    let restoreUnit: (() => Promise<void>) | null = null;
     try {
       // The same tree the PR will carry, from the base, re-verified packet by packet: this also
       // writes each task's last-compare.json, which `sr submit` checks against the unit's digest.
@@ -828,11 +830,10 @@ export class SrRepo implements RepoAdapter {
         return r.stdout;
       };
       await git(['checkout', '-q', '-B', input.branch]);
-      const others = input.files.map((f) => f.path).filter((f) => !unit.includes(f));
-      if (others.length) {
-        await git(['add', '--', ...others]);
-        await git(['commit', '-q', '-m', input.message]);
-      }
+      // `sr submit` commits exactly its task's unit files: while it runs, that unit names every file
+      // of the batch, so the whole batch is one commit and sr's staged checks cover all of it.
+      const others = [...new Set(input.files.map((f) => f.path))].filter((f) => !unit.includes(f));
+      if (others.length) restoreUnit = await this.widenUnit(tdir, [...unit, ...others], unit);
       // `sr submit` needs the network (claims check, push, gh) and the operator's own git/gh
       // credentials: it runs on the host, never in the sandbox, and without SR_CONTRIB_OFFLINE.
       const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_NO_SIBLING_NAMES: '1', SR_UPSTREAM: this.upstream, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', GIT_TERMINAL_PROMPT: '0' };
@@ -895,25 +896,129 @@ export class SrRepo implements RepoAdapter {
             out.warnings.push(`${t.srTaskId}: could not record the submission: ${(e as Error).message.slice(0, 200)}`);
           }
         }
-        // `sr submit` titles and describes the PR from the submitted task; name the whole batch.
-        if (out.pullRequest && (input.title || input.extraBody)) {
-          const bodyFile = this.p.join(tdir, 'pr-body-batch.md');
-          try {
-            const body = readFileSync(this.host.fsPath(this.p.join(tdir, 'pr-body.md')), 'utf8');
-            writeFileSync(this.host.fsPath(bodyFile), `${body.trimEnd()}\n\n${input.extraBody ?? ''}\n`, 'utf8');
-            const edit = await this.host.run('gh', ['pr', 'edit', out.pullRequest, ...(input.title ? ['--title', input.title] : []), '--body-file', bodyFile], { cwd: p, timeoutMs: 120_000 });
-            if (edit.code !== 0) out.warnings.push(`gh pr edit: ${(edit.stderr || edit.stdout).trim().slice(0, 300)}; the PR keeps sr submit's title and body`);
-          } catch (e) {
-            out.warnings.push(`PR body: ${(e as Error).message.slice(0, 200)}`);
-          }
+        // `sr submit` titles the commit and the PR from the submitted task alone: name the whole batch.
+        if (new Set(input.tasks.map((t) => t.srTaskId)).size > 1) {
+          input.progress?.('Naming the whole batch: one commit, and the PR title and description list every function', input.branch, null, null);
+          const tidy = await this.tidyCheckedOut(slot, { branch: input.branch, tasks: input.tasks, draftedBy: input.draftedBy, pullRequest: out.pullRequest, bodyDir: tdir });
+          out.warnings.push(...tidy.warnings);
+          if (tidy.title) out.title = tidy.title;
         }
       }
       return out;
     } catch (e) {
       return { ...out, ok: false, error: (e as Error).message };
     } finally {
+      await restoreUnit?.().catch((e: Error) => out.warnings.push(`could not restore the sr task's unit list: ${e.message.slice(0, 200)}`));
       // The pushed branch stays (it is the PR); the staging worktree goes back to the base.
       await this.reset(slot).catch(() => undefined);
+    }
+  }
+
+  /** Name `files` as the sr task's unit; the returned function puts `original` back (keeping anything sr recorded meanwhile). */
+  private async widenUnit(tdir: string, files: string[], original: string[]) {
+    const file = this.host.fsPath(this.p.join(tdir, 'task.json'));
+    const setUnit = (unit: string[]) => this.srMutex.run('sr-local', async () => {
+      const task = JSON.parse(readFileSync(file, 'utf8')) as Record<string, unknown> & { contrib?: Record<string, unknown> };
+      writeFileSync(file, `${JSON.stringify({ ...task, contrib: { ...task.contrib, unit } }, null, 2)}\n`, 'utf8');
+    });
+    await setUnit(files);
+    return () => setUnit(original);
+  }
+
+  /**
+   * Make an open batch PR read as one piece of work: one commit on the base with every function in
+   * its message, and a title and description that list every function (per-unit comparator reports
+   * included). Works on the branch's local copy and refuses when the fork's branch moved since.
+   */
+  async tidyPullRequest(input: { branch: string; tasks: SubmitBatchInput['tasks']; draftedBy: string; pullRequest: string | null }): Promise<{ ok: boolean; title: string | null; warnings: string[]; error: string | null }> {
+    const slot = this.slotCount;
+    const p = this.wt(slot);
+    if (!/^decomp\/run_[a-z0-9]+-b[1-9]\d*-pr$/.test(input.branch)) return { ok: false, title: null, warnings: [], error: 'not a batch PR branch' };
+    const last = input.tasks.at(-1);
+    if (!last?.srTaskId || !/^[A-Za-z0-9._-]+$/.test(last.srTaskId)) return { ok: false, title: null, warnings: [], error: 'the batch has no sr task' };
+    try {
+      await this.ensureWorktree(slot);
+      const co = await this.git(p, ['checkout', '-q', input.branch]);
+      if (co.code !== 0) return { ok: false, title: null, warnings: [], error: `git checkout: ${co.stderr.trim().slice(0, 300)}` };
+      const r = await this.tidyCheckedOut(slot, { ...input, bodyDir: this.p.join(this.cfg.localDir, 'contrib', 'tasks', last.srTaskId) });
+      return { ok: r.ok, title: r.title, warnings: r.warnings, error: r.ok ? null : r.warnings.at(-1) ?? 'not tidied' };
+    } catch (e) {
+      return { ok: false, title: null, warnings: [], error: (e as Error).message.slice(0, 300) };
+    } finally {
+      await this.reset(slot).catch(() => undefined);
+    }
+  }
+
+  /** See tidyPullRequest: `branch` is checked out in `slot`. */
+  private async tidyCheckedOut(slot: number, input: { branch: string; tasks: SubmitBatchInput['tasks']; draftedBy: string; pullRequest: string | null; bodyDir: string }): Promise<{ ok: boolean; title: string | null; warnings: string[] }> {
+    const p = this.wt(slot);
+    const warnings: string[] = [];
+    const fail = (why: string) => ({ ok: false, title: null, warnings: [...warnings, why] });
+    const git = async (args: string[]) => {
+      const r = await this.git(p, args);
+      if (r.code !== 0) throw new Error(`git ${args[0]}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+      return r.stdout.trim();
+    };
+    try {
+      // Every sr task's last compare, in batch order: the evidence the description reports.
+      const groups: Array<{ id: string; summary: CompareSummary }> = [];
+      for (const t of input.tasks) {
+        if (!t.srTaskId || groups.some((g) => g.id === t.srTaskId)) continue;
+        const raw = readFileSync(this.host.fsPath(this.p.join(this.cfg.localDir, 'contrib', 'tasks', t.srTaskId, 'last-compare.json')), 'utf8');
+        groups.push({ id: t.srTaskId, summary: JSON.parse(raw) as CompareSummary });
+      }
+      const pr = batchPrText(groups.map((g) => g.summary), input.draftedBy);
+      // Only an open PR is rewritten: a merged or closed one stays exactly as the project took it.
+      const m = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(input.pullRequest ?? '');
+      if (m) {
+        const state = await this.host.run('gh', ['api', `repos/${m[1]}/${m[2]}/pulls/${m[3]}`, '--jq', '.state + " " + (.merged | tostring)'], { cwd: p, timeoutMs: 120_000 });
+        const [st, merged] = state.stdout.trim().split(/\s+/);
+        if (state.code !== 0) return fail(`could not read the pull request's state (${(state.stderr || state.stdout).trim().slice(0, 200)}): nothing was rewritten`);
+        if (st !== 'open') return fail(`the pull request is ${merged === 'true' ? 'already merged' : st}: nothing was rewritten`);
+      }
+      const base = await git(['merge-base', 'HEAD', this.sha]);
+      const head = await git(['rev-parse', 'HEAD']);
+      const tree = await git(['rev-parse', 'HEAD^{tree}']);
+      const remote = (await this.git(p, ['config', '--get', `branch.${input.branch}.remote`])).stdout.trim();
+      if (!/^[\w.-]+$/.test(remote)) return fail(`no push remote recorded for ${input.branch}: the PR keeps its commits, title and description`);
+      const env = { GIT_TERMINAL_PROMPT: '0' };
+      const remoteTip = await this.host.run('git', ['ls-remote', remote, `refs/heads/${input.branch}`], { cwd: p, env, timeoutMs: 120_000 });
+      const tip = remoteTip.stdout.trim().split(/\s+/)[0] ?? '';
+      if (remoteTip.code !== 0 || tip !== head) return fail(`the fork's ${input.branch} is ${tip ? `at ${tip.slice(0, 10)}` : 'unreadable'}, not the local ${head.slice(0, 10)}: someone else pushed, so nothing was rewritten`);
+      const count = Number(await git(['rev-list', '--count', `${base}..HEAD`]));
+      const message = await git(['log', '-1', '--format=%B', 'HEAD']);
+      if (count !== 1 || message.trim() !== pr.message.trim()) {
+        await git(['reset', '-q', '--soft', base]);
+        await git(['commit', '-q', '-m', pr.message]);
+        if ((await git(['rev-parse', 'HEAD^{tree}'])) !== tree) {
+          await git(['reset', '-q', '--soft', head]);
+          return fail('the squashed commit would not carry the same files: nothing was pushed');
+        }
+        const push = await this.host.run('git', ['push', `--force-with-lease=refs/heads/${input.branch}:${head}`, remote, `HEAD:refs/heads/${input.branch}`], { cwd: p, env, timeoutMs: 300_000 });
+        if (push.code !== 0) {
+          await git(['reset', '-q', '--soft', head]);
+          return fail(`git push: ${(push.stderr || push.stdout).trim().slice(0, 300)}; the PR keeps its ${count} commit(s)`);
+        }
+      }
+      // sr's own description of the submitted task carries the label and origin checks of every
+      // file (sr ran them over the whole branch): keep it, with every function's rows and reports.
+      let srBody = '';
+      try {
+        srBody = readFileSync(this.host.fsPath(this.p.join(input.bodyDir, 'pr-body.md')), 'utf8');
+      } catch {
+        warnings.push('sr submit\'s pr-body.md is gone: the description is rebuilt from the template without the label and origin checks');
+      }
+      const template = srBody || ((await this.baseFile('.github/PULL_REQUEST_TEMPLATE/function.md')) ?? '');
+      const body = pr.body(template, this.sha.slice(0, 12));
+      const bodyFile = this.p.join(input.bodyDir, 'pr-body-batch.md');
+      writeFileSync(this.host.fsPath(bodyFile), body, 'utf8');
+      if (!m) return { ok: true, title: pr.title, warnings: [...warnings, `no pull request URL: title it "${pr.title}" and paste ${bodyFile} as its description`] };
+      // REST, not `gh pr edit`: that one reads the retired Projects (classic) API and fails.
+      const edit = await this.host.run('gh', ['api', '-X', 'PATCH', `repos/${m[1]}/${m[2]}/pulls/${m[3]}`, '-f', `title=${pr.title}`, '-F', `body=@${bodyFile}`], { cwd: p, timeoutMs: 120_000 });
+      if (edit.code !== 0) return fail(`gh api: ${(edit.stderr || edit.stdout).trim().slice(0, 300)}; the commit is tidied, the PR keeps its title and description`);
+      return { ok: true, title: pr.title, warnings };
+    } catch (e) {
+      return fail(`tidying the PR: ${(e as Error).message.slice(0, 300)}`);
     }
   }
 

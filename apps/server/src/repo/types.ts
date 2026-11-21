@@ -132,11 +132,14 @@ export interface RepoAdapter {
   recordAttribution?(input: { task: TaskRow; srTaskId: string; model: string; draftedBy: string; slot?: number }): Promise<{ ok: boolean; problems: string[] }>;
   /**
    * Open one pull request for a staged batch with the repository's own `sr submit`: rebuild the
-   * batch on a fresh branch from the base, re-verify every packet, commit every unit but the last,
-   * then submit the last unit's task (which commits it, pushes the branch and opens the PR).
-   * `dryRun` runs `sr submit --dry-run`: nothing is committed for the submitted unit or pushed.
+   * batch on a fresh branch from the base, re-verify every packet, then submit through the last
+   * unit's task with every file of the batch as its unit: one commit, pushed, one PR. A batch of
+   * several units then gets a commit message, title and description naming every function.
+   * `dryRun` runs `sr submit --dry-run`: nothing is committed or pushed.
    */
   submitBatch?(input: SubmitBatchInput): Promise<SubmitBatchResult>;
+  /** Rewrite an open batch PR as one commit, titled and described with every function of the batch. */
+  tidyPullRequest?(input: { branch: string; tasks: SubmitBatchInput['tasks']; draftedBy: string; pullRequest: string | null }): Promise<{ ok: boolean; title: string | null; warnings: string[]; error: string | null }>;
   /** Delete an orchestrator-owned local batch ref. */
   deleteBatchBranch?(branch: string): Promise<boolean>;
   /**
@@ -209,6 +212,8 @@ export interface SubmitBatchResult {
   warnings: string[];
   plan: string[];
   pullRequest: string | null;
+  /** The title the batch PR was given (every function of the batch), when it was renamed. */
+  title?: string | null;
   /** When gh could not open the PR: the compare link to open it by hand. */
   link: string | null;
   error: string | null;
