@@ -257,6 +257,25 @@ export async function buildServer(app: App) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
+  // Withhold the batch's packets that other contributors' open claims or PRs name (whole units) and
+  // stage the rest as a new batch. Reads GitHub; deletes the old batch's local branches; pushes nothing.
+  f.post('/api/runs/:id/batches/:batchId/drop-collisions', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.dropCollidingPackets(req.params.id, req.params.batchId)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  // Check withheld packets against open claims again and stage the units that are clear now.
+  f.post('/api/runs/:id/withheld/recheck', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.recheckWithheld(req.params.id)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   f.post('/api/runs/:id/batches/:batchId/cancel-dry-run', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
     try {
       engine.cancelBatchDryRun(req.params.id, req.params.batchId);

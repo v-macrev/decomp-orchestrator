@@ -208,7 +208,7 @@ export class ShadowEvaluator {
   private async benchmark(cand: MatchableSkill, base: MatchableSkill | null, n: number): Promise<BenchCase[]> {
     const { store } = this.d;
     const rows = store.db.prepare(`SELECT t.id FROM tasks t JOIN runs r ON r.id = t.run_id
-      WHERE r.status IN ('completed', 'cancelled', 'failed') AND t.attempts_total > 0 AND t.state IN ('passed', 'staged', 'dead', 'quarantined', 'cancelled')
+      WHERE r.status IN ('completed', 'cancelled', 'failed') AND t.attempts_total > 0 AND t.state IN ('passed', 'staged', 'withheld', 'dead', 'quarantined', 'cancelled')
       ORDER BY t.updated_at DESC LIMIT 800`).all() as Array<{ id: string }>;
     const failed: BenchCase[] = [];
     const passed: BenchCase[] = [];
@@ -221,7 +221,7 @@ export class ShadowEvaluator {
       if (!run) continue;
       const verdicts = store.verdictsForTask(task.id);
       const firstFail = verdicts.find((v) => v.decision !== 'pass') ?? null;
-      const failedBefore = task.state !== 'passed' && task.state !== 'staged' ? true : task.attemptsTotal >= 2;
+      const failedBefore = task.state !== 'passed' && task.state !== 'staged' && task.state !== 'withheld' ? true : task.attemptsTotal >= 2;
       const ctx = await this.matchContext(task, firstFail);
       const hit = this.matcher.evaluate(cand, ctx) ?? (base ? this.matcher.evaluate(base, ctx) : null);
       if (!hit) continue;

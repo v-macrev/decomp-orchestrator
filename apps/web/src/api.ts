@@ -217,8 +217,40 @@ export interface Batch {
     dryRunFingerprint?: string;
     /** Tasks whose claims the last dry run could not check: a real submission must accept them explicitly. */
     dryRunUncheckedClaims?: string[];
+    /** Last claims check: functions other contributors' open claims or PRs name. */
+    claimCheck?: { at: number; collisions: Record<string, ClaimCollision[]> };
+    /** Packets this batch withheld for colliding claims, and the batches its other packets went to. */
+    withheld?: { taskIds: string[]; units: string[] };
+    supersededBy?: number[];
     lastSubmit?: { at: number; dryRun: boolean; ok: boolean; cancelled?: boolean; submissionStarted?: boolean; problems: string[]; blockers: string[]; uncheckedClaims?: string[]; warnings: string[]; plan: string[]; error: string | null; branch: string };
   } | null;
+}
+
+export interface ClaimCollision {
+  url: string;
+  author: string | null;
+  updatedAt: string | null;
+}
+
+interface StageResult { staged: number; failed: number; seqs: number[] }
+
+export interface DropCollisionsResult {
+  ok: true;
+  withheldTasks: number;
+  withheldFunctions: number;
+  keptTasks: number;
+  units: string[];
+  collisions: Record<string, ClaimCollision[]>;
+  staged: StageResult | null;
+  deleted: string[];
+}
+
+export interface RecheckWithheldResult {
+  ok: true;
+  returnedTasks: number;
+  stillWithheldTasks: number;
+  collisions: Record<string, ClaimCollision[]>;
+  staged: StageResult | null;
 }
 
 export interface SubmitResult {
@@ -272,6 +304,8 @@ export const api = {
   deleteRun: (id: string) => req<{ ok: boolean; released: number; failed?: Array<{ rva: string; error: string }> }>('DELETE', `/api/runs/${id}`),
   stageRun: (id: string) => req<{ ok: boolean; staged: number; failed: number }>('POST', `/api/runs/${id}/stage`, {}),
   submitBatch: (id: string, batchId: string, real: boolean, allowUncheckedClaims = false) => req<SubmitResult>('POST', `/api/runs/${id}/batches/${batchId}/submit`, real ? { dryRun: false, confirm: true, allowUncheckedClaims } : { dryRun: true }),
+  dropCollisions: (id: string, batchId: string) => req<DropCollisionsResult>('POST', `/api/runs/${id}/batches/${batchId}/drop-collisions`, {}),
+  recheckWithheld: (id: string) => req<RecheckWithheldResult>('POST', `/api/runs/${id}/withheld/recheck`, {}),
   cancelBatchDryRun: (id: string, batchId: string) => req<{ ok: true }>('POST', `/api/runs/${id}/batches/${batchId}/cancel-dry-run`, {}),
   clearBatchBranches: (id: string, batchId: string, scope: 'preview' | 'batch') => req<{ deleted: string[] }>('DELETE', `/api/runs/${id}/batches/${batchId}/branches`, { scope }),
   knowledge: (id: string) => req<KnowledgeEntry[]>('GET', `/api/runs/${id}/knowledge`),

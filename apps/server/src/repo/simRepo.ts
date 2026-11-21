@@ -10,7 +10,7 @@ import { simIdent, type SimOracle } from '../providers/mock.js';
 import { sleep } from '../util/async.js';
 import { clipMiddle } from './srRepo.js';
 import { hashUnit as hashUnitSim, simDocs, simFeatures, simPack, simSharedHeader, simTrap, simTrapRecipes, type SimTrapInfo } from './simContent.js';
-import type { Backlog, CompareOutcome, DiscoveredFunction, InventoryEntry, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
+import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, InventoryEntry, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult } from './types.js';
 
 export interface SimRepoOptions {
   slots: number;
@@ -49,6 +49,8 @@ export class SimRepo implements RepoAdapter, SimOracle {
   private realistic: boolean;
   private sharedHeader: string | null = null;
   compares = 0;
+  /** Open claims by other contributors, by RVA (tests set it; the simulator has none). */
+  claimedByOthers = new Map<string, ClaimCollision[]>();
 
   constructor(private opts: SimRepoOptions) {
     this.realistic = opts.realisticContext ?? true;
@@ -202,6 +204,15 @@ export class SimRepo implements RepoAdapter, SimOracle {
       };
     });
     return { completed: true, allPass: functions.every((f) => f.result === 'pass'), compileError: false, functions, infraError: null };
+  }
+
+  async claimCollisions(rvas: string[]): Promise<ClaimCollisionCheck> {
+    const collisions: Record<string, ClaimCollision[]> = {};
+    for (const rva of new Set(rvas)) {
+      const hit = this.claimedByOthers.get(rva);
+      if (hit?.length) collisions[rva] = hit;
+    }
+    return { checked: true, error: null, collisions };
   }
 
   /** Re-verify every packet against the combined final unit files (what a PR would contain). */

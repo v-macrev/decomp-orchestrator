@@ -100,7 +100,11 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    (`POST /api/runs/:id/batches/:batchId/submit`): the batch is rebuilt from the base,
    re-verified, and submitted with the repo's own `sr submit`, one pull request per batch.
    Nothing is pushed unless you click **Submit PR** after a clean dry run (the API needs
-   `{ "dryRun": false, "confirm": true }`).
+   `{ "dryRun": false, "confirm": true }`). If other contributors claimed some of a batch's
+   functions after your run picked them, **Drop colliding packets**
+   (`POST /api/runs/:id/batches/:batchId/drop-collisions`) withholds those units (task state
+   `withheld`, local claims kept) and restages the rest as a new batch. **Recheck withheld**
+   (`POST /api/runs/:id/withheld/recheck`) batches them again once those claims lapse or close.
 6. Runs can be edited (`PATCH /api/runs/:id`: name, drafted-by, budget, functions per PR) and
    deleted (`DELETE /api/runs/:id`, which releases the local claims the run still holds). A new
    run can carry the dead functions of earlier runs (`config.carry.fromRuns`). Set

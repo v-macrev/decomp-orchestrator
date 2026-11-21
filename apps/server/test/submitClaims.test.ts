@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskRow } from '../src/db/store.js';
-import { SrRepo, submitClaimsCheck } from '../src/repo/srRepo.js';
+import { SrRepo, claimCollisionResult, submitClaimsCheck } from '../src/repo/srRepo.js';
 import type { RunResult } from '../src/util/proc.js';
 
 const run = (stdout: string, extra: Partial<RunResult> = {}): RunResult => ({
@@ -90,5 +90,24 @@ describe('upstream repository', () => {
       await repo.sr('/w', ['next'], { timeoutMs: 1000 });
       expect(seen.at(-1)).toMatchObject({ SR_UPSTREAM: slug, SR_CONTRIB_OFFLINE: '1' });
     }
+  });
+});
+
+describe('claim collision probe', () => {
+  const item = { url: 'https://github.com/o/r/issues/606', author: 'V0id-array', updated_at: '2026-11-20T23:48:18Z' };
+  it('reports only the asked-for colliding functions from a complete report', () => {
+    const out = run(JSON.stringify({ checked: true, me: 'me', collisions: { '0x24ff10': [item], '0xdead': [item], '0x1': 'junk' } }));
+    expect(claimCollisionResult(out, ['0x24ff10', '0x1562a0', '0x1'])).toEqual({
+      checked: true, error: null,
+      collisions: { '0x24ff10': [{ url: item.url, author: 'V0id-array', updatedAt: item.updated_at }] },
+    });
+  });
+
+  it('treats anything short of a complete report as not checked', () => {
+    expect(claimCollisionResult(run(JSON.stringify({ checked: false, error: 'offline' })), ['0x1'])).toMatchObject({ checked: false, error: 'offline' });
+    expect(claimCollisionResult(run('Traceback ...', { code: 1, stderr: 'ImportError' }), ['0x1'])).toMatchObject({ checked: false });
+    expect(claimCollisionResult(run(JSON.stringify({ checked: true, collisions: {} }), { timedOut: true }), ['0x1'])).toMatchObject({ checked: false });
+    expect(claimCollisionResult(run(JSON.stringify({ checked: true, collisions: {} }), { truncated: true }), ['0x1'])).toMatchObject({ checked: false });
+    expect(claimCollisionResult(run('not json'), ['0x1'])).toMatchObject({ checked: false });
   });
 });

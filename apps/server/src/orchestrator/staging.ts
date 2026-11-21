@@ -15,11 +15,17 @@ export interface StageSummary {
   staged: number;
   /** Batches that failed re-verification or git: no branch, packets still 'passed'. */
   failed: number;
+  /** Sequence numbers of the batches this call created. */
+  seqs: number[];
 }
 
-export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus, runId: string, batchSize: number): Promise<StageSummary> {
-  const summary: StageSummary = { staged: 0, failed: 0 };
-  const passed = store.listTasks(runId, { state: 'passed', limit: 100_000 });
+/**
+ * Stage the run's 'passed' packets, or only `only` of them (those still 'passed'), into batches.
+ */
+export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus, runId: string, batchSize: number, only?: readonly string[]): Promise<StageSummary> {
+  const summary: StageSummary = { staged: 0, failed: 0, seqs: [] };
+  const pick = only ? new Set(only) : null;
+  const passed = store.listTasks(runId, { state: 'passed', limit: 100_000 }).filter((t) => !pick || pick.has(t.id));
   if (!passed.length) return summary;
   const byUnit = new Map<string, TaskRow[]>();
   for (const t of passed) byUnit.set(t.unit, [...(byUnit.get(t.unit) ?? []), t]);
@@ -44,6 +50,7 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
     seq++;
     const id = newId('batch');
     store.createBatch({ id, runId, seq, taskIds: tasks.map((t) => t.id) });
+    summary.seqs.push(seq);
     const { files, fnCount, draftedBy, models, message } = batchContent(store, runId, tasks);
     if (repo.stageBatch) {
       const r = await repo.stageBatch({ runId, seq, files, tasks: tasks.map((t) => ({ id: t.id, srTaskId: t.srTaskId, functions: t.functions, task: t })), message });

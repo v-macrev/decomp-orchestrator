@@ -25,7 +25,7 @@ import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
-import type { Backlog, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult } from './types.js';
+import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult } from './types.js';
 
 interface ProgressInventory {
   target_build_id?: string;
@@ -556,6 +556,21 @@ export class SrRepo implements RepoAdapter {
     return true;
   }
 
+  /**
+   * Fresh open claims and pull requests by others that name these functions, decided by the
+   * repository's own code (`open_items` + `claim_state`, as `sr submit` does): lapsed claims and the
+   * operator's own (by GitHub login or local claim URL) do not count. Reads GitHub; publishes nothing.
+   */
+  async claimCollisions(rvas: string[], opts: { signal?: AbortSignal } = {}): Promise<ClaimCollisionCheck> {
+    const wanted = [...new Set(rvas)].filter((r) => /^0x[0-9a-f]+$/.test(r));
+    if (!wanted.length) return { checked: true, error: null, collisions: {} };
+    const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_NO_SIBLING_NAMES: '1', SR_UPSTREAM: this.upstream, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', GIT_TERMINAL_PROMPT: '0' };
+    const run = await this.host.run(this.cfg.python, ['-c', CLAIM_COLLISIONS_PY, JSON.stringify(wanted)], {
+      cwd: this.cfg.repoPath, env, signal: opts.signal, timeoutMs: 300_000, maxOutputBytes: 8 * 1024 * 1024,
+    });
+    return claimCollisionResult(run, wanted);
+  }
+
   async stageBatch(input: StageBatchInput): Promise<StageBatchResult> {
     const slot = this.slotCount; // dedicated staging worktree after the worker slots
     const p = this.wt(slot);
@@ -900,6 +915,52 @@ export function clipMiddle(text: string, maxChars: number): string {
     j--;
   }
   return [...head, `[… ${j - i + 1} line(s) elided to fit the context budget …]`, ...tail].join('\n');
+}
+
+/** Run from the checkout root: sr's own collision rule for a JSON list of RVAs (argv[1]). */
+export const CLAIM_COLLISIONS_PY = [
+  'import json, sys',
+  "sys.path.insert(0, 'tools')",
+  'import contrib',
+  'rvas = json.loads(sys.argv[1])',
+  'ctx = contrib.Ctx(as_json=True)',
+  'gh = ctx.github()',
+  'try:',
+  '    items = gh.open_items(refresh=True)',
+  '    me = gh.user()',
+  'except contrib.Offline as exc:',
+  "    print(json.dumps({'checked': False, 'error': str(exc)}))",
+  '    sys.exit(0)',
+  "own = {c.get('url') for c in contrib.local_claims(ctx).values() if isinstance(c, dict)}",
+  'out = {}',
+  'for rva in rvas:',
+  "    found = [i for i in items.get(contrib.parse_rva(rva), []) if i.get('url') not in own]",
+  '    _mine, fresh, _stale = contrib.claim_state(found, me)',
+  '    if fresh:',
+  "        out[rva] = [{'url': i.get('url'), 'author': i.get('author'), 'updated_at': str(i.get('updated_at'))} for i in fresh]",
+  "print(json.dumps({'checked': True, 'me': me, 'collisions': out}))",
+].join('\n');
+
+/** Parse the collision probe; anything short of a complete report counts as "not checked". */
+export function claimCollisionResult(run: RunResult, rvas: string[]): ClaimCollisionCheck {
+  const result = parseJsonOutput(run.stdout);
+  const fail = (error: string): ClaimCollisionCheck => ({ checked: false, error, collisions: {} });
+  if (run.timedOut) return fail('the claims check timed out');
+  if (run.aborted) return fail('the claims check was cancelled');
+  if (run.truncated || run.code !== 0 || !result || typeof result !== 'object') {
+    return fail(`the claims check did not complete (exit ${run.code}): ${(run.stderr || run.stdout).trim().slice(-300)}`);
+  }
+  if (result.checked !== true) return fail(String(result.error ?? 'GitHub claims could not be checked').slice(0, 300));
+  const wanted = new Set(rvas);
+  const collisions: Record<string, ClaimCollision[]> = {};
+  for (const [rva, items] of Object.entries((result.collisions ?? {}) as Record<string, unknown>)) {
+    if (!wanted.has(rva) || !Array.isArray(items)) continue;
+    const list = items
+      .filter((i): i is Record<string, unknown> => !!i && typeof i === 'object' && typeof (i as Record<string, unknown>).url === 'string')
+      .map((i) => ({ url: String(i.url), author: typeof i.author === 'string' ? i.author : null, updatedAt: typeof i.updated_at === 'string' ? i.updated_at : null }));
+    if (list.length) collisions[rva] = list;
+  }
+  return { checked: true, error: null, collisions };
 }
 
 /** A collision is evidence even when the probe did not complete cleanly. */

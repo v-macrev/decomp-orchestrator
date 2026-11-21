@@ -99,7 +99,7 @@ describe('staging that fails re-verification', () => {
 
     s.repo.stageBatch = real;
     const r = await s.engine.restage(run.id);
-    expect(r).toEqual({ staged: 1, failed: 0 });
+    expect(r).toEqual({ staged: 1, failed: 0, seqs: [2] });
     const after = s.store.functionCounts(run.id);
     expect(after.passed ?? 0).toBe(0);
     expect(after.staged ?? 0).toBe(fc.passed);
@@ -498,5 +498,70 @@ describe('submitting a staged batch', () => {
     s.store.updateBatch(batch.id, { status: 'failed' });
     (s.repo as RepoAdapter).submitBatch = async () => { throw new Error('must not be called'); };
     await expect(s.engine.submitBatch(run.id, batch.id, { dryRun: true })).rejects.toThrow(/only a re-verified batch/);
+  }, 60_000);
+});
+
+describe('dropping packets that collide with other contributors\' claims', () => {
+  const claim = (n: number, author = 'someone-else') => [{ url: `https://github.com/o/r/issues/${n}`, author, updatedAt: '2026-11-20T23:45:08Z' }];
+
+  it('withholds the colliding units, restages the rest as a new batch, and returns them once the claim is gone', async () => {
+    const s = setup();
+    const run = createRun(s, 'collide', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = s.store.listBatches(run.id).find((b) => b.status === 'branch_ready')!;
+    const tasks = batch.taskIds.map((id) => s.store.getTask(id)!);
+    expect(new Set(tasks.map((t) => t.unit)).size).toBeGreaterThan(1);
+    const victim = tasks[0]!;
+    const unitTasks = tasks.filter((t) => t.unit === victim.unit);
+    s.repo.claimedByOthers.set(victim.functions[0]!.rva, claim(606));
+
+    const r = await s.engine.dropCollidingPackets(run.id, batch.id);
+    expect(r.withheldTasks).toBe(unitTasks.length);
+    expect(r.units).toEqual([victim.unit]);
+    expect(Object.keys(r.collisions)).toEqual([victim.functions[0]!.rva]);
+    for (const t of unitTasks) expect(s.store.getTask(t.id)!.state).toBe('withheld');
+    const old = s.store.getBatch(batch.id)!;
+    expect(old.status).toBe('superseded');
+    expect(old.branch).toBeNull();
+    const detail = old.detail as { withheld: { taskIds: string[] }; supersededBy: number[] };
+    expect(detail.withheld.taskIds.sort()).toEqual(unitTasks.map((t) => t.id).sort());
+    expect(r.staged?.seqs).toEqual(detail.supersededBy);
+    const next = s.store.listBatches(run.id).find((b) => b.seq === detail.supersededBy[0])!;
+    expect(next.status).toBe('branch_ready');
+    expect(next.taskIds.sort()).toEqual(tasks.filter((t) => t.unit !== victim.unit).map((t) => t.id).sort());
+    for (const id of next.taskIds) expect(s.store.getTask(id)!.state).toBe('staged');
+    // Withheld packets are not 'passed': plain staging does not pick them up.
+    await expect(s.engine.restage(run.id)).rejects.toThrow(/no passed packets/);
+    // A clean batch is left as it is.
+    expect(await s.engine.dropCollidingPackets(run.id, next.id)).toMatchObject({ withheldTasks: 0, staged: null });
+    expect(s.store.getBatch(next.id)!.status).toBe('branch_ready');
+
+    // Still claimed: nothing comes back.
+    expect(await s.engine.recheckWithheld(run.id)).toMatchObject({ returnedTasks: 0, stillWithheldTasks: unitTasks.length, staged: null });
+    for (const t of unitTasks) expect(s.store.getTask(t.id)!.state).toBe('withheld');
+    // The claim lapsed: the unit is batched again.
+    s.repo.claimedByOthers.clear();
+    const back = await s.engine.recheckWithheld(run.id);
+    expect(back).toMatchObject({ returnedTasks: unitTasks.length, stillWithheldTasks: 0 });
+    const again = s.store.listBatches(run.id).find((b) => b.seq === back.staged!.seqs[0])!;
+    expect(again.status).toBe('branch_ready');
+    expect(again.taskIds.sort()).toEqual(unitTasks.map((t) => t.id).sort());
+    await expect(s.engine.recheckWithheld(run.id)).rejects.toThrow(/no withheld packets/);
+  }, 60_000);
+
+  it('changes nothing when claims cannot be checked, and never touches a submitted batch', async () => {
+    const s = setup();
+    const run = createRun(s, 'unchecked-claims', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = s.store.listBatches(run.id).find((b) => b.status === 'branch_ready')!;
+    s.repo.claimCollisions = async () => ({ checked: false, error: 'offline', collisions: {} });
+    await expect(s.engine.dropCollidingPackets(run.id, batch.id)).rejects.toThrow(/could not be checked, nothing changed: offline/);
+    expect(s.store.getBatch(batch.id)!.status).toBe('branch_ready');
+    for (const id of batch.taskIds) expect(s.store.getTask(id)!.state).toBe('staged');
+
+    s.store.updateBatch(batch.id, { status: 'submitted', detail: { pr: 'https://github.com/o/r/pull/9' } });
+    await expect(s.engine.dropCollidingPackets(run.id, batch.id)).rejects.toThrow(/only an unsubmitted staged batch/);
   }, 60_000);
 });

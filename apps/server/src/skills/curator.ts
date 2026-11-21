@@ -187,7 +187,7 @@ export class SkillCurator {
     if (!id) return { summary: { note: 'no finished run to mine' }, costUsd: 0 };
     const run = store.getRun(id);
     if (!run) throw new Error(`run ${id} not found`);
-    const rows = store.db.prepare(`SELECT id FROM tasks WHERE run_id = ? AND attempts_total >= 2 AND state IN ('passed', 'staged') ORDER BY attempts_total DESC, priority DESC LIMIT 60`).all(id) as Array<{ id: string }>;
+    const rows = store.db.prepare(`SELECT id FROM tasks WHERE run_id = ? AND attempts_total >= 2 AND state IN ('passed', 'staged', 'withheld') ORDER BY attempts_total DESC, priority DESC LIMIT 60`).all(id) as Array<{ id: string }>;
     if (!rows.length) return { summary: { runId: id, wins: 0, note: 'no retry wins in this run' }, costUsd: 0 };
     if (!model.available()) return { summary: { runId: id, wins: rows.length, note: 'no model in the pool can serve the curator; retry-win mining needs one' }, costUsd: 0 };
     const wins: unknown[] = [];

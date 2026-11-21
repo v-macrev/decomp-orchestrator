@@ -328,6 +328,7 @@ export const TaskState = z.enum([
   'gating', // output written, Gate Keeper running
   'passed', // all gates green, awaiting PR staging
   'staged', // included in a staged PR batch
+  'withheld', // passed, but held out of PRs: another contributor's open claim names one of its unit's functions
   'quarantined', // suspected gaming / host tamper: needs a human
   'dead', // attempts exhausted on every tier
   'cancelled',

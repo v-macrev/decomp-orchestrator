@@ -139,6 +139,25 @@ export interface RepoAdapter {
   submitBatch?(input: SubmitBatchInput): Promise<SubmitBatchResult>;
   /** Delete an orchestrator-owned local batch ref. */
   deleteBatchBranch?(branch: string): Promise<boolean>;
+  /**
+   * Which of these functions another contributor's open claim or pull request names, by the same
+   * rule `sr submit` blocks on (fresh claims only: lapsed ones and the operator's own do not count).
+   */
+  claimCollisions?(rvas: string[], opts?: { signal?: AbortSignal }): Promise<ClaimCollisionCheck>;
+}
+
+export interface ClaimCollision {
+  url: string;
+  author: string | null;
+  updatedAt: string | null;
+}
+
+export interface ClaimCollisionCheck {
+  /** Every function was checked against GitHub. */
+  checked: boolean;
+  error: string | null;
+  /** Colliding functions only: rva → the open claims or PRs naming it. */
+  collisions: Record<string, ClaimCollision[]>;
 }
 
 export interface SubmitBatchInput {

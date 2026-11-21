@@ -62,7 +62,7 @@ export function runMetrics(store: Store, engine: RunEngine, pool: AccountPool, r
     DIFFICULTIES.map((d) => {
       const rows = diffRows.filter((r) => r.difficulty === d);
       const fns = (states: string[]) => rows.filter((r) => states.includes(r.state)).reduce((s, r) => s + r.functions, 0);
-      return [d, { packets: rows.reduce((s, r) => s + r.n, 0), functions: fns(['pending', 'leased', 'gating', 'passed', 'staged', 'dead', 'quarantined', 'cancelled']), open: fns(['pending', 'leased', 'gating']), matched: fns(['passed', 'staged']), dead: fns(['dead', 'quarantined']) }];
+      return [d, { packets: rows.reduce((s, r) => s + r.n, 0), functions: fns(['pending', 'leased', 'gating', 'passed', 'staged', 'withheld', 'dead', 'quarantined', 'cancelled']), open: fns(['pending', 'leased', 'gating']), matched: fns(['passed', 'staged', 'withheld']), dead: fns(['dead', 'quarantined']) }];
     }),
   );
   const inTok = usage.input_tokens ?? 0;
