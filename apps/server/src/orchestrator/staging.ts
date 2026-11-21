@@ -22,7 +22,26 @@ export interface StageSummary {
 /**
  * Stage the run's 'passed' packets, or only `only` of them (those still 'passed'), into batches.
  */
-export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus, runId: string, batchSize: number, opts: { only?: readonly string[]; progress?: ProgressFn } = {}): Promise<StageSummary> {
+/** The most functions one PR may hold (the repository's PR size guidance; RunConfig.prBatchSize's cap). */
+export const PR_BATCH_MAX = 60;
+
+/**
+ * Whole units into as few batches as fit `batchSize` functions each, biggest units first, each into
+ * the first batch with room (a unit bigger than `batchSize` is a batch of its own).
+ */
+export function packUnits<T>(units: Array<{ unit: string; functions: number; items: T[] }>, batchSize: number): T[][] {
+  const bins: Array<{ n: number; items: T[] }> = [];
+  for (const u of [...units].sort((a, b) => b.functions - a.functions || a.unit.localeCompare(b.unit))) {
+    const bin = bins.find((b) => b.n + u.functions <= batchSize);
+    if (bin) {
+      bin.n += u.functions;
+      bin.items.push(...u.items);
+    } else bins.push({ n: u.functions, items: [...u.items] });
+  }
+  return bins.map((b) => b.items);
+}
+
+export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus, runId: string, batchSize: number, opts: { only?: readonly string[]; progress?: ProgressFn; pack?: 'dense' } = {}): Promise<StageSummary> {
   const summary: StageSummary = { staged: 0, failed: 0, seqs: [] };
   const pick = opts.only ? new Set(opts.only) : null;
   const passed = store.listTasks(runId, { state: 'passed', limit: 100_000 }).filter((t) => !pick || pick.has(t.id));
@@ -30,20 +49,24 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
   const byUnit = new Map<string, TaskRow[]>();
   for (const t of passed) byUnit.set(t.unit, [...(byUnit.get(t.unit) ?? []), t]);
 
-  const batches: TaskRow[][] = [];
-  let cur: TaskRow[] = [];
-  let count = 0;
-  for (const tasks of byUnit.values()) {
-    const n = tasks.reduce((s, t) => s + t.functions.length, 0);
-    if (count + n > batchSize && cur.length) {
-      batches.push(cur);
-      cur = [];
-      count = 0;
+  let batches: TaskRow[][] = [];
+  if (opts.pack === 'dense') {
+    batches = packUnits([...byUnit].map(([unit, items]) => ({ unit, functions: items.reduce((s, t) => s + t.functions.length, 0), items })), batchSize);
+  } else {
+    let cur: TaskRow[] = [];
+    let count = 0;
+    for (const tasks of byUnit.values()) {
+      const n = tasks.reduce((s, t) => s + t.functions.length, 0);
+      if (count + n > batchSize && cur.length) {
+        batches.push(cur);
+        cur = [];
+        count = 0;
+      }
+      cur.push(...tasks);
+      count += n;
     }
-    cur.push(...tasks);
-    count += n;
+    if (cur.length) batches.push(cur);
   }
-  if (cur.length) batches.push(cur);
 
   let seq = store.maxBatchSeq(runId);
   for (const [i, tasks] of batches.entries()) {

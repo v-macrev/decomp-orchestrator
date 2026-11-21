@@ -231,6 +231,8 @@ export interface Batch {
     supersededBy?: number[];
     /** Units this batch set aside (held out of PRs), with the findings that blocked each. */
     setAside?: { at: number; why: string; taskIds: string[]; units: string[]; reasons: Record<string, string[]> };
+    /** Combined with the run's other unsubmitted batches into fewer, bigger ones. */
+    rebalanced?: { at: number; max: number };
     /** Packets whose re-verification failed in the batch's combined tree. */
     failedTaskIds?: string[];
     /** Packets sent back to the AI agents to fix what a check of this batch reported. */
@@ -384,6 +386,8 @@ export const api = {
   nextWithheldLapse: (id: string) => req<{ at: number | null }>('GET', `/api/runs/${id}/withheld/next-lapse`),
   restageFailed: (id: string) => req<{ ok: true } & StageResult>('POST', `/api/runs/${id}/batches/restage-failed`, {}),
   prepareAll: (id: string) => req<{ ok: true; started: true }>('POST', `/api/runs/${id}/prepare`, {}),
+  rebalancePlan: (id: string) => req<{ max: number; batches: Array<{ seq: number; functions: number }>; after: number[]; functions: number }>('GET', `/api/runs/${id}/batches/rebalance`),
+  rebalanceBatches: (id: string) => req<{ ok: true; from: number[]; functions: number; staged: StageResult }>('POST', `/api/runs/${id}/batches/rebalance`, {}),
   fixBatch: (id: string, batchId: string) => req<{ ok: boolean; seq: number; check: 're-verify' | 'dry-run'; requeued: number; functions: number; kept: number; status: string }>('POST', `/api/runs/${id}/batches/${batchId}/fix`, {}),
   tidyPullRequest: (id: string, batchId: string) => req<{ ok: boolean; title: string | null; warnings: string[]; error: string | null }>('POST', `/api/runs/${id}/batches/${batchId}/tidy-pr`, { confirm: true }),
   setAsideBlocking: (id: string, batchId: string) => req<SetAsideResult>('POST', `/api/runs/${id}/batches/${batchId}/set-aside`, {}),

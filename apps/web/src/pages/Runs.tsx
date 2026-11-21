@@ -635,6 +635,7 @@ function batchView(b: Batch): { tone: Tone; title: string; why: string; action: 
     const held = [
       d?.withheld ? `${d.withheld.taskIds.length} packet(s) held back for claims` : '',
       d?.setAside ? `${d.setAside.taskIds.length} packet(s) set aside (${d.setAside.why})` : '',
+      d?.rebalanced ? `combined with other batches into bigger ones (at most ${d.rebalanced.max} functions)` : '',
       d?.fixed ? `${d.fixed.functions} function(s) in ${d.fixed.taskIds.length} packet(s) sent back to the AI agents to fix its ${d.fixed.check === 're-verify' ? 'check' : 'dry run'}; the rest is batched again when the run finishes` : '',
     ].filter(Boolean).join(', ');
     return { tone: 'muted', title: 'Replaced', why: `${held || 'Its packets were checked again'}${d?.supersededBy?.length ? `; the rest moved to batch ${d.supersededBy.join(', ')}` : ''}.`, action: 'none', steps };
@@ -1002,6 +1003,10 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
     if (!r.ok) throw new Error(`Batch ${b.seq}'s pull request was not rewritten: ${r.error ?? 'unknown error'}`);
     return `Batch ${b.seq}'s pull request is now one commit titled "${r.title}".${r.warnings.length ? ` ${r.warnings.join(' ')}` : ''}`;
   });
+  const rebalance = () => run('rebalance', async () => {
+    const r = await api.rebalanceBatches(runId);
+    return `Batch ${r.from.join(', ')} (${r.functions} functions) combined into ${r.staged.seqs.length === 1 ? `batch ${r.staged.seqs[0]}` : `batches ${r.staged.seqs.join(', ')}`}${r.staged.failed ? `; ${r.staged.failed} did not pass their check` : ''}. ${r.staged.seqs.length === 1 ? 'It needs' : 'They need'} a dry run again: Prepare all for PR does it.`;
+  });
   const fix = (b: Batch) => run(`fix-${b.id}`, async () => {
     const r = await api.fixBatch(runId, b.id);
     return `Batch ${b.seq}: ${r.functions} function(s) in ${r.requeued} packet(s) went back to the AI agents with what its ${r.check === 're-verify' ? 'check' : 'dry run'} reported. The run is running again through its flow${r.kept ? `; its other ${r.kept} packet(s) stay matched` : ''}, and everything is batched again when it finishes.`;
@@ -1048,6 +1053,13 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
     api.nextWithheldLapse(runId).then((r) => setNextLapse(r.at)).catch(() => undefined);
   }, [runId, withheld, batches]);
 
+  // How the unsubmitted batches would combine into fewer, bigger ones (whole units, up to 60 functions).
+  const [regroup, setRegroup] = useState<{ max: number; batches: Array<{ seq: number; functions: number }>; after: number[]; functions: number } | null>(null);
+  useEffect(() => {
+    if (status !== 'completed') return setRegroup(null);
+    api.rebalancePlan(runId).then(setRegroup).catch(() => setRegroup(null));
+  }, [runId, status, batches]);
+
   const busyBatch = batches.some((b) => b.dryRunState);
   const locked = !!busy || busyBatch || !!op;
   const completed = status === 'completed';
@@ -1065,6 +1077,15 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
   // Passed packets of a failed batch are that batch's to re-check; the rest have no batch at all.
   const inFailed = new Set(current.filter((b) => actionOf(b) === 'restage').flatMap((b) => b.functions.filter((f) => f.state === 'passed').map((f) => f.taskId)));
   const loose = Math.max(0, passed - inFailed.size);
+
+  const canRegroup = completed && !!regroup && regroup.batches.length > 1 && regroup.after.length < regroup.batches.length;
+  const regroupButton = canRegroup && (
+    <ConfirmButton className="big" disabled={locked} onConfirm={rebalance}
+      confirmLabel={`Combine batch ${regroup!.batches.map((b) => b.seq).join(', ')} into ${regroup!.after.length}?`}
+      title={`Fewer, bigger pull requests: the ${regroup!.batches.length} unsubmitted batches (${regroup!.functions} functions) become ${regroup!.after.length} of ${regroup!.after.join(' + ')} functions, whole units each, at most ${regroup!.max} per PR. Their local branches are replaced and the new batches are checked in a clean tree; they need a dry run again. Nothing is pushed.`}>
+      {busy === 'rebalance' ? 'Combining…' : `Combine into ${regroup!.after.length === 1 ? 'one batch' : `${regroup!.after.length} batches`} (${regroup!.after.join(' + ')} functions)`}
+    </ConfirmButton>
+  );
 
   const hero = (() => {
     if (op) return <OperationPanel op={op} runId={runId} />;
@@ -1084,7 +1105,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
             <li>Hold back units someone else claimed, and set aside units a dry run blames; the rest is dry-run again.</li>
           </ol>
           <p>Nothing is pushed: you still submit each pull request yourself.</p>
-          <div className="row"><button className="primary big" disabled={locked} onClick={prepare}>Prepare all for PR</button>{ready.length > 0 && <span className="muted small">{ready.length} batch{ready.length === 1 ? ' is' : 'es are'} already ready to submit.</span>}</div>
+          <div className="row"><button className="primary big" disabled={locked} onClick={prepare}>Prepare all for PR</button>{regroupButton}{ready.length > 0 && <span className="muted small">{ready.length} batch{ready.length === 1 ? ' is' : 'es are'} already ready to submit.</span>}</div>
         </div>
       );
     }
@@ -1094,6 +1115,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
           <span className="eyebrow">Ready</span>
           <h3>{ready.length} batch{ready.length === 1 ? '' : 'es'} ready to submit · {fnCount(ready)} functions</h3>
           <p>Each one passed a clean dry run. <b>Submit PR</b> on a card pushes that batch to your fork and opens one pull request upstream.</p>
+          {regroupButton && <div className="row"><span className="muted small">Bigger PRs are better (up to {regroup!.max} functions):</span>{regroupButton}</div>}
         </div>
       );
     }

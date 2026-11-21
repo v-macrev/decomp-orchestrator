@@ -10,6 +10,7 @@ import { defaultFlow, type Flow } from '@decomp/core';
 import { openDatabase } from '../src/db/database.js';
 import { Store } from '../src/db/store.js';
 import { RunEngine } from '../src/orchestrator/engine.js';
+import { packUnits } from '../src/orchestrator/staging.js';
 import { AccountPool } from '../src/pool/scheduler.js';
 import { ProviderRegistry } from '../src/providers/registry.js';
 import { SimRepo } from '../src/repo/simRepo.js';
@@ -842,7 +843,7 @@ describe('handling what blocks a batch', () => {
     const batch = batchOf(s, run.id);
     const tasks = batch.taskIds.map((id) => s.store.getTask(id)!);
     const victim = tasks[0]!;
-    const withDry = (blockers: string[]) => s.store.updateBatch(batch.id, { detail: { ...(s.store.getBatch(batch.id)!.detail as Record<string, unknown>), lastSubmit: { dryRun: true, ok: false, blockers, problems: [] } } });
+    const withDry = (blockers: string[]) => s.store.updateBatch(batch.id, { detail: { ...(s.store.getBatch(batch.id)!.detail as unknown as Record<string, unknown>), lastSubmit: { dryRun: true, ok: false, blockers, problems: [] } } });
     withDry(['contrib-x: another open claim or pull request names 0x1: https://github.com/o/r/issues/1']);
     await expect(s.engine.fixBatchWithAgents(run.id, batch.id)).rejects.toThrow(/claims block it/);
     withDry([`${victim.unit}:1: already matched upstream: ${victim.functions[0]!.rva}; nothing to submit for it`]);
@@ -861,5 +862,43 @@ describe('handling what blocks a batch', () => {
     expect(after.attemptsTotal).toBeGreaterThan(victim.attemptsTotal);
     expect(['staged', 'dead']).toContain(after.state);
     for (const t of tasks.filter((x) => x.unit !== victim.unit)) expect(s.store.getTask(t.id)!.state).toBe('staged');
+  }, 60_000);
+});
+
+describe('combining batches into bigger ones', () => {
+  it('packs whole units into as few batches as fit, biggest first', () => {
+    const u = (unit: string, functions: number) => ({ unit, functions, items: [unit] });
+    expect(packUnits([u('a', 4), u('b', 3)], 60)).toEqual([['a', 'b']]);
+    expect(packUnits([u('a', 30), u('b', 40), u('c', 25), u('d', 20)], 60)).toEqual([['b', 'd'], ['a', 'c']]);
+    // A unit bigger than the cap stays whole, as a batch of its own.
+    expect(packUnits([u('big', 70), u('s', 5)], 60)).toEqual([['big'], ['s']]);
+  });
+
+  it('regroups unsubmitted batches into fewer, re-verified ones and leaves submitted ones alone', async () => {
+    const s = setup();
+    const run = createRun(s, 'regroup', 12, 3);
+    await s.engine.updateRun(run.id, { prBatchSize: 3 });
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const before = s.store.listBatches(run.id).filter((b) => b.status === 'branch_ready');
+    expect(before.length).toBeGreaterThan(2);
+    // One of them was submitted: it is never regrouped.
+    const sent = before[0]!;
+    s.store.updateBatch(sent.id, { status: 'submitted', detail: { ...(sent.detail as unknown as Record<string, unknown>), pr: 'https://github.com/o/r/pull/1' } });
+    const rest = before.slice(1);
+    const plan = s.engine.rebalancePlan(run.id);
+    expect(plan.batches.map((b) => b.seq)).toEqual(rest.map((b) => b.seq));
+    expect(plan.after).toHaveLength(1);
+
+    const r = await s.engine.rebalanceBatches(run.id);
+    expect(r.from).toEqual(rest.map((b) => b.seq));
+    expect(r.staged.seqs).toHaveLength(1);
+    const merged = s.store.listBatches(run.id).find((b) => b.seq === r.staged.seqs[0])!;
+    expect(merged.status).toBe('branch_ready');
+    expect(new Set(merged.taskIds)).toEqual(new Set(rest.flatMap((b) => b.taskIds)));
+    for (const b of rest) expect(s.store.getBatch(b.id)).toMatchObject({ status: 'superseded', detail: expect.objectContaining({ rebalanced: expect.objectContaining({ max: 60 }), supersededBy: r.staged.seqs }) });
+    expect(s.store.getBatch(sent.id)!.status).toBe('submitted');
+    for (const id of merged.taskIds) expect(s.store.getTask(id)!.state).toBe('staged');
+    await expect(s.engine.rebalanceBatches(run.id)).rejects.toThrow(/nothing to regroup/);
   }, 60_000);
 });

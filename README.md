@@ -120,6 +120,9 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    findings are not code problems and are never sent. **Why functions are held back** counts the
    matched functions not in a PR by cause: already merged upstream, no longer tracked, upstream
    changed the file, blocked a dry run, claimed by someone else, being fixed by the agents.
+   **Combine into bigger batches** (next to Prepare all for PR; `POST /api/runs/:id/batches/rebalance`,
+   plan at `GET`) regroups the unsubmitted batches into as few as fit 60 functions each, whole units,
+   biggest first, and re-verifies them; batches with a PR are never touched.
 6. Runs can be edited (`PATCH /api/runs/:id`: name, drafted-by, budget, functions per PR) and
    deleted (`DELETE /api/runs/:id`, which releases the local claims the run still holds). A new
    run can carry the dead functions of earlier runs (`config.carry.fromRuns`). Set

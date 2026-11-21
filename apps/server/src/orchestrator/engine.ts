@@ -36,7 +36,7 @@ import { buildHistory, findRepeat, progressScore, type HistoryEntry } from './hi
 import { draftedByText, personOf } from './attribution.js';
 import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
-import { batchContent, finishingModel, stageRun, type StageSummary } from './staging.js';
+import { PR_BATCH_MAX, batchContent, finishingModel, packUnits, stageRun, type StageSummary } from './staging.js';
 import { SkillRegistry } from '../skills/registry.js';
 import { FunctionGatherer } from '../intel/gatherer.js';
 import { planCapacity } from './capacity.js';
@@ -1203,6 +1203,62 @@ export class RunEngine {
     });
     await this.start(runId);
     return { ok: true as const, seq: batch.seq, check: plan.check, ...r, status: store.getRun(runId)?.status ?? 'running' };
+  }
+
+  /**
+   * How the run's unsubmitted staged batches would regroup into as few batches as fit `max`
+   * functions (whole units, biggest first). Read only.
+   */
+  rebalancePlan(runId: string, max = PR_BATCH_MAX) {
+    const work = this.changeableBatches(runId, null);
+    const byUnit = new Map<string, number>();
+    for (const t of work.flatMap((w) => w.tasks)) byUnit.set(t.unit, (byUnit.get(t.unit) ?? 0) + t.functions.length);
+    const bins = packUnits([...byUnit].map(([unit, functions]) => ({ unit, functions, items: [functions] })), max);
+    return {
+      max,
+      batches: work.map((w) => ({ seq: w.batch.seq, functions: w.tasks.reduce((n, t) => n + t.functions.length, 0) })),
+      after: bins.map((b) => b.reduce((n, x) => n + x, 0)),
+      functions: [...byUnit.values()].reduce((a, b) => a + b, 0),
+    };
+  }
+
+  /**
+   * Regroup the run's unsubmitted staged batches into as few batches as fit `max` functions each
+   * (the repository's PR guidance: bigger PRs, at most 60): their local branches are deleted, they
+   * become `superseded`, and their packets are re-verified as the new batches. A batch with a PR,
+   * or a submission attempt, is never touched. New batches need a dry run again.
+   */
+  async rebalanceBatches(runId: string, max = PR_BATCH_MAX) {
+    const { store, repo, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be regrouped`);
+    if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
+    if (!Number.isInteger(max) || max < 1 || max > PR_BATCH_MAX) throw new Error(`a batch holds 1 to ${PR_BATCH_MAX} functions`);
+    const plan = this.rebalancePlan(runId, max);
+    if (plan.batches.length < 2 || plan.after.length >= plan.batches.length) {
+      throw new Error(plan.batches.length < 2 ? 'there is nothing to regroup: fewer than two unsubmitted batches' : `the ${plan.batches.length} batches are already as few as ${max} functions per PR allows`);
+    }
+    return this.exclusive(`regrouping the batches of ${runId}`, async () => {
+      const work = this.changeableBatches(runId, null);
+      const at = Date.now();
+      for (const [i, { batch }] of work.entries()) {
+        this.progress('Regrouping batches', `batch ${batch.seq}: deleting its local branches`, i, work.length);
+        if (repo.deleteBatchBranch && batch.branch === `decomp/${runId}-b${batch.seq}`) for (const branch of [`${batch.branch}-pr`, batch.branch]) await repo.deleteBatchBranch(branch);
+        const prior = { ...(batch.detail as Record<string, unknown> | null) };
+        delete prior.dryRunFingerprint;
+        delete prior.dryRunUncheckedClaims;
+        store.unstageBatch(batch, { ...prior, rebalanced: { at, max } });
+        store.updateBatch(batch.id, { status: 'superseded' });
+      }
+      const tasks = work.flatMap((w) => w.tasks);
+      const staged = await stageRun(store, repo, events, runId, max, { only: tasks.map((t) => t.id), progress: this.progress, pack: 'dense' });
+      for (const { batch } of work) store.updateBatch(batch.id, { detail: { ...(store.getBatch(batch.id)!.detail as Record<string, unknown> | null), supersededBy: staged.seqs } });
+      events.emit('batch.rebalanced', `regrouped batch ${work.map((w) => w.batch.seq).join(', ')} (${plan.functions} functions) into ${staged.seqs.length} batch(es) of at most ${max}: ${staged.seqs.join(', ')}${staged.failed ? `; ${staged.failed} did not pass their check` : ''}`, {
+        runId, level: staged.failed ? 'warn' : 'info', data: { from: work.map((w) => w.batch.seq), to: staged.seqs, max },
+      });
+      return { from: work.map((w) => w.batch.seq), functions: plan.functions, staged };
+    });
   }
 
   /**

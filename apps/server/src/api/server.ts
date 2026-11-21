@@ -309,6 +309,23 @@ export async function buildServer(app: App) {
     }
     return { ok: true, started: true };
   });
+  // Regroup the unsubmitted staged batches into as few as fit 60 functions each (GET: the plan only).
+  f.get('/api/runs/:id/batches/rebalance', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return engine.rebalancePlan(req.params.id);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  f.post('/api/runs/:id/batches/rebalance', async (req: FastifyRequest<{ Params: { id: string }; Body: { max?: number } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.rebalanceBatches(req.params.id, req.body?.max ?? undefined)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   // Fix a batch that failed a check with the run's AI workers: its failing packets run through the flow again.
   f.post('/api/runs/:id/batches/:batchId/fix', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');
