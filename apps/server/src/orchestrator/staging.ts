@@ -5,7 +5,7 @@
 // A batch that fails re-verification creates no branch and leaves its packets 'passed' (the batch
 // row keeps the problems), so they can be staged again; only a verified branch makes them 'staged'.
 import type { Store, TaskRow } from '../db/store.js';
-import type { RepoAdapter } from '../repo/types.js';
+import type { ProgressFn, RepoAdapter } from '../repo/types.js';
 import type { EventBus } from '../telemetry/events.js';
 import { newId } from '../util/async.js';
 import { coAuthorTrailers, draftedByText, personOf, renamePerson } from './attribution.js';
@@ -22,9 +22,9 @@ export interface StageSummary {
 /**
  * Stage the run's 'passed' packets, or only `only` of them (those still 'passed'), into batches.
  */
-export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus, runId: string, batchSize: number, only?: readonly string[]): Promise<StageSummary> {
+export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus, runId: string, batchSize: number, opts: { only?: readonly string[]; progress?: ProgressFn } = {}): Promise<StageSummary> {
   const summary: StageSummary = { staged: 0, failed: 0, seqs: [] };
-  const pick = only ? new Set(only) : null;
+  const pick = opts.only ? new Set(opts.only) : null;
   const passed = store.listTasks(runId, { state: 'passed', limit: 100_000 }).filter((t) => !pick || pick.has(t.id));
   if (!passed.length) return summary;
   const byUnit = new Map<string, TaskRow[]>();
@@ -46,14 +46,21 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
   if (cur.length) batches.push(cur);
 
   let seq = store.maxBatchSeq(runId);
-  for (const tasks of batches) {
+  for (const [i, tasks] of batches.entries()) {
     seq++;
+    const of = batches.length > 1 ? ` (${i + 1} of ${batches.length})` : '';
+    const fns = tasks.reduce((n, t) => n + t.functions.length, 0);
+    opts.progress?.(`Re-verifying batch ${seq}${of}: ${fns} functions in ${tasks.length} packet(s)`, 'writing the final unit files into the staging worktree', 0, tasks.length);
     const id = newId('batch');
     store.createBatch({ id, runId, seq, taskIds: tasks.map((t) => t.id) });
     summary.seqs.push(seq);
     const { files, fnCount, draftedBy, models, message } = batchContent(store, runId, tasks);
     if (repo.stageBatch) {
-      const r = await repo.stageBatch({ runId, seq, files, tasks: tasks.map((t) => ({ id: t.id, srTaskId: t.srTaskId, functions: t.functions, task: t })), message });
+      const step = `Re-verifying batch ${seq}${of}: ${fns} functions in ${tasks.length} packet(s)`;
+      const r = await repo.stageBatch({
+        runId, seq, files, tasks: tasks.map((t) => ({ id: t.id, srTaskId: t.srTaskId, functions: t.functions, task: t })), message,
+        progress: (_s, detail, done, total) => opts.progress?.(step, detail, done, total),
+      });
       const ok = r.verified && !!r.branch;
       store.updateBatch(id, { status: ok ? 'branch_ready' : 'failed', branch: ok ? r.branch : null, detail: { problems: r.problems, functions: fnCount, draftedBy, models } });
       if (!ok) {

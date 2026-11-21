@@ -236,6 +236,19 @@ export interface ClaimCollision {
 
 interface StageResult { staged: number; failed: number; seqs: number[] }
 
+/** What holds the worktree slots right now (staging, a dry run, a claims check). */
+export interface OperationProgress {
+  runId: string | null;
+  label: string;
+  startedAt: number;
+  step: string;
+  detail: string | null;
+  done: number | null;
+  total: number | null;
+  stepStartedAt: number;
+  log: Array<{ at: number; step: string; ms: number }>;
+}
+
 export interface BatchDropResult {
   seq: number;
   batchId: string;
@@ -322,6 +335,8 @@ export const api = {
   stageRun: (id: string) => req<{ ok: boolean; staged: number; failed: number }>('POST', `/api/runs/${id}/stage`, {}),
   submitBatch: (id: string, batchId: string, real: boolean, allowUncheckedClaims = false) => req<SubmitResult>('POST', `/api/runs/${id}/batches/${batchId}/submit`, real ? { dryRun: false, confirm: true, allowUncheckedClaims } : { dryRun: true }),
   dropCollisions: (id: string, batchId: string) => req<DropCollisionsResult>('POST', `/api/runs/${id}/batches/${batchId}/drop-collisions`, {}),
+  operation: () => req<{ operation: OperationProgress | null }>('GET', '/api/operation'),
+  restageBatch: (id: string, batchId: string) => req<{ ok: true } & StageResult>('POST', `/api/runs/${id}/batches/${batchId}/restage`, {}),
   dropAllCollisions: (id: string) => req<DropAllCollisionsResult>('POST', `/api/runs/${id}/batches/drop-collisions`, {}),
   recheckWithheld: (id: string) => req<RecheckWithheldResult>('POST', `/api/runs/${id}/withheld/recheck`, {}),
   cancelBatchDryRun: (id: string, batchId: string) => req<{ ok: true }>('POST', `/api/runs/${id}/batches/${batchId}/cancel-dry-run`, {}),

@@ -276,6 +276,17 @@ export async function buildServer(app: App) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
+  // Re-verify the packets of a batch whose staging a server restart interrupted, as a new batch.
+  f.post('/api/runs/:id/batches/:batchId/restage', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.restageInterrupted(req.params.id, req.params.batchId)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  // What holds the worktree slots right now (staging, a dry run, a claims check), with its current step.
+  f.get('/api/operation', async () => ({ operation: engine.operation() }));
   // Check withheld packets against open claims again and stage the units that are clear now.
   f.post('/api/runs/:id/withheld/recheck', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');

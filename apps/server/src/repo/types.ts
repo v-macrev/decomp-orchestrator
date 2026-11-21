@@ -160,6 +160,9 @@ export interface ClaimCollisionCheck {
   collisions: Record<string, ClaimCollision[]>;
 }
 
+/** Live progress for the operator: what is happening now, and how far along it is. */
+export type ProgressFn = (step: string, detail?: string | null, done?: number | null, total?: number | null) => void;
+
 export interface SubmitBatchInput {
   runId: string;
   seq: number;
@@ -177,6 +180,7 @@ export interface SubmitBatchInput {
   dryRun: boolean;
   allowUncheckedClaims?: boolean;
   signal?: AbortSignal;
+  progress?: ProgressFn;
 }
 
 export interface SubmitBatchResult {
@@ -204,6 +208,7 @@ export interface StageBatchInput {
   files: Array<{ path: string; content: string }>;
   tasks: Array<{ id: string; srTaskId: string | null; functions: TaskRow['functions']; task: TaskRow }>;
   message: string;
+  progress?: ProgressFn;
 }
 
 export interface StageBatchResult {

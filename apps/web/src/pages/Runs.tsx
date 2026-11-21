@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Bulk-run control + live telemetry: queue depth, slots, pass/fail/retry, per-account health and
 // throughput, token/cost tracking, per-function drill-down with diffs and Gate Keeper verdicts.
-import { useCallback, useEffect, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
 import type { Flow, Task, TelemetryEvent } from '@decomp/core';
-import { api, stream, type AccountView, type Batch, type CapacityPlan, type ClaimCollision, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
+import { api, stream, type AccountView, type Batch, type CapacityPlan, type ClaimCollision, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { TaskDrawer } from '../components/TaskDrawer';
 
@@ -521,6 +521,14 @@ function batchProgress(b: Batch): { steps: Array<{ label: string; state: StepSta
     : { label: 'PR', state: 'todo', title: 'Submit PR becomes available after a clean dry run' });
 
   if (b.status === 'submitted') return { steps, next: 'Done: the pull request is open.', tone: 'muted' };
+  if (b.status === 'draft') {
+    steps[0] = { label: 'Re-verifying…', state: 'next', title: 'Being re-verified in a clean tree now' };
+    return { steps, tone: 'lvl-warn', next: 'Being re-verified now: see the progress above.' };
+  }
+  if (b.status === 'interrupted') {
+    steps[0] = { label: 'Interrupted', state: 'blocked', title: 'A server restart stopped its re-verification: no branch was created and its packets stay passed' };
+    return { steps, tone: 'lvl-error', next: 'A server restart interrupted its re-verification (nothing was committed). Next: Re-verify again.' };
+  }
   if (b.status === 'superseded') {
     return { steps, tone: 'muted', next: `Split: ${d?.withheld?.taskIds.length ?? 0} packet(s) withheld for claims${d?.supersededBy?.length ? `, the rest moved to batch ${d.supersededBy.join(', ')}` : ''}. Nothing to do here.` };
   }
@@ -620,6 +628,47 @@ function WithheldList({ batches }: { batches: Batch[] }) {
         </tbody>
       </table>
     </details>
+  );
+}
+
+/** Ticks every second while mounted, so elapsed times stay live. */
+function useNow(active: boolean) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    if (!active) return;
+    const t = setInterval(() => setNow(Date.now()), 1_000);
+    return () => clearInterval(t);
+  }, [active]);
+  return now;
+}
+
+/** The server's slot-holding operation, live: current step, its progress, and the steps already done. */
+function OperationPanel({ op, runId }: { op: OperationProgress; runId: string }) {
+  const now = useNow(true);
+  const pct = op.total ? Math.min(100, Math.round(((op.done ?? 0) / op.total) * 100)) : null;
+  const other = op.runId && op.runId !== runId;
+  return (
+    <div className="op-panel" role="status" aria-live="polite">
+      <div className="op-head">
+        <span className="spinner" aria-hidden="true" />
+        <div className="grow">
+          <div className="op-step">{op.step}</div>
+          <div className="muted" style={{ fontSize: 12 }}>
+            {other ? `Another run holds the worktree slots: ${op.label}. ` : ''}
+            running for {fmtDuration(now - op.startedAt)}{op.step !== op.label ? ` · this step ${fmtDuration(now - op.stepStartedAt)}` : ''}
+            {op.total ? ` · ${op.done ?? 0} of ${op.total} done` : ''}
+          </div>
+        </div>
+      </div>
+      {op.detail && <div className="op-detail">{op.detail}</div>}
+      {pct !== null && <div className="bar"><span style={{ width: `${pct}%`, background: 'var(--accent)' }} /></div>}
+      {op.log.length > 0 && (
+        <ol start={Math.max(1, op.log.length - 5)}>
+          {op.log.slice(-6).map((l) => <li key={`${l.at}-${l.step}`}>✓ {l.step} <span>({l.ms < 60_000 ? `${Math.round(l.ms / 1000)}s` : fmtDuration(l.ms)})</span></li>)}
+        </ol>
+      )}
+      <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>Runs on the server: you can leave or reload this page. Batch buttons wait until it finishes.</div>
+    </div>
   );
 }
 
@@ -729,13 +778,43 @@ function BatchesPanel({ runId, status, passed, withheld, batches, reload }: { ru
   });
   const droppable = batches.filter((b) => b.status === 'branch_ready' && !b.detail?.pr && !b.detail?.link).length;
   const busyBatch = batches.some((b) => b.dryRunState);
+  // The server's slot-holding operation, polled: it survives reloads and clicks from other tabs.
+  const [op, setOp] = useState<OperationProgress | null>(null);
+  const reloadRef = useRef(reload);
+  reloadRef.current = reload;
+  useEffect(() => {
+    let alive = true;
+    let had = false;
+    let ticks = 0;
+    const poll = async () => {
+      const r = await api.operation().catch(() => null);
+      if (!alive || !r) return;
+      setOp(r.operation);
+      const has = !!r.operation;
+      ticks++;
+      // Reload when an operation ends, and every few seconds while one runs (new batches appear).
+      if ((had && !has) || (has && ticks % 4 === 0)) reloadRef.current();
+      had = has;
+    };
+    void poll();
+    const t = setInterval(poll, 1_500);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+  const restage = (b: Batch) => run(`restage-${b.id}`, async () => {
+    const r = await api.restageBatch(runId, b.id);
+    return r.seqs.length ? `Batch ${b.seq}'s packets were re-verified as batch ${r.seqs.join(', ')}${r.failed ? ` (${r.failed} failed re-verification)` : ''}.` : `Batch ${b.seq}: nothing was staged.`;
+  });
+  const locked = !!busy || busyBatch || !!op;
   return (
     <div className="panel">
       <div className="row">
         <h2 className="grow" style={{ margin: 0 }}>PR batches</h2>
-        {status === 'completed' && passed > 0 && <button className="primary" disabled={!!busy || busyBatch} onClick={stage} title="Group passed packets into batches (whole units, up to the run's functions per PR), re-verify each in a clean tree and commit it to a local branch">{busy === 'stage' ? 'Batching…' : `Batch passed functions (${passed} packet${passed === 1 ? '' : 's'})`}</button>}
-        {status === 'completed' && droppable > 0 && <ConfirmButton disabled={!!busy || busyBatch} onConfirm={dropAll} confirmLabel={`Check GitHub claims for all ${droppable} staged batch(es), withhold colliding units and restage the rest?`} title="One claims check for every unsubmitted staged batch: units with a function another contributor's open claim or PR names are withheld, the affected batches' local branches are deleted, and their other packets are re-verified together as new batches. Nothing is pushed.">{busy === 'drop-all' ? 'Checking claims…' : `Drop colliding packets in all batches (${droppable})`}</ConfirmButton>}
-        {status === 'completed' && withheld > 0 && <button disabled={!!busy || busyBatch} onClick={recheck} title="Check the withheld packets against open claims again and batch every unit that no other contributor's open claim or PR names any more (claims lapse after a day without activity)">{busy === 'recheck' ? 'Checking claims…' : `Recheck withheld (${withheld} packet${withheld === 1 ? '' : 's'})`}</button>}
+        {status === 'completed' && passed > 0 && <button className="primary" disabled={locked} onClick={stage} title="Group passed packets into batches (whole units, up to the run's functions per PR), re-verify each in a clean tree and commit it to a local branch">{busy === 'stage' ? 'Batching…' : `Batch passed functions (${passed} packet${passed === 1 ? '' : 's'})`}</button>}
+        {status === 'completed' && droppable > 0 && <ConfirmButton disabled={locked} onConfirm={dropAll} confirmLabel={`Check GitHub claims for all ${droppable} staged batch(es), withhold colliding units and restage the rest?`} title="One claims check for every unsubmitted staged batch: units with a function another contributor's open claim or PR names are withheld, the affected batches' local branches are deleted, and their other packets are re-verified together as new batches. Nothing is pushed.">{busy === 'drop-all' ? 'Checking claims…' : `Drop colliding packets in all batches (${droppable})`}</ConfirmButton>}
+        {status === 'completed' && withheld > 0 && <button disabled={locked} onClick={recheck} title="Check the withheld packets against open claims again and batch every unit that no other contributor's open claim or PR names any more (claims lapse after a day without activity)">{busy === 'recheck' ? 'Checking claims…' : `Recheck withheld (${withheld} packet${withheld === 1 ? '' : 's'})`}</button>}
       </div>
       <p className="muted" style={{ marginTop: 6 }}>
         Each batch is re-verified in a clean tree and committed to a local branch. <b>Dry run</b> rebuilds the batch from the base, re-verifies it and runs <span className="mono">sr submit --dry-run</span>; nothing is pushed.
@@ -745,7 +824,7 @@ function BatchesPanel({ runId, status, passed, withheld, batches, reload }: { ru
       {batches.length > 0 && <BatchPipeline batches={batches} withheld={withheld} />}
       {msg && <div className="muted" role="status">{msg}</div>}
       {err && <div className="lvl-error">{err}</div>}
-      {busy?.startsWith('drop') || busy === 'recheck' ? <div className="muted">Checking every function against GitHub's open claims and PRs (about half a minute), then re-verifying the restaged batches…</div> : null}
+      {op ? <OperationPanel op={op} runId={runId} /> : busy ? <div className="op-panel"><div className="op-head"><span className="spinner" aria-hidden="true" /><div className="op-step">Starting…</div></div></div> : null}
       {batches.length > 0 && (
         <table>
           <thead><tr><th>#</th><th>Progress</th><th>Branch</th><th>Functions</th><th>Drafted by</th><th>Findings / PR</th><th /></tr></thead>
@@ -786,6 +865,9 @@ function BatchesPanel({ runId, status, passed, withheld, batches, reload }: { ru
                     )}
                   </td>
                   <td style={{ whiteSpace: 'nowrap' }}>
+                    {b.status === 'interrupted' && (
+                      <ConfirmButton className="primary" disabled={locked} onConfirm={() => restage(b)} confirmLabel={`Re-verify the ${b.functions.length} functions of batch ${b.seq} as a new batch?`} title="Re-verifies exactly this batch's packets in a clean tree and commits a new local branch. Nothing is pushed.">{busy === `restage-${b.id}` ? 'Re-verifying…' : 'Re-verify again'}</ConfirmButton>
+                    )}
                     {b.status === 'branch_ready' && (
                       <>
                         {dryRunning ? (
@@ -794,18 +876,18 @@ function BatchesPanel({ runId, status, passed, withheld, batches, reload }: { ru
                           </button>
                         ) : (
                           <>
-                            <button disabled={!!busy || busyBatch} onClick={() => submit(b, false)}>Dry run</button>{' '}
-                            <ConfirmButton disabled={!!busy || busyBatch} onConfirm={() => dropCollisions(b)} confirmLabel="Check GitHub claims, withhold colliding units and restage the rest?" title="Withholds every unit with a function that another contributor's open claim or PR names (the rule sr submit blocks on), deletes this batch's local branches and re-verifies the rest as a new batch. Nothing is pushed.">{busy === `drop-${b.id}` ? 'Checking claims…' : 'Drop colliding packets'}</ConfirmButton>{' '}
-                            <ConfirmButton className="primary" disabled={!!busy || busyBatch || !cleanDry} onConfirm={() => submit(b, true)} confirmLabel="Push to your fork and open the PR?" title={cleanDry ? 'Runs sr submit: pushes the branch to your fork and opens one pull request upstream' : 'Run a clean dry run first'}>{busy === `submit-${b.id}` ? 'Submitting…' : 'Submit PR'}</ConfirmButton>
+                            <button disabled={locked} onClick={() => submit(b, false)}>Dry run</button>{' '}
+                            <ConfirmButton disabled={locked} onConfirm={() => dropCollisions(b)} confirmLabel="Check GitHub claims, withhold colliding units and restage the rest?" title="Withholds every unit with a function that another contributor's open claim or PR names (the rule sr submit blocks on), deletes this batch's local branches and re-verifies the rest as a new batch. Nothing is pushed.">{busy === `drop-${b.id}` ? 'Checking claims…' : 'Drop colliding packets'}</ConfirmButton>{' '}
+                            <ConfirmButton className="primary" disabled={locked || !cleanDry} onConfirm={() => submit(b, true)} confirmLabel="Push to your fork and open the PR?" title={cleanDry ? 'Runs sr submit: pushes the branch to your fork and opens one pull request upstream' : 'Run a clean dry run first'}>{busy === `submit-${b.id}` ? 'Submitting…' : 'Submit PR'}</ConfirmButton>
                             {canOverride && (
                               <div style={{ marginTop: 4 }}>
-                                <ConfirmButton disabled={!!busy || busyBatch} onConfirm={() => submit(b, true, true)} confirmLabel={`Claims of ${unchecked.length} task(s) could not be checked against GitHub. Submit anyway?`} title={`Not checked: ${unchecked.join('; ')}. The submission probes again and still refuses any known collision.`}>Submit with unchecked claims</ConfirmButton>
+                                <ConfirmButton disabled={locked} onConfirm={() => submit(b, true, true)} confirmLabel={`Claims of ${unchecked.length} task(s) could not be checked against GitHub. Submit anyway?`} title={`Not checked: ${unchecked.join('; ')}. The submission probes again and still refuses any known collision.`}>Submit with unchecked claims</ConfirmButton>
                               </div>
                             )}
                             {canClear && (
                               <div className="row" style={{ marginTop: 4 }}>
-                                {(last?.dryRun || cleanDry) && <ConfirmButton disabled={!!busy || busyBatch} onConfirm={() => clear(b, 'preview')} confirmLabel="Clear check and delete preview branch?">Clear dry run</ConfirmButton>}
-                                <ConfirmButton disabled={!!busy || busyBatch} onConfirm={() => clear(b, 'batch')} confirmLabel="Delete local batch and preview branches?">Delete staged branch</ConfirmButton>
+                                {(last?.dryRun || cleanDry) && <ConfirmButton disabled={locked} onConfirm={() => clear(b, 'preview')} confirmLabel="Clear check and delete preview branch?">Clear dry run</ConfirmButton>}
+                                <ConfirmButton disabled={locked} onConfirm={() => clear(b, 'batch')} confirmLabel="Delete local batch and preview branches?">Delete staged branch</ConfirmButton>
                               </div>
                             )}
                           </>

@@ -23,7 +23,7 @@ import { NoEligibleAccountError, type AccountPool } from '../pool/scheduler.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { ProviderError, costUsd, type PromptBlock } from '../providers/types.js';
 import { TaskQueue, type StealSource, type TaskPatch } from '../queue/taskQueue.js';
-import type { ClaimCollision, DiscoveredFunction, RepoAdapter, PreparedTask, SubmitBatchInput } from '../repo/types.js';
+import type { ClaimCollision, DiscoveredFunction, ProgressFn, RepoAdapter, PreparedTask, SubmitBatchInput } from '../repo/types.js';
 import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
 import { ContextBuilder } from './context.js';
@@ -123,6 +123,8 @@ export class RunEngine {
   afterRun: ((runId: string) => void) | null = null;
   /** Held by work that needs the worktree slots outside a run (shadow evaluation). */
   private exclusiveHolder: string | null = null;
+  /** What the slot-holding operation is doing right now (batch staging, dry runs, claims checks). */
+  private op: OperationProgress | null = null;
   private discovering: string | null = null;
   private dryRuns = new Map<string, AbortController>();
   private editingAttribution = new Set<string>();
@@ -429,11 +431,46 @@ export class RunEngine {
   async resumeOnBoot() {
     const n = this.queue.recoverAllOnBoot();
     if (n) this.deps.events.emit('queue.recovered', `recovered ${n} in-flight task(s) after restart`, { level: 'warn' });
+    this.markInterruptedBatches();
     for (const r of this.deps.store.activeRuns()) {
       if (r.status === 'paused') continue;
       this.deps.events.emit('run.recovering', `resuming ${r.name} after restart`, { runId: r.id, level: 'warn' });
       await this.start(r.id).catch((e) => this.deps.events.emit('run.failed', `resume failed: ${(e as Error).message}`, { runId: r.id, level: 'error' }));
     }
+  }
+
+  /**
+   * A batch still 'draft' at boot was being re-verified when the process stopped: no branch was
+   * created and its packets are still 'passed'. Mark it so the operator can re-verify exactly it.
+   */
+  markInterruptedBatches() {
+    const { store, repo, events } = this.deps;
+    if (!repo.stageBatch) return 0;
+    const rows = store.db.prepare("SELECT id, run_id FROM pr_batches WHERE status = 'draft'").all() as Array<{ id: string; run_id: string }>;
+    for (const r of rows) {
+      const b = store.getBatch(r.id)!;
+      store.updateBatch(b.id, { status: 'interrupted', detail: { ...(b.detail as Record<string, unknown> | null), interruptedAt: Date.now() } });
+      events.emit('batch.interrupted', `batch ${b.seq}: re-verification was interrupted by a server restart; no branch was created and its packets stay passed (Re-verify again)`, { runId: r.run_id, level: 'warn' });
+    }
+    return rows.length;
+  }
+
+  /** Re-verify exactly the packets of a batch whose staging was interrupted, as a new batch. */
+  async restageInterrupted(runId: string, batchId: string) {
+    const { store, repo, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run can be staged`);
+    const batch = store.getBatch(batchId);
+    if (!batch || batch.runId !== runId) throw new Error('batch not found');
+    if (batch.status !== 'interrupted') throw new Error(`batch ${batch.seq} is ${batch.status}: only an interrupted batch can be re-verified again`);
+    const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t && t.state === 'passed');
+    if (!tasks.length) throw new Error(`batch ${batch.seq} has no passed packets left`);
+    return this.exclusive(`re-verifying the packets of interrupted batch ${batch.seq} of ${runId}`, async () => {
+      const staged = await stageRun(store, repo, events, runId, row.config.prBatchSize, { only: tasks.map((t) => t.id), progress: this.progress });
+      store.updateBatch(batchId, { status: 'superseded', detail: { ...(batch.detail as Record<string, unknown> | null), supersededBy: staged.seqs } });
+      return staged;
+    });
   }
 
   /** For crash simulation and tests: stop all loops without touching task state (like a kill -9). */
@@ -467,7 +504,7 @@ export class RunEngine {
       // A run with staging off gave its claims back when it finished: batching its functions for a
       // PR takes them again, under the run's current draftedBy.
       if (row.config.staging === 'off') await this.reclaim(runId, store.listTasks(runId, { state: 'passed', limit: 100_000 }));
-      const r = await stageRun(store, this.deps.repo, events, runId, row.config.prBatchSize);
+      const r = await stageRun(store, this.deps.repo, events, runId, row.config.prBatchSize, { progress: this.progress });
       events.emit('run.restaged', `staged: ${r.staged} batch(es) staged, ${r.failed} failed`, { runId, level: r.failed ? 'warn' : 'info', data: { ...r } });
       return r;
     });
@@ -750,7 +787,9 @@ export class RunEngine {
     });
     const label = batchIds?.length === 1 ? `checking claims for ${runId} b${chosen[0]!.seq}` : `checking claims for ${chosen.length} batches of ${runId}`;
     return this.exclusive(label, async () => {
-      const check = await repo.claimCollisions!(work.flatMap((w) => w.tasks.flatMap((t) => t.functions.map((f) => f.rva))));
+      const allRvas = work.flatMap((w) => w.tasks.flatMap((t) => t.functions.map((f) => f.rva)));
+      this.progress(`Checking ${allRvas.length} functions in ${work.length} batch(es) against GitHub's open claims and PRs`, 'sr open_items + claim_state (about half a minute)');
+      const check = await repo.claimCollisions!(allRvas);
       if (!check.checked) throw new Error(`claims could not be checked, nothing changed: ${check.error ?? 'unknown error'}`);
       const at = Date.now();
       const keep: TaskRow[] = [];
@@ -769,6 +808,7 @@ export class RunEngine {
           store.updateBatch(batch.id, { detail: { ...prior, claimCheck } });
           continue;
         }
+        this.progress(`Withholding claimed units`, `batch ${batch.seq}: ${units.size} unit(s), ${fnCount} function(s); deleting its local branches`, results.length, work.length);
         const deleted = results.at(-1)!.deleted;
         if (repo.deleteBatchBranch && batch.branch === `decomp/${runId}-b${batch.seq}`) {
           for (const branch of [`${batch.branch}-pr`, batch.branch]) if (await repo.deleteBatchBranch(branch)) deleted.push(branch);
@@ -789,7 +829,7 @@ export class RunEngine {
       if (clear.length) events.emit('batch.claims_clear', `batch ${clear.join(', ')}: no other open claim or pull request names their functions`, { runId });
       let staged: StageSummary | null = null;
       if (keep.length) {
-        staged = await stageRun(store, repo, events, runId, row.config.prBatchSize, keep.map((t) => t.id));
+        staged = await stageRun(store, repo, events, runId, row.config.prBatchSize, { only: keep.map((t) => t.id), progress: this.progress });
         // The restaged packets were just checked: record that on the new batches too.
         const fresh = store.listBatches(runId).filter((b) => staged!.seqs.includes(b.seq));
         for (const b of fresh) store.updateBatch(b.id, { detail: { ...(b.detail as Record<string, unknown> | null), claimCheck: { at, collisions: {} } } });
@@ -817,6 +857,7 @@ export class RunEngine {
     const tasks = store.listTasks(runId, { state: 'withheld', limit: 100_000 });
     if (!tasks.length) throw new Error('no withheld packets');
     return this.exclusive(`rechecking withheld packets of ${runId}`, async () => {
+      this.progress(`Checking ${tasks.reduce((n, t) => n + t.functions.length, 0)} withheld functions against GitHub's open claims and PRs`, 'sr open_items + claim_state (about half a minute)');
       const check = await repo.claimCollisions!(tasks.flatMap((t) => t.functions.map((f) => f.rva)));
       if (!check.checked) throw new Error(`claims could not be checked, nothing changed: ${check.error ?? 'unknown error'}`);
       const at = Date.now();
@@ -836,7 +877,7 @@ export class RunEngine {
       events.emit('run.withheld_rechecked', `withheld packets rechecked: ${ready.length} back into staging, ${still} still withheld${still ? ` (${describeCollisions(check.collisions)})` : ''}`, {
         runId, level: still ? 'warn' : 'info', data: { returned: ready.length, still, collisions: check.collisions },
       });
-      const staged = ready.length ? await stageRun(store, repo, events, runId, row.config.prBatchSize, ready.map((t) => t.id)) : null;
+      const staged = ready.length ? await stageRun(store, repo, events, runId, row.config.prBatchSize, { only: ready.map((t) => t.id), progress: this.progress }) : null;
       if (staged) {
         for (const b of store.listBatches(runId).filter((x) => staged.seqs.includes(x.seq))) {
           store.updateBatch(b.id, { detail: { ...(b.detail as Record<string, unknown> | null), claimCheck: { at, collisions: {} } } });
@@ -922,8 +963,9 @@ export class RunEngine {
       delete prior.dryRunFingerprint;
       delete prior.dryRunUncheckedClaims;
       store.updateBatch(batchId, { detail: prior });
+      this.progress(`${opts.dryRun ? 'Dry run' : 'Submission'} of batch ${batch.seq}: re-recording claims and drafters`, `sr claim for ${tasks.length} packet(s)`);
       await this.reclaim(runId, tasks, dryRun?.signal);
-      const result = await repo.submitBatch!(input);
+      const result = await repo.submitBatch!({ ...input, progress: (step, detail, done, total) => this.progress(`${opts.dryRun ? 'Dry run' : 'Submission'} of batch ${batch.seq}: ${step}`, detail, done, total) });
       const r = dryRun?.signal.aborted ? { ...result, ok: false, cancelled: true, problems: [], blockers: [], uncheckedClaims: [], warnings: [], plan: [], error: null } : result;
       const onlyUnchecked = !r.cancelled && !r.blockers.length && !r.problems.length && !!r.uncheckedClaims?.length && r.submissionStarted !== true;
       if (opts.dryRun && !r.cancelled && !r.blockers.length && !r.problems.length && (r.ok || onlyUnchecked)) {
@@ -960,12 +1002,40 @@ export class RunEngine {
     if (this.active.size || this.discovering) throw new Error('a run is active; wait for it to finish before using the worktree slots');
     if (this.exclusiveHolder) throw new Error(`worktree slots are busy (${this.exclusiveHolder})`);
     this.exclusiveHolder = label;
+    this.beginOperation(label);
     try {
       return await fn();
     } finally {
       this.exclusiveHolder = null;
+      this.op = null;
     }
   }
+
+  /** The operation holding the worktree slots, if any, with its current step and recent history. */
+  operation(): OperationProgress | null {
+    return this.op ? { ...this.op, log: this.op.log.slice(-15) } : null;
+  }
+
+  private beginOperation(label: string) {
+    const now = Date.now();
+    this.op = { runId: /run_[a-z0-9]+/.exec(label)?.[0] ?? null, label, startedAt: now, step: label, detail: null, done: null, total: null, stepStartedAt: now, log: [] };
+  }
+
+  /** Report progress of the current operation (a new step is also kept in its history). */
+  private progress: ProgressFn = (step, detail = null, done = null, total = null) => {
+    const op = this.op;
+    if (!op) return;
+    const now = Date.now();
+    if (step !== op.step) {
+      op.log.push({ at: op.stepStartedAt, step: op.step, ms: now - op.stepStartedAt });
+      if (op.log.length > 60) op.log.splice(0, op.log.length - 60);
+      op.step = step;
+      op.stepStartedAt = now;
+    }
+    op.detail = detail ?? null;
+    op.done = done ?? null;
+    op.total = total ?? null;
+  };
 
   isIdle() {
     return this.active.size === 0 && this.discovering === null && this.exclusiveHolder === null;
@@ -1572,6 +1642,7 @@ export class RunEngine {
       return; // cancelled, or paused/hard-stopped with work left
     }
     this.exclusiveHolder = `finishing ${runId}`;
+    this.beginOperation(`staging the finished run ${runId}`);
     const staging = this.finishStaging(run);
     this.finishing.set(runId, staging.catch(() => undefined));
     this.active.delete(runId);
@@ -1580,6 +1651,7 @@ export class RunEngine {
     } finally {
       this.finishing.delete(runId);
       this.exclusiveHolder = null;
+      this.op = null;
     }
     // Curation runs shadow evaluations on the slots: only once the slot lock is released.
     if (store.getRun(runId)?.status === 'completed' && run.row.config.skills.enabled && run.row.config.skills.autoCurate) queueMicrotask(() => this.afterRun?.(runId));
@@ -1593,7 +1665,7 @@ export class RunEngine {
     await this.releaseUnsubmitted(runId, stagingOff ? 'test run with staging off: nothing is submitted' : 'not matched in this run', stagingOff);
     try {
       if (stagingOff) events.emit('run.staging', 'staging off: nothing committed in the target repository; accepted files stay in this run\'s attempts', { runId });
-      const batches = stagingOff ? { staged: 0, failed: 0, seqs: [] } : await stageRun(store, this.deps.repo, events, runId, run.row.config.prBatchSize);
+      const batches = stagingOff ? { staged: 0, failed: 0, seqs: [] } : await stageRun(store, this.deps.repo, events, runId, run.row.config.prBatchSize, { progress: this.progress });
       store.setRunStatus(runId, 'completed', ['running', 'paused']);
       const fc = store.functionCounts(runId);
       const failed = batches.failed ? `, ${batches.failed} batch(es) failed re-verification (packets stay passed; stage again from the run)` : '';
@@ -1698,4 +1770,18 @@ function describeCollisions(collisions: Record<string, ClaimCollision[]>): strin
   }
   const all = [...seen.values()];
   return all.length > 8 ? `${all.slice(0, 8).join(', ')} and ${all.length - 8} more` : all.join(', ');
+}
+
+/** Live state of the operation holding the worktree slots. */
+export interface OperationProgress {
+  runId: string | null;
+  label: string;
+  startedAt: number;
+  step: string;
+  detail: string | null;
+  done: number | null;
+  total: number | null;
+  stepStartedAt: number;
+  /** Finished steps, oldest first, with how long each took. */
+  log: Array<{ at: number; step: string; ms: number }>;
 }

@@ -582,11 +582,12 @@ export class SrRepo implements RepoAdapter {
     await this.writeFiles(slot, input.files);
     const problems: string[] = [];
     const ac = new AbortController();
-    for (const t of input.tasks) {
+    for (const [i, t] of input.tasks.entries()) {
       if (!t.srTaskId) {
         problems.push(`${t.id}: no sr task id`);
         continue;
       }
+      input.progress?.('re-verify', `sr compare ${t.srTaskId}: ${t.functions.map((f) => f.name ?? f.rva).join(', ')}`, i, input.tasks.length);
       const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal: ac.signal, timeoutMs: 600_000 });
       if (!r.allPass) problems.push(`${t.id}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
     }
@@ -597,6 +598,7 @@ export class SrRepo implements RepoAdapter {
       return { branch: null, verified: false, problems };
     }
     const branch = `decomp/${input.runId}-b${input.seq}`;
+    input.progress?.('commit', `all packets match: committing ${branch}`, input.tasks.length, input.tasks.length);
     const co = await this.git(p, ['checkout', '-q', '-B', branch]);
     const add = co.code === 0 ? await this.git(p, ['add', '--', ...input.files.map((f) => f.path)]) : co;
     const commit = add.code === 0 ? await this.git(p, ['commit', '-q', '-m', input.message]) : add;
@@ -635,12 +637,13 @@ export class SrRepo implements RepoAdapter {
       // writes each task's last-compare.json, which `sr submit` checks against the unit's digest.
       signal.throwIfAborted();
       await this.writeFiles(slot, input.files);
-      for (const t of input.tasks) {
+      for (const [i, t] of input.tasks.entries()) {
         signal.throwIfAborted();
         if (!t.srTaskId) {
           out.problems.push(`${t.id}: no sr task id`);
           continue;
         }
+        input.progress?.('Rebuilding the batch from the base and re-verifying every packet', `sr compare ${t.srTaskId}: ${t.functions.map((f) => f.name ?? f.rva).join(', ')}`, i, input.tasks.length);
         const r = await this.compare(slot, t.task, { srTaskId: t.srTaskId, allowedPaths: [], packs: [], toolingChanges: [] }, { signal, timeoutMs: 600_000 });
         if (!r.allPass) out.problems.push(`${t.id}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
       }
@@ -667,8 +670,9 @@ export class SrRepo implements RepoAdapter {
       const args = ['tools/contrib.py', '--json', 'submit'];
       const attribution = ['--drafted-by', input.draftedBy];
       const unchecked: string[] = [];
-      for (const id of ids) {
+      for (const [i, id] of [...ids].entries()) {
         signal.throwIfAborted();
+        input.progress?.('Checking claims and gates with sr submit --dry-run for every task', `sr submit --dry-run ${id}`, i, ids.size);
         if (!id || !/^[A-Za-z0-9._-]+$/.test(id)) {
           unchecked.push(`${id ?? 'unknown task'}: invalid sr task ID for claims check`);
           continue;
@@ -693,6 +697,7 @@ export class SrRepo implements RepoAdapter {
       if (unchecked.length) out.warnings.push(...unchecked.map((issue) => `Unchecked claims accepted by operator: ${issue}`));
       signal.throwIfAborted();
       out.submissionStarted = true;
+      input.progress?.('Submitting: sr submit pushes the branch and opens the pull request', `sr submit ${last.srTaskId}`, null, null);
       const run = await this.host.run(this.cfg.python, [...args, last.srTaskId, ...attribution], { cwd: p, env, signal, timeoutMs: 900_000, maxOutputBytes: 8 * 1024 * 1024 });
       const j = parseJsonOutput(run.stdout) as Record<string, unknown> | null;
       out.blockers = list(j?.blockers);

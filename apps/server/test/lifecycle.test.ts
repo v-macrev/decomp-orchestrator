@@ -608,3 +608,61 @@ describe('dropping colliding packets from every batch at once', () => {
     expect((await s.engine.dropCollidingPacketsAll(run.id)).withheldTasks).toBe(0);
   }, 60_000);
 });
+
+describe('live progress and interrupted staging', () => {
+  it('reports what the slot-holding operation is doing while it runs, and nothing after', async () => {
+    const s = setup();
+    const run = createRun(s, 'progress', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    expect(s.engine.operation()).toBeNull();
+    const batch = s.store.listBatches(run.id).find((b) => b.status === 'branch_ready')!;
+    const victim = s.store.getTask(batch.taskIds[0]!)!;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    s.repo.claimCollisions = async () => {
+      await gate;
+      return { checked: true, error: null, collisions: { [victim.functions[0]!.rva]: [{ url: 'https://github.com/o/r/issues/7', author: 'x', updatedAt: null }] } };
+    };
+    const seen: string[] = [];
+    const real = s.repo.stageBatch.bind(s.repo);
+    s.repo.stageBatch = async (input) => {
+      input.progress?.('re-verify', 'sr compare t1', 0, input.tasks.length);
+      seen.push(s.engine.operation()!.step);
+      return real(input);
+    };
+    const pending = s.engine.dropCollidingPacketsAll(run.id);
+    await until(() => !!s.engine.operation()?.step.startsWith('Checking'));
+    const op = s.engine.operation()!;
+    expect(op.runId).toBe(run.id);
+    expect(op.step).toMatch(/^Checking \d+ functions in 1 batch\(es\) against GitHub/);
+    release();
+    const r = await pending;
+    if (r.staged?.seqs.length) {
+      expect(seen[0]).toMatch(/^Re-verifying batch \d+: \d+ functions in \d+ packet\(s\)$/);
+    }
+    expect(s.engine.operation()).toBeNull();
+  }, 60_000);
+
+  it('marks a batch left in draft by a restart as interrupted and re-verifies exactly its packets', async () => {
+    const s = setup();
+    const run = createRun(s, 'interrupted', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = s.store.listBatches(run.id).find((b) => b.status === 'branch_ready')!;
+    // What a restart mid-staging leaves behind: a draft batch whose packets are still passed.
+    s.store.unstageBatch(batch, batch.detail);
+    const draftId = 'batch_draft_test';
+    s.store.createBatch({ id: draftId, runId: run.id, seq: s.store.maxBatchSeq(run.id) + 1, taskIds: batch.taskIds });
+    expect(s.engine.markInterruptedBatches()).toBe(1);
+    expect(s.store.getBatch(draftId)!.status).toBe('interrupted');
+    await expect(s.engine.restageInterrupted(run.id, batch.id)).rejects.toThrow(/only an interrupted batch/);
+
+    const r = await s.engine.restageInterrupted(run.id, draftId);
+    expect(r.staged).toBe(1);
+    const fresh = s.store.listBatches(run.id).find((b) => b.seq === r.seqs[0])!;
+    expect(fresh.status).toBe('branch_ready');
+    expect(fresh.taskIds.sort()).toEqual([...batch.taskIds].sort());
+    expect(s.store.getBatch(draftId)).toMatchObject({ status: 'superseded', detail: expect.objectContaining({ supersededBy: r.seqs }) });
+  }, 60_000);
+});
