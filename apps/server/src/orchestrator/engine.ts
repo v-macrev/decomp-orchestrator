@@ -650,9 +650,15 @@ export class RunEngine {
   }
 
   listBatches(runId: string) {
-    return this.deps.store.listBatches(runId).map((batch) => {
+    const { store } = this.deps;
+    return store.listBatches(runId).map((batch) => {
       const dryRun = this.dryRuns.get(batch.id);
-      return { ...batch, dryRunState: dryRun ? (dryRun.signal.aborted ? 'cancelling' : 'running') : null };
+      // Every function of the batch with its unit and its packet's state now (staged, withheld, ...).
+      const functions = batch.taskIds.flatMap((id) => {
+        const t = store.getTask(id);
+        return t ? t.functions.map((fn) => ({ rva: fn.rva, name: fn.name, unit: t.unit, taskId: t.id, state: t.state })) : [];
+      });
+      return { ...batch, functions, dryRunState: dryRun ? (dryRun.signal.aborted ? 'cancelling' : 'running') : null };
     });
   }
 
@@ -693,59 +699,107 @@ export class RunEngine {
   }
 
   /**
-   * Hold back the packets of a staged batch that collide with other contributors' open claims or
+   * Hold back the packets of one staged batch that collide with other contributors' open claims or
    * pull requests (the rule `sr submit` blocks on), and stage the rest as a new batch.
-   * A unit's final file carries every packet of the unit, so a collision withholds the whole unit.
-   * Withheld packets keep their local claims and go back into staging with `recheckWithheld` once
-   * the claims lapse or close. The old batch's local branches are deleted; nothing is pushed.
    */
   async dropCollidingPackets(runId: string, batchId: string) {
+    const r = await this.dropCollisions(runId, [batchId]);
+    const b = r.batches[0]!;
+    return { ...b, collisions: r.collisions, staged: r.staged };
+  }
+
+  /** The same for every unsubmitted staged batch of the run, with one claims check for all of them. */
+  async dropCollidingPacketsAll(runId: string) {
+    return this.dropCollisions(runId, null);
+  }
+
+  /**
+   * One claims check over the batches' functions; in each batch every unit with a colliding function
+   * is withheld (a unit's final file carries every packet of the unit). Batches that lose packets
+   * have their local branches deleted and become `superseded`; their other packets are re-verified
+   * together as new batches. Withheld packets keep their local claims and go back into staging with
+   * `recheckWithheld` once the claims lapse or close. Nothing is pushed; nothing changes unless every
+   * function could be checked.
+   */
+  private async dropCollisions(runId: string, batchIds: string[] | null) {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
     if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be changed`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
-    const batch = store.getBatch(batchId);
-    if (!batch || batch.runId !== runId) throw new Error('batch not found');
-    const prior = { ...(batch.detail as Record<string, unknown> | null) } as Record<string, unknown> & { lastSubmit?: { dryRun: boolean; submissionStarted?: boolean }; pr?: string; link?: string };
-    const realAttempt = prior.lastSubmit?.dryRun === false && prior.lastSubmit.submissionStarted !== false;
-    if (batch.status !== 'branch_ready' || prior.pr || prior.link || realAttempt) throw new Error(`batch ${batch.seq} is ${batch.status}: only an unsubmitted staged batch can drop packets`);
     if (!repo.claimCollisions) throw new Error('this repository adapter cannot check claims');
-    const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
-    if (!tasks.length || tasks.length !== batch.taskIds.length || tasks.some((t) => t.state !== 'staged')) throw new Error('every packet of the batch must still be staged');
-    return this.exclusive(`checking claims for ${runId} b${batch.seq}`, async () => {
-      const check = await repo.claimCollisions!(tasks.flatMap((t) => t.functions.map((f) => f.rva)));
+    type Detail = Record<string, unknown> & { lastSubmit?: { dryRun: boolean; submissionStarted?: boolean }; pr?: string; link?: string };
+    const unsubmitted = (b: NonNullable<ReturnType<Store['getBatch']>>) => {
+      const d = (b.detail ?? {}) as Detail;
+      const realAttempt = d.lastSubmit?.dryRun === false && d.lastSubmit.submissionStarted !== false;
+      return b.status === 'branch_ready' && !d.pr && !d.link && !realAttempt;
+    };
+    const chosen = batchIds
+      ? batchIds.map((id) => {
+          const b = store.getBatch(id);
+          if (!b || b.runId !== runId) throw new Error('batch not found');
+          if (!unsubmitted(b)) throw new Error(`batch ${b.seq} is ${b.status}: only an unsubmitted staged batch can drop packets`);
+          return b;
+        })
+      : store.listBatches(runId).filter(unsubmitted);
+    if (!chosen.length) throw new Error('no unsubmitted staged batches');
+    const work = chosen.map((batch) => {
+      const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
+      if (!tasks.length || tasks.length !== batch.taskIds.length || tasks.some((t) => t.state !== 'staged')) throw new Error(`every packet of batch ${batch.seq} must still be staged`);
+      return { batch, tasks };
+    });
+    const label = batchIds?.length === 1 ? `checking claims for ${runId} b${chosen[0]!.seq}` : `checking claims for ${chosen.length} batches of ${runId}`;
+    return this.exclusive(label, async () => {
+      const check = await repo.claimCollisions!(work.flatMap((w) => w.tasks.flatMap((t) => t.functions.map((f) => f.rva))));
       if (!check.checked) throw new Error(`claims could not be checked, nothing changed: ${check.error ?? 'unknown error'}`);
-      const units = new Set(tasks.filter((t) => t.functions.some((f) => check.collisions[f.rva])).map((t) => t.unit));
-      const withheld = tasks.filter((t) => units.has(t.unit));
-      const keep = tasks.filter((t) => !units.has(t.unit));
-      const claimCheck = { at: Date.now(), collisions: check.collisions };
-      if (!withheld.length) {
-        store.updateBatch(batchId, { detail: { ...prior, claimCheck } });
-        events.emit('batch.claims_clear', `batch ${batch.seq}: no other open claim or pull request names its functions`, { runId });
-        return { withheldTasks: 0, withheldFunctions: 0, keptTasks: tasks.length, collisions: check.collisions, units: [] as string[], staged: null as StageSummary | null, deleted: [] as string[] };
+      const at = Date.now();
+      const keep: TaskRow[] = [];
+      const affected: string[] = [];
+      const results = [];
+      for (const { batch, tasks } of work) {
+        const prior = { ...(batch.detail as Detail | null) } as Detail;
+        const collisions = Object.fromEntries(tasks.flatMap((t) => t.functions.filter((f) => check.collisions[f.rva]).map((f) => [f.rva, check.collisions[f.rva]!])));
+        const claimCheck = { at, collisions };
+        const units = new Set(tasks.filter((t) => t.functions.some((f) => collisions[f.rva])).map((t) => t.unit));
+        const withheld = tasks.filter((t) => units.has(t.unit));
+        const kept = tasks.filter((t) => !units.has(t.unit));
+        const fnCount = withheld.reduce((n, t) => n + t.functions.length, 0);
+        results.push({ seq: batch.seq, batchId: batch.id, withheldTasks: withheld.length, withheldFunctions: fnCount, keptTasks: kept.length, keptFunctions: kept.reduce((n, t) => n + t.functions.length, 0), units: [...units], deleted: [] as string[] });
+        if (!withheld.length) {
+          store.updateBatch(batch.id, { detail: { ...prior, claimCheck } });
+          continue;
+        }
+        const deleted = results.at(-1)!.deleted;
+        if (repo.deleteBatchBranch && batch.branch === `decomp/${runId}-b${batch.seq}`) {
+          for (const branch of [`${batch.branch}-pr`, batch.branch]) if (await repo.deleteBatchBranch(branch)) deleted.push(branch);
+        }
+        delete prior.dryRunFingerprint;
+        delete prior.dryRunUncheckedClaims;
+        store.unstageBatch(batch, { ...prior, claimCheck, withheld: { taskIds: withheld.map((t) => t.id), units: [...units] } });
+        store.updateBatch(batch.id, { status: 'superseded' });
+        const hold = store.db.prepare("UPDATE tasks SET state = 'withheld', updated_at = ? WHERE id = ? AND run_id = ? AND state = 'passed'");
+        store.tx(() => withheld.forEach((t) => hold.run(Date.now(), t.id, runId)));
+        events.emit('batch.packets_withheld', `batch ${batch.seq}: ${fnCount} function(s) in ${units.size} unit(s) withheld; other open claims or PRs name ${Object.keys(collisions).length} of them (${describeCollisions(collisions)})`, {
+          runId, level: 'warn', data: { seq: batch.seq, units: [...units], collisions, deleted },
+        });
+        keep.push(...kept);
+        affected.push(batch.id);
       }
-      const deleted: string[] = [];
-      if (repo.deleteBatchBranch && batch.branch === `decomp/${runId}-b${batch.seq}`) {
-        for (const branch of [`${batch.branch}-pr`, batch.branch]) if (await repo.deleteBatchBranch(branch)) deleted.push(branch);
-      }
-      delete prior.dryRunFingerprint;
-      delete prior.dryRunUncheckedClaims;
-      store.unstageBatch(batch, { ...prior, claimCheck, withheld: { taskIds: withheld.map((t) => t.id), units: [...units] } });
-      store.updateBatch(batchId, { status: 'superseded' });
-      const hold = store.db.prepare("UPDATE tasks SET state = 'withheld', updated_at = ? WHERE id = ? AND run_id = ? AND state = 'passed'");
-      store.tx(() => withheld.forEach((t) => hold.run(Date.now(), t.id, runId)));
-      const fnCount = withheld.reduce((n, t) => n + t.functions.length, 0);
-      const owners = describeCollisions(check.collisions);
-      events.emit('batch.packets_withheld', `batch ${batch.seq}: ${fnCount} function(s) in ${units.size} unit(s) withheld; other open claims or PRs name ${Object.keys(check.collisions).length} of them (${owners})`, {
-        runId, level: 'warn', data: { seq: batch.seq, units: [...units], collisions: check.collisions, deleted },
-      });
+      const clear = results.filter((r) => !r.withheldTasks).map((r) => r.seq);
+      if (clear.length) events.emit('batch.claims_clear', `batch ${clear.join(', ')}: no other open claim or pull request names their functions`, { runId });
       let staged: StageSummary | null = null;
       if (keep.length) {
         staged = await stageRun(store, repo, events, runId, row.config.prBatchSize, keep.map((t) => t.id));
-        if (staged.seqs.length) store.updateBatch(batchId, { detail: { ...(store.getBatch(batchId)!.detail as Record<string, unknown> | null), supersededBy: staged.seqs } });
+        // The restaged packets were just checked: record that on the new batches too.
+        const fresh = store.listBatches(runId).filter((b) => staged!.seqs.includes(b.seq));
+        for (const b of fresh) store.updateBatch(b.id, { detail: { ...(b.detail as Record<string, unknown> | null), claimCheck: { at, collisions: {} } } });
+        for (const id of affected) store.updateBatch(id, { detail: { ...(store.getBatch(id)!.detail as Record<string, unknown> | null), supersededBy: staged.seqs } });
       }
-      return { withheldTasks: withheld.length, withheldFunctions: fnCount, keptTasks: keep.length, collisions: check.collisions, units: [...units], staged, deleted };
+      return {
+        batches: results, collisions: check.collisions, staged,
+        withheldTasks: results.reduce((n, r) => n + r.withheldTasks, 0),
+        withheldFunctions: results.reduce((n, r) => n + r.withheldFunctions, 0),
+      };
     });
   }
 
@@ -765,15 +819,29 @@ export class RunEngine {
     return this.exclusive(`rechecking withheld packets of ${runId}`, async () => {
       const check = await repo.claimCollisions!(tasks.flatMap((t) => t.functions.map((f) => f.rva)));
       if (!check.checked) throw new Error(`claims could not be checked, nothing changed: ${check.error ?? 'unknown error'}`);
+      const at = Date.now();
       const blocked = new Set(tasks.filter((t) => t.functions.some((f) => check.collisions[f.rva])).map((t) => t.unit));
       const ready = tasks.filter((t) => !blocked.has(t.unit));
       const back = store.db.prepare("UPDATE tasks SET state = 'passed', updated_at = ? WHERE id = ? AND run_id = ? AND state = 'withheld'");
       store.tx(() => ready.forEach((t) => back.run(Date.now(), t.id, runId)));
+      // Keep each superseded batch's view of its withheld packets' claims current.
+      for (const b of store.listBatches(runId)) {
+        const d = b.detail as (Record<string, unknown> & { withheld?: { taskIds: string[] } }) | null;
+        if (!d?.withheld) continue;
+        const rvas = new Set(d.withheld.taskIds.flatMap((id) => store.getTask(id)?.functions.map((f) => f.rva) ?? []));
+        const collisions = Object.fromEntries(Object.entries(check.collisions).filter(([rva]) => rvas.has(rva)));
+        store.updateBatch(b.id, { detail: { ...d, claimCheck: { at, collisions } } });
+      }
       const still = tasks.length - ready.length;
       events.emit('run.withheld_rechecked', `withheld packets rechecked: ${ready.length} back into staging, ${still} still withheld${still ? ` (${describeCollisions(check.collisions)})` : ''}`, {
         runId, level: still ? 'warn' : 'info', data: { returned: ready.length, still, collisions: check.collisions },
       });
       const staged = ready.length ? await stageRun(store, repo, events, runId, row.config.prBatchSize, ready.map((t) => t.id)) : null;
+      if (staged) {
+        for (const b of store.listBatches(runId).filter((x) => staged.seqs.includes(x.seq))) {
+          store.updateBatch(b.id, { detail: { ...(b.detail as Record<string, unknown> | null), claimCheck: { at, collisions: {} } } });
+        }
+      }
       return { returnedTasks: ready.length, stillWithheldTasks: still, collisions: check.collisions, staged };
     });
   }

@@ -129,3 +129,22 @@ table.assign input[type=checkbox], table.models input[type=checkbox] { margin: 0
 .form-grid .wide { grid-column: 1 / -1; }
 .form-grid .hint { font-size: 11px; }
 table.models td { vertical-align: middle; }
+
+/* PR batch progress: staged → claims → dry run → PR */
+.steps { display: inline-flex; gap: 2px; align-items: stretch; }
+.step { font-size: 11px; padding: 1px 7px; border: 1px solid var(--border); background: var(--panel-2); color: var(--muted); white-space: nowrap; }
+.step:first-child { border-radius: 999px 0 0 999px; }
+.step:last-child { border-radius: 0 999px 999px 0; }
+.step.done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 50%, transparent); }
+.step.blocked { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 60%, transparent); font-weight: 600; }
+.step.next { color: var(--accent); border-color: var(--accent); font-weight: 600; }
+.next-hint { font-size: 12px; margin-top: 3px; }
+.pipeline { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.pipeline .stage { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; background: var(--panel-2); min-width: 110px; }
+.pipeline .stage b { font-size: 18px; display: block; }
+.pipeline .stage span { font-size: 11px; color: var(--muted); }
+.pipeline .arrow { align-self: center; color: var(--muted); }
+tr.superseded > td { opacity: .6; }
+table.fns td, table.fns th { padding: 3px 6px; font-size: 12px; }
+table.fns tr.unit-hit > td { background: color-mix(in srgb, var(--bad) 9%, transparent); }
+table.fns tr.unit-row > td { border-top: 1px solid var(--border); font-family: var(--mono); font-size: 11px; color: var(--muted); }

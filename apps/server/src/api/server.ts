@@ -267,6 +267,15 @@ export async function buildServer(app: App) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
+  // The same for every unsubmitted staged batch of the run (one claims check; the kept packets are restaged together).
+  f.post('/api/runs/:id/batches/drop-collisions', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.dropCollidingPacketsAll(req.params.id)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   // Check withheld packets against open claims again and stage the units that are clear now.
   f.post('/api/runs/:id/withheld/recheck', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');

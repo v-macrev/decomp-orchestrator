@@ -103,7 +103,10 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    `{ "dryRun": false, "confirm": true }`). If other contributors claimed some of a batch's
    functions after your run picked them, **Drop colliding packets**
    (`POST /api/runs/:id/batches/:batchId/drop-collisions`) withholds those units (task state
-   `withheld`, local claims kept) and restages the rest as a new batch. **Recheck withheld**
+   `withheld`, local claims kept) and restages the rest as a new batch; **Drop colliding packets in all batches**
+   (`POST /api/runs/:id/batches/drop-collisions`) does it for every staged batch with one claims
+   check. Each batch row shows its progress (staged → claims → dry run → PR) and the next step, and
+   **Show** lists its functions with the claims that name them and when they lapse. **Recheck withheld**
    (`POST /api/runs/:id/withheld/recheck`) batches them again once those claims lapse or close.
 6. Runs can be edited (`PATCH /api/runs/:id`: name, drafted-by, budget, functions per PR) and
    deleted (`DELETE /api/runs/:id`, which releases the local claims the run still holds). A new

@@ -524,7 +524,7 @@ describe('dropping packets that collide with other contributors\' claims', () =>
     const old = s.store.getBatch(batch.id)!;
     expect(old.status).toBe('superseded');
     expect(old.branch).toBeNull();
-    const detail = old.detail as { withheld: { taskIds: string[] }; supersededBy: number[] };
+    const detail = old.detail as unknown as { withheld: { taskIds: string[] }; supersededBy: number[] };
     expect(detail.withheld.taskIds.sort()).toEqual(unitTasks.map((t) => t.id).sort());
     expect(r.staged?.seqs).toEqual(detail.supersededBy);
     const next = s.store.listBatches(run.id).find((b) => b.seq === detail.supersededBy[0])!;
@@ -563,5 +563,48 @@ describe('dropping packets that collide with other contributors\' claims', () =>
 
     s.store.updateBatch(batch.id, { status: 'submitted', detail: { pr: 'https://github.com/o/r/pull/9' } });
     await expect(s.engine.dropCollidingPackets(run.id, batch.id)).rejects.toThrow(/only an unsubmitted staged batch/);
+  }, 60_000);
+});
+
+describe('dropping colliding packets from every batch at once', () => {
+  it('checks claims once, splits only the batches that collide, restages their rest together and marks the others clear', async () => {
+    const s = setup();
+    const run = s.engine.createRun('collide-all', { flowId: 'default', selection: { source: 'synthetic', count: 36, seed: 5 }, prBatchSize: 12 }, flow());
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const ready = s.store.listBatches(run.id).filter((b) => b.status === 'branch_ready');
+    expect(ready.length).toBeGreaterThan(2);
+    // A collision in the first batch, none elsewhere; the first batch must keep at least one unit.
+    const victimBatch = ready.find((b) => new Set(b.taskIds.map((id) => s.store.getTask(id)!.unit)).size > 1)!;
+    expect(victimBatch).toBeTruthy();
+    const victim = s.store.getTask(victimBatch.taskIds[0]!)!;
+    s.repo.claimedByOthers.set(victim.functions[0]!.rva, [{ url: 'https://github.com/o/r/issues/7', author: 'someone-else', updatedAt: '2026-11-20T23:45:08Z' }]);
+    let checks = 0;
+    const real = s.repo.claimCollisions.bind(s.repo);
+    s.repo.claimCollisions = async (rvas) => {
+      checks++;
+      return real(rvas);
+    };
+
+    const r = await s.engine.dropCollidingPacketsAll(run.id);
+    expect(checks).toBe(1);
+    expect(r.batches).toHaveLength(ready.length);
+    const hit = r.batches.filter((x) => x.withheldTasks);
+    expect(hit.map((x) => x.batchId)).toEqual([victimBatch.id]);
+    expect(s.store.getBatch(victimBatch.id)!.status).toBe('superseded');
+    for (const b of ready.filter((x) => x.id !== victimBatch.id)) {
+      const now = s.store.getBatch(b.id)!;
+      expect(now.status).toBe('branch_ready');
+      expect((now.detail as unknown as { claimCheck: { collisions: object } }).claimCheck.collisions).toEqual({});
+    }
+    const fresh = s.engine.listBatches(run.id).filter((b) => r.staged!.seqs.includes(b.seq));
+    expect(fresh.flatMap((b) => b.taskIds).sort()).toEqual(victimBatch.taskIds.filter((id) => s.store.getTask(id)!.unit !== victim.unit).sort());
+    for (const b of fresh) expect((b.detail as unknown as { claimCheck: { collisions: object } }).claimCheck.collisions).toEqual({});
+    // The batch list shows every function with its packet's state now.
+    const old = s.engine.listBatches(run.id).find((b) => b.id === victimBatch.id)!;
+    expect(old.functions.filter((f) => f.unit === victim.unit).every((f) => f.state === 'withheld')).toBe(true);
+    expect(old.functions.filter((f) => f.unit !== victim.unit).every((f) => f.state === 'staged')).toBe(true);
+    // Nothing left to drop from: every staged batch is clear now.
+    expect((await s.engine.dropCollidingPacketsAll(run.id)).withheldTasks).toBe(0);
   }, 60_000);
 });

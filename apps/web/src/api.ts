@@ -211,6 +211,8 @@ export interface Batch {
   taskIds: string[];
   branch: string | null;
   dryRunState: 'running' | 'cancelling' | null;
+  /** Every function of the batch, with its unit and its packet's state now. */
+  functions: Array<{ rva: string; name: string | null; unit: string; taskId: string; state: string }>;
   detail: {
     functions?: number; problems?: string[]; draftedBy?: string | null; models?: string[];
     pr?: string | null; link?: string | null; prBranch?: string; submittedAt?: number;
@@ -234,15 +236,30 @@ export interface ClaimCollision {
 
 interface StageResult { staged: number; failed: number; seqs: number[] }
 
-export interface DropCollisionsResult {
-  ok: true;
+export interface BatchDropResult {
+  seq: number;
+  batchId: string;
   withheldTasks: number;
   withheldFunctions: number;
   keptTasks: number;
+  keptFunctions: number;
   units: string[];
+  deleted: string[];
+}
+
+export interface DropCollisionsResult extends BatchDropResult {
+  ok: true;
   collisions: Record<string, ClaimCollision[]>;
   staged: StageResult | null;
-  deleted: string[];
+}
+
+export interface DropAllCollisionsResult {
+  ok: true;
+  batches: BatchDropResult[];
+  withheldTasks: number;
+  withheldFunctions: number;
+  collisions: Record<string, ClaimCollision[]>;
+  staged: StageResult | null;
 }
 
 export interface RecheckWithheldResult {
@@ -305,6 +322,7 @@ export const api = {
   stageRun: (id: string) => req<{ ok: boolean; staged: number; failed: number }>('POST', `/api/runs/${id}/stage`, {}),
   submitBatch: (id: string, batchId: string, real: boolean, allowUncheckedClaims = false) => req<SubmitResult>('POST', `/api/runs/${id}/batches/${batchId}/submit`, real ? { dryRun: false, confirm: true, allowUncheckedClaims } : { dryRun: true }),
   dropCollisions: (id: string, batchId: string) => req<DropCollisionsResult>('POST', `/api/runs/${id}/batches/${batchId}/drop-collisions`, {}),
+  dropAllCollisions: (id: string) => req<DropAllCollisionsResult>('POST', `/api/runs/${id}/batches/drop-collisions`, {}),
   recheckWithheld: (id: string) => req<RecheckWithheldResult>('POST', `/api/runs/${id}/withheld/recheck`, {}),
   cancelBatchDryRun: (id: string, batchId: string) => req<{ ok: true }>('POST', `/api/runs/${id}/batches/${batchId}/cancel-dry-run`, {}),
   clearBatchBranches: (id: string, batchId: string, scope: 'preview' | 'batch') => req<{ deleted: string[] }>('DELETE', `/api/runs/${id}/batches/${batchId}/branches`, { scope }),
