@@ -479,6 +479,7 @@ function RunEditor({ runId, status, onSaved }: { runId: string; status: string; 
 const CLAIM_LAPSE_MS = 24 * 3600_000;
 const issueNo = (url: string) => `#${/\/(\d+)$/.exec(url)?.[1] ?? url}`;
 const fmtDuration = (ms: number) => {
+  if (ms < 60_000) return `${Math.max(0, Math.round(ms / 1000))}s`;
   const m = Math.round(ms / 60_000);
   return m < 60 ? `${m}m` : `${Math.floor(m / 60)}h ${String(m % 60).padStart(2, '0')}m`;
 };
@@ -664,7 +665,7 @@ function OperationPanel({ op, runId }: { op: OperationProgress; runId: string })
       {pct !== null && <div className="bar"><span style={{ width: `${pct}%`, background: 'var(--accent)' }} /></div>}
       {op.log.length > 0 && (
         <ol start={Math.max(1, op.log.length - 5)}>
-          {op.log.slice(-6).map((l) => <li key={`${l.at}-${l.step}`}>✓ {l.step} <span>({l.ms < 60_000 ? `${Math.round(l.ms / 1000)}s` : fmtDuration(l.ms)})</span></li>)}
+          {op.log.slice(-6).map((l) => <li key={`${l.at}-${l.step}`}>✓ {l.step} <span>({fmtDuration(l.ms)})</span></li>)}
         </ol>
       )}
       <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>Runs on the server: you can leave or reload this page. Batch buttons wait until it finishes.</div>
