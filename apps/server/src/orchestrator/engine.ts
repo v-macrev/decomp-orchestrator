@@ -504,12 +504,16 @@ export class RunEngine {
     clearInterval(this.reaper);
     clearInterval(this.claimWatch);
     clearInterval(this.prWatch);
+    for (const t of this.rollTimers.values()) clearTimeout(t);
+    this.rollTimers.clear();
   }
 
   close() {
     clearInterval(this.reaper);
     clearInterval(this.claimWatch);
     clearInterval(this.prWatch);
+    for (const t of this.rollTimers.values()) clearTimeout(t);
+    this.rollTimers.clear();
   }
 
   /**
@@ -545,25 +549,39 @@ export class RunEngine {
     return store.listTasks(runId, { state: 'passed', limit: 100_000 }).filter((t) => !open.has(t.unit) && !(opts.rolling && t.fix?.check === 'review' && t.fix.prOpen));
   }
 
+  /** Units with matched packets in a failed or interrupted batch: they wait for the run's end or Prepare all. */
+  private failedBatchUnits(runId: string): Set<string> {
+    const { store } = this.deps;
+    const ids = store.listBatches(runId).filter((b) => b.status === 'failed' || b.status === 'interrupted').flatMap((b) => b.taskIds);
+    const units = new Set<string>();
+    for (const id of ids) {
+      const t = store.getTask(id);
+      if (t?.state === 'passed') units.add(t.unit);
+    }
+    return units;
+  }
+
   /**
    * How close the run is to its next batch: matched functions ready to batch (their unit is done),
-   * matched functions still waiting on packets of their unit, and the batch size. Read only.
+   * those of them no failed batch holds (what a rolling batch takes), matched functions still
+   * waiting on packets of their unit, and the batch size. Read only; aggregate queries only.
    */
   batchingStatus(runId: string) {
     const { store } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    const ready = this.readyTasks(runId, { rolling: true });
-    const passed = store.listTasks(runId, { state: 'passed', limit: 100_000 });
-    const fns = (ts: TaskRow[]) => ts.reduce((n, t) => n + t.functions.length, 0);
-    const readyIds = new Set(ready.map((t) => t.id));
-    const waiting = passed.filter((t) => !readyIds.has(t.id));
+    const units = store.readyUnits(runId);
+    const failed = this.failedBatchUnits(runId);
+    const passed = store.passedTotals(runId);
+    const sum = (us: typeof units) => ({ functions: us.reduce((n, u) => n + u.functions, 0), packets: us.reduce((n, u) => n + u.packets, 0), units: us.length });
+    const ready = sum(units);
     return {
       batchSize: row.config.prBatchSize,
       fullAt: readyThreshold(row.config.prBatchSize),
-      rolling: row.config.staging !== 'off',
-      ready: { functions: fns(ready), packets: ready.length, units: new Set(ready.map((t) => t.unit)).size },
-      waiting: { functions: fns(waiting), packets: waiting.length, units: new Set(waiting.map((t) => t.unit)).size },
+      rolling: row.config.staging !== 'off' && row.status !== 'completed',
+      ready,
+      fresh: sum(units.filter((u) => !failed.has(u.unit))),
+      waiting: { functions: Math.max(0, passed.functions - ready.functions), packets: Math.max(0, passed.packets - ready.packets), units: Math.max(0, passed.units - ready.units) },
       batching: this.rolling.has(runId),
     };
   }
@@ -573,26 +591,50 @@ export class RunEngine {
    * them at once (re-verified on the staging worktree, beside the workers), so a PR can be opened
    * before other contributors claim the same functions. Whole units only, packed densely; batches
    * under `readyThreshold` wait for more (the run's end batches whatever is left).
+   * Verdicts come in bursts: checks are coalesced per run, and each is one aggregate query unless
+   * the ready set changed and fills a batch.
    */
-  private stageReadySoon(runId: string) {
-    queueMicrotask(() => this.stageReady(runId));
+  private rollTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  /** Per run: the ready set (unit:functions list) that last packed into no batch full enough. */
+  private rollSeen = new Map<string, string>();
+
+  private stageReadySoon(runId: string, delayMs = 250) {
+    if (this.rollTimers.has(runId)) return;
+    const t = setTimeout(() => {
+      this.rollTimers.delete(runId);
+      this.stageReady(runId);
+    }, delayMs);
+    t.unref?.();
+    this.rollTimers.set(runId, t);
   }
 
   private stageReady(runId: string) {
     const run = this.active.get(runId);
-    if (!run || run.cancel.signal.aborted || run.row.config.staging === 'off' || this.rolling.has(runId)) return;
+    if (!run || run.cancel.signal.aborted || this.rolling.has(runId) || this.finishing.has(runId)) return;
     if (this.exclusiveHolder || this.discovering) return; // tried again when the slot lock is released
-    const size = run.row.config.prBatchSize;
-    if (!this.fullBins(runId, size).length) return;
     const { store, repo, events } = this.deps;
+    const config = store.getRun(runId)?.config ?? run.row.config;
+    if (config.staging === 'off') return;
+    const size = config.prBatchSize;
+    const units = store.readyUnits(runId);
+    if (units.reduce((n, u) => n + u.functions, 0) < size) return;
+    const key = `${size}|${units.map((u) => `${u.unit}:${u.functions}`).join('|')}`;
+    if (this.rollSeen.get(runId) === key) return; // this exact ready set already packed into no full batch
+    if (!this.fullBins(runId, size).length) {
+      this.rollSeen.set(runId, key);
+      return;
+    }
+    this.rollSeen.delete(runId);
     this.rolling.add(runId);
     void this.exclusive(`batching the ready functions of ${runId}`, async () => {
       const seqs: number[] = [];
       let failed = 0;
       for (let bin = this.fullBins(runId, size)[0]; bin; bin = this.fullBins(runId, size)[0]) {
+        if (run.cancel.signal.aborted) break;
         const s = await stageRun(store, repo, events, runId, size, { only: bin.taskIds, pack: 'dense', progress: this.progress });
         seqs.push(...s.seqs);
         failed += s.failed;
+        if (!s.seqs.length) break; // nothing left to stage from that bin (its packets moved on)
       }
       if (seqs.length) {
         events.emit('run.batched_early', `${seqs.length} batch(es) of ready functions made while the run goes on (batch ${seqs.join(', ')})${failed ? `; ${failed} failed re-verification` : ''}: they can be dry-run and submitted now`, {
@@ -612,15 +654,20 @@ export class RunEngine {
    * Packets of a batch that failed re-verification wait for the run's end (or Prepare all).
    */
   private fullBins(runId: string, size: number) {
-    const { store } = this.deps;
-    const failedUnits = new Set(store.listBatches(runId).filter((b) => b.status === 'failed' || b.status === 'interrupted').flatMap((b) => b.taskIds.map((id) => store.getTask(id)).filter((t) => t?.state === 'passed').map((t) => t!.unit)));
+    const failedUnits = this.failedBatchUnits(runId);
     const byUnit = new Map<string, TaskRow[]>();
-    for (const t of this.readyTasks(runId, { rolling: true })) if (!failedUnits.has(t.unit)) byUnit.set(t.unit, [...(byUnit.get(t.unit) ?? []), t]);
-    const total = [...byUnit.values()].flat().reduce((n, t) => n + t.functions.length, 0);
+    for (const t of this.readyTasks(runId, { rolling: true })) {
+      if (failedUnits.has(t.unit)) continue;
+      const list = byUnit.get(t.unit);
+      if (list) list.push(t);
+      else byUnit.set(t.unit, [t]);
+    }
+    const fnsOf = (items: TaskRow[]) => items.reduce((n, t) => n + t.functions.length, 0);
+    const total = [...byUnit.values()].reduce((n, items) => n + fnsOf(items), 0);
     if (total < size) return [];
-    const bins = packUnits([...byUnit].map(([unit, items]) => ({ unit, functions: items.reduce((n, t) => n + t.functions.length, 0), items })), size);
+    const bins = packUnits([...byUnit].map(([unit, items]) => ({ unit, functions: fnsOf(items), items })), size);
     return bins
-      .map((items) => ({ taskIds: items.map((t) => t.id), functions: items.reduce((n, t) => n + t.functions.length, 0) }))
+      .map((items) => ({ taskIds: items.map((t) => t.id), functions: fnsOf(items) }))
       .filter((b) => b.functions >= readyThreshold(size))
       .sort((a, b) => b.functions - a.functions);
   }
@@ -1651,8 +1698,23 @@ export class RunEngine {
         done.push(`re-verified the failed batches: ${s.staged} staged, ${s.failed} still failing`);
       }
       // Matched packets in no batch yet (staging was off, or a batch was cleared): batch them too.
+      // While the run goes on with staging on, only ready units that fill a batch: the rest waits
+      // for more matches (rolling batches) instead of becoming small pull requests.
+      const going = store.getRun(runId)?.status !== 'completed';
       const failedNow = new Set(failedLeft().flatMap((b) => b.taskIds));
-      const loose = this.readyTasks(runId).filter((t) => !failedNow.has(t.id));
+      const loose = going && row.config.staging !== 'off' ? [] : this.readyTasks(runId).filter((t) => !failedNow.has(t.id));
+      if (going && row.config.staging !== 'off') {
+        let staged = 0;
+        let failed = 0;
+        for (let bin = this.fullBins(runId, row.config.prBatchSize)[0]; bin; bin = this.fullBins(runId, row.config.prBatchSize)[0]) {
+          if (this.active.get(runId)?.cancel.signal.aborted) break;
+          const s = await stageRun(store, repo, this.deps.events, runId, row.config.prBatchSize, { only: bin.taskIds, pack: 'dense', progress: this.progress });
+          staged += s.staged;
+          failed += s.failed;
+          if (!s.seqs.length) break;
+        }
+        if (staged + failed) done.push(`batched the ready functions that fill a batch: ${staged} staged, ${failed} failing`);
+      }
       if (loose.length) {
         if (row.config.staging === 'off' && store.getRun(runId)?.status === 'completed') await this.reclaim(runId, loose);
         const s = await stageRun(store, repo, this.deps.events, runId, row.config.prBatchSize, { only: loose.map((t) => t.id), progress: this.progress });

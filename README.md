@@ -123,6 +123,17 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    **Combine into bigger batches** (next to Prepare all for PR; `POST /api/runs/:id/batches/rebalance`,
    plan at `GET`) regroups the unsubmitted batches into as few as fit 60 functions each, whole units,
    biggest first, and re-verifies them; batches with a PR are never touched.
+   **Batches during the run**: you do not wait for the run to end. Once the matched functions of
+   finished units (no packet of the unit left to work on) fill a PR batch (`prBatchSize`, 40 by
+   default), they become a batch at once, checked in a clean tree on the staging worktree while the
+   workers keep going; a group under 90% of the batch size waits for more, and the run's end
+   batches whatever is left. The queue finishes units it has started before opening new ones, so
+   units complete, and batches fill, early. Every PR step (Prepare all, dry run, submit, claims,
+   set aside, combine, fixes) works on a running or paused run too, on the staging worktree only;
+   the run's end waits for a step in progress. The PR batches tab shows **Next PR batch: N of 40**
+   (`GET /api/runs/:id/batching`: functions ready, those waiting on their unit, the batch size).
+   The Packets tab pages through packets (50 to 500 per page) and counts functions, not only
+   packets, for every state.
    After submission each PR batch shows its pull request as GitHub has it (open, merged, closed),
    read when the tab opens, every 10 minutes for open PRs, and on **Check GitHub now**
    (`POST /api/runs/:id/pull-requests/refresh`), with every comment, review and inline comment from

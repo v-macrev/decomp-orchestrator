@@ -261,6 +261,23 @@ export class Store {
     const rows = this.db.prepare('SELECT state, COUNT(*) n FROM tasks WHERE run_id = ? GROUP BY state').all(runId) as Raw[];
     return Object.fromEntries(rows.map((r) => [r.state, r.n]));
   }
+  /**
+   * Matched packets per unit that no packet of the run still works on (none pending, leased or
+   * being gated), leaving out fixes from an open PR's review. One aggregate query: no rows parsed.
+   */
+  readyUnits(runId: string): Array<{ unit: string; packets: number; functions: number }> {
+    return this.db.prepare(`SELECT t.unit unit, COUNT(*) packets, SUM(json_array_length(t.functions_json)) functions FROM tasks t
+      WHERE t.run_id = @runId AND t.state = 'passed'
+        AND NOT (t.fix_json IS NOT NULL AND json_extract(t.fix_json, '$.check') = 'review' AND COALESCE(json_extract(t.fix_json, '$.prOpen'), 0) = 1)
+        AND NOT EXISTS (SELECT 1 FROM tasks o WHERE o.run_id = @runId AND o.unit = t.unit AND o.state IN ('pending', 'leased', 'gating'))
+      GROUP BY t.unit`).all({ runId }) as Array<{ unit: string; packets: number; functions: number }>;
+  }
+  /** Matched ('passed') packets, functions and units of the run. */
+  passedTotals(runId: string): { packets: number; functions: number; units: number } {
+    const r = this.db.prepare(`SELECT COUNT(*) packets, COALESCE(SUM(json_array_length(functions_json)), 0) functions, COUNT(DISTINCT unit) units
+      FROM tasks WHERE run_id = ? AND state = 'passed'`).get(runId) as { packets: number; functions: number; units: number };
+    return r;
+  }
   functionCounts(runId: string): Record<string, number> {
     const rows = this.db
       .prepare('SELECT state, SUM(json_array_length(functions_json)) n FROM tasks WHERE run_id = ? GROUP BY state')

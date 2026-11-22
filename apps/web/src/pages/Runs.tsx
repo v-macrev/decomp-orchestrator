@@ -3,7 +3,7 @@
 // packets and telemetry. Each screen leads with the one next step; details sit one click away.
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { Flow, Task, TelemetryEvent } from '@decomp/core';
-import { api, stream, type AccountView, type Batch, type CapacityPlan, type ClaimCollision, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
+import { api, stream, type AccountView, type Batch, type BatchingStatus,type CapacityPlan, type ClaimCollision, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { TaskDrawer } from '../components/TaskDrawer';
 
@@ -280,6 +280,38 @@ function Ring({ value, label }: { value: number; label: string }) {
 
 type RunTab = 'overview' | 'batches' | 'packets' | 'details';
 
+const PAGE_SIZES = [50, 100, 200, 500];
+const PACKET_STATES = ['pending', 'leased', 'gating', 'passed', 'staged', 'withheld', 'set_aside', 'dead', 'quarantined', 'cancelled'];
+/** The Packets tab's summary: functions (and packets) per group of states; a one-state group filters. */
+const PACKET_GROUPS: Array<[string, string[], string]> = [
+  ['matched', ['passed', 'staged', 'withheld', 'set_aside'], 'ok'],
+  ['in a PR batch', ['staged'], 'ok'],
+  ['not batched yet', ['passed'], ''],
+  ['held back', ['withheld', 'set_aside'], 'warn'],
+  ['to do', ['pending', 'leased', 'gating'], ''],
+  ['failed', ['dead', 'quarantined'], 'bad'],
+];
+
+const fmtCount = (n: number) => n.toLocaleString();
+
+function Pager({ page, pages, total, pageSize, onPage, onPageSize }: { page: number; pages: number; total: number; pageSize: number; onPage: (p: number) => void; onPageSize: (n: number) => void }) {
+  const from = total ? page * pageSize + 1 : 0;
+  const to = Math.min(total, (page + 1) * pageSize);
+  return (
+    <nav className="pager" aria-label="Packet pages">
+      <span className="muted small grow">{fmtCount(from)}–{fmtCount(to)} of {fmtCount(total)} packets</span>
+      <button className="tiny" disabled={page === 0} onClick={() => onPage(0)} aria-label="First page">«</button>
+      <button className="tiny" disabled={page === 0} onClick={() => onPage(page - 1)} aria-label="Previous page">‹ Prev</button>
+      <span className="small">Page {page + 1} of {pages}</span>
+      <button className="tiny" disabled={page >= pages - 1} onClick={() => onPage(page + 1)} aria-label="Next page">Next ›</button>
+      <button className="tiny" disabled={page >= pages - 1} onClick={() => onPage(pages - 1)} aria-label="Last page">»</button>
+      <select value={pageSize} onChange={(e) => onPageSize(Number(e.target.value))} aria-label="Packets per page">
+        {PAGE_SIZES.map((n) => <option key={n} value={n}>{n} per page</option>)}
+      </select>
+    </nav>
+  );
+}
+
 function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: () => void; onDeleted: () => void }) {
   const [m, setM] = useState<Metrics | null>(null);
   const [events, setEvents] = useState<TelemetryEvent[]>([]);
@@ -292,6 +324,25 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
   const [retryFailedError, setRetryFailedError] = useState('');
   const [retryFailedMessage, setRetryFailedMessage] = useState('');
   const [editing, setEditing] = useState(false);
+  const [batching, setBatching] = useState<BatchingStatus | null>(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState<number>(() => {
+    try {
+      const n = Number(localStorage.getItem('packetsPageSize'));
+      return PAGE_SIZES.includes(n) ? n : 100;
+    } catch {
+      return 100;
+    }
+  });
+  const choosePageSize = (n: number) => {
+    setPageSize(n);
+    setPage(0);
+    try {
+      localStorage.setItem('packetsPageSize', String(n));
+    } catch {
+      /* private window: for this visit only */
+    }
+  };
 
   useEffect(() => {
     api.metrics(runId).then(setM).catch(() => undefined);
@@ -303,13 +354,14 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
   }, [runId]);
   useEffect(() => {
     const load = () => {
-      api.tasks(runId, filter || undefined).then(setTasks).catch(() => undefined);
+      api.tasks(runId, filter || undefined, page * pageSize, pageSize).then(setTasks).catch(() => undefined);
       api.batches(runId).then(setBatches).catch(() => undefined);
+      api.batching(runId).then(setBatching).catch(() => undefined);
     };
     load();
     const t = setInterval(load, 4_000);
     return () => clearInterval(t);
-  }, [runId, filter]);
+  }, [runId, filter, page, pageSize]);
 
   if (!m) return <div className="panel muted">Loading the run…</div>;
   const f = m.functions;
@@ -365,6 +417,13 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
   const left = Math.max(0, m.totalFunctions - done);
   const view: RunTab = tab ?? (status === 'completed' && (batches.length > 0 || (m.tasks.passed ?? 0) > 0) ? 'batches' : 'overview');
   const unbatched = m.tasks.passed ?? 0;
+  const live = status === 'running' || status === 'paused';
+  const packetTotal = Object.values(m.tasks).reduce((a, b) => a + b, 0);
+  const fnTotal = Object.values(f).reduce((a, b) => a + b, 0);
+  // The pager counts what the filter shows; a page past the end (packets moved on) goes to the last one.
+  const shownTotal = filter ? m.tasks[filter] ?? 0 : packetTotal;
+  const pages = Math.max(1, Math.ceil(shownTotal / pageSize));
+  if (page >= pages) setPage(pages - 1);
   const sentence = (() => {
     switch (status) {
       case 'running': return `Working on it: ${inFlight} function(s) in progress, ${m.queueDepth} waiting${m.throughput.etaMinutes !== null ? `, about ${m.throughput.etaMinutes} min left` : ''}.`;
@@ -378,7 +437,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
   const tabs: Array<[RunTab, string, ReactNode?]> = [
     ['overview', 'Overview'],
     ['batches', 'PR batches', batches.filter((b) => b.status === 'branch_ready').length || null],
-    ['packets', 'Packets', m.totalFunctions ? Object.values(m.tasks).reduce((a, b) => a + b, 0) : null],
+    ['packets', 'Packets', m.totalFunctions ? `${fmtCount(packetTotal)} · ${fmtCount(fnTotal)} fn` : null],
     ['details', 'Telemetry'],
   ];
   return (
@@ -455,8 +514,11 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
       )}
 
       {view === 'batches' && (
-        batches.length > 0 || (status === 'completed' && unbatched > 0)
-          ? <BatchesPanel runId={runId} status={status} passed={unbatched} withheld={m.tasks.withheld ?? 0} setAside={m.tasks.set_aside ?? 0} batches={batches} reload={() => api.batches(runId).then(setBatches).catch(() => undefined)} />
+        batches.length > 0 || (status === 'completed' && unbatched > 0) || live
+          ? <BatchesPanel runId={runId} status={status} passed={unbatched} withheld={m.tasks.withheld ?? 0} setAside={m.tasks.set_aside ?? 0} heldFunctions={(f.withheld ?? 0) + (f.set_aside ?? 0)} batching={batching} batches={batches} reload={() => {
+            api.batches(runId).then(setBatches).catch(() => undefined);
+            api.batching(runId).then(setBatching).catch(() => undefined);
+          }} />
           : <div className="hero"><span className="eyebrow">PR batches</span><h3>{finished ? 'Nothing to batch' : 'Batches come when the run finishes'}</h3><p>{finished ? 'This run has no matched functions waiting for a pull request.' : 'Matched functions are grouped into pull requests once the run has finished.'}</p></div>
       )}
 
@@ -464,11 +526,27 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
         <div className="panel">
           <div className="row" style={{ marginBottom: 8 }}>
             <h2 className="grow" style={{ margin: 0 }}>Packets</h2>
-            <select value={filter} onChange={(e) => setFilter(e.target.value)} aria-label="Filter by state">
-              <option value="">all states</option>
-              {['pending', 'leased', 'gating', 'passed', 'staged', 'withheld', 'set_aside', 'dead', 'quarantined', 'cancelled'].map((s) => <option key={s} value={s}>{s} ({m.tasks[s] ?? 0})</option>)}
+            <select value={filter} onChange={(e) => { setFilter(e.target.value); setPage(0); }} aria-label="Filter by state">
+              <option value="">all states ({fmtCount(packetTotal)} packets · {fmtCount(fnTotal)} functions)</option>
+              {PACKET_STATES.map((s) => <option key={s} value={s}>{s} ({fmtCount(m.tasks[s] ?? 0)} packets · {fmtCount(f[s] ?? 0)} functions)</option>)}
             </select>
           </div>
+          <div className="pkt-sum" aria-label="Functions by state">
+            {PACKET_GROUPS.map(([label, states, tone]) => {
+              const fns = states.reduce((n, s) => n + (f[s] ?? 0), 0);
+              const pk = states.reduce((n, s) => n + (m.tasks[s] ?? 0), 0);
+              const body = <><b>{fmtCount(fns)}</b><span>{label}</span><span className="muted small">{fmtCount(pk)} packet{pk === 1 ? '' : 's'}</span></>;
+              const title = `${fmtCount(fns)} function(s) in ${fmtCount(pk)} packet(s)`;
+              if (states.length > 1) return <div key={label} className={`pkt-stat ${tone}`} title={`${title}: ${states.join(', ')}`}>{body}</div>;
+              const on = filter === states[0];
+              return (
+                <button key={label} className={`pkt-stat ${tone} ${on ? 'active' : ''}`} disabled={!pk && !on} aria-pressed={on} onClick={() => { setFilter(on ? '' : states[0]!); setPage(0); }} title={`${title}; click to ${on ? 'show every state' : 'show only these'}`}>
+                  {body}
+                </button>
+              );
+            })}
+          </div>
+          <Pager page={page} pages={pages} total={shownTotal} pageSize={pageSize} onPage={setPage} onPageSize={choosePageSize} />
           <div style={{ overflowX: 'auto' }}>
             <table>
               <thead><tr><th>Unit</th><th>Functions</th><th>Difficulty</th><th>State</th><th>Tier</th><th>Worker</th><th>Attempts</th><th>Best bytes</th></tr></thead>
@@ -491,6 +569,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
               </tbody>
             </table>
           </div>
+          {pages > 1 && <Pager page={page} pages={pages} total={shownTotal} pageSize={pageSize} onPage={setPage} onPageSize={choosePageSize} />}
         </div>
       )}
 
@@ -934,7 +1013,40 @@ function SetAsideList({ batches, locked, busy, putBack }: { batches: Batch[]; lo
  * the repository's own `sr submit`. The screen leads with the one next step (usually "Prepare all
  * for PR", which runs every fix-up and dry run in order); submitting stays an explicit click per batch.
  */
-function BatchesPanel({ runId, status, passed, withheld, setAside, batches, reload }: { runId: string; status: string; passed: number; withheld: number; setAside: number; batches: Batch[]; reload: () => void }) {
+/** While the run goes on: how full the next PR batch is (whole units only), and what still waits on its unit. */
+function RollingMeter({ b, status }: { b: BatchingStatus; status: string }) {
+  const n = b.fresh.functions;
+  const pct = Math.min(100, (n / Math.max(1, b.batchSize)) * 100);
+  const full = n >= b.batchSize;
+  return (
+    <div className={`rolling ${full ? 'full' : ''}`} aria-label="Next PR batch">
+      <div className="row">
+        <span className="eyebrow grow">{b.rolling ? 'Next PR batch' : 'Ready to batch'}</span>
+        {b.batching && <span className="small"><span className="spinner" aria-hidden="true" /> making a batch now…</span>}
+      </div>
+      <div className="row">
+        <span className="big-n">{fmtCount(n)} of {b.batchSize}</span>
+        <span className="muted grow">functions ready{b.fresh.units ? ` in ${b.fresh.units} finished unit${b.fresh.units === 1 ? '' : 's'}` : ''}</span>
+      </div>
+      <div className="meter" role="meter" aria-valuemin={0} aria-valuemax={b.batchSize} aria-valuenow={Math.min(n, b.batchSize)}>
+        <div className="track"><div className="fill" style={{ width: `${pct}%` }} /><div className="mark" style={{ left: `${(b.fullAt / Math.max(1, b.batchSize)) * 100}%` }} title={`a batch can be made from ${b.fullAt} functions`} /></div>
+      </div>
+      <span className="muted small">
+        {b.rolling
+          ? `Once ${b.batchSize} functions of finished units are ready, they become a batch at once (checked in a clean tree beside the workers), so you can dry-run and submit it while the run goes on.`
+          : status === 'paused' ? 'The run is paused: Prepare all for PR batches the ready functions.' : 'Staging is off for this run: Prepare all for PR batches the ready functions.'}
+        {b.waiting.functions > 0 && ` ${fmtCount(b.waiting.functions)} more matched function${b.waiting.functions === 1 ? ' waits' : 's wait'} for packets still in progress in ${b.waiting.units === 1 ? 'its unit' : `their ${b.waiting.units} units`}.`}
+        {b.ready.functions > b.fresh.functions && ` ${fmtCount(b.ready.functions - b.fresh.functions)} are in a failed batch: Prepare all checks them again.`}
+      </span>
+    </div>
+  );
+}
+
+function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions, batching, batches, reload }: { runId: string; status: string; passed: number; withheld: number; setAside: number; heldFunctions: number; batching: BatchingStatus | null; batches: Batch[]; reload: () => void }) {
+  const completed = status === 'completed';
+  // PR steps work on a finished run, and beside a running or paused one (on the staging worktree).
+  const live = status === 'running' || status === 'paused';
+  const pipeline = completed || live;
   const [busy, setBusy] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState<string | null>(null);
   const [msg, setMsg] = useState('');
@@ -1118,22 +1230,21 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
   // How the unsubmitted batches would combine into fewer, bigger ones (whole units, up to 60 functions).
   const [regroup, setRegroup] = useState<{ max: number; batches: Array<{ seq: number; functions: number }>; after: number[]; functions: number } | null>(null);
   useEffect(() => {
-    if (status !== 'completed') return setRegroup(null);
+    if (!pipeline) return setRegroup(null);
     api.rebalancePlan(runId).then(setRegroup).catch(() => setRegroup(null));
-  }, [runId, status, batches]);
+  }, [runId, pipeline, batches]);
 
   // Pull requests on GitHub: read again quietly when the tab opens and the last read is a few minutes old.
   const prKey = batches.filter((b) => b.detail?.pr && b.detail.prUpdateOf === undefined).map((b) => b.id).join(',');
   useEffect(() => {
-    if (status !== 'completed' || !prKey) return;
+    if (!pipeline || !prKey) return;
     const stale = batches.some((b) => b.detail?.pr && b.detail.prUpdateOf === undefined && b.detail.prStatus?.state !== 'merged' && Date.now() - (b.detail.prStatus?.checkedAt ?? 0) > 3 * 60_000);
     if (stale) api.refreshPullRequests(runId).then(() => reloadRef.current()).catch(() => undefined);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [runId, status, prKey]);
+  }, [runId, pipeline, prKey]);
 
   const busyBatch = batches.some((b) => b.dryRunState);
   const locked = !!busy || busyBatch || !!op;
-  const completed = status === 'completed';
   const current = batches.filter((b) => b.status !== 'superseded');
   const history = batches.filter((b) => b.status === 'superseded').sort((x, y) => y.seq - x.seq);
   const views = new Map(current.map((b) => [b.id, batchView(b)]));
@@ -1150,9 +1261,12 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
   const fnCount = (list: Batch[]) => list.reduce((n, b) => n + (b.functions.length || b.detail?.functions || 0), 0);
   // Passed packets of a failed batch are that batch's to re-check; the rest have no batch at all.
   const inFailed = new Set(current.filter((b) => actionOf(b) === 'restage').flatMap((b) => b.functions.filter((f) => f.state === 'passed').map((f) => f.taskId)));
-  const loose = Math.max(0, passed - inFailed.size);
+  // While the run goes on, only packets of finished units can be batched; with staging on, they
+  // become batches on their own once they fill one, so the hero does not push a smaller batch.
+  const looseNow = live ? batching?.fresh.packets ?? 0 : Math.max(0, passed - inFailed.size);
+  const loose = live && batching?.rolling ? 0 : looseNow;
 
-  const canRegroup = completed && !!regroup && regroup.batches.length > 1 && regroup.after.length < regroup.batches.length;
+  const canRegroup = pipeline && !!regroup && regroup.batches.length > 1 && regroup.after.length < regroup.batches.length;
   const regroupButton = canRegroup && (
     <ConfirmButton className="big" disabled={locked} onConfirm={rebalance}
       confirmLabel={`Combine batch ${regroup!.batches.map((b) => b.seq).join(', ')} into ${regroup!.after.length}?`}
@@ -1164,7 +1278,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
   const hero = (() => {
     if (op) return <OperationPanel op={op} runId={runId} />;
     if (busy) return <div className="op-panel"><div className="op-head"><span className="spinner" aria-hidden="true" /><div className="op-step">Starting…</div></div></div>;
-    if (!completed) return <div className="hero"><span className="eyebrow">PR batches</span><h3>Batches come when the run finishes</h3><p>Matched functions are grouped into pull requests once the run has finished.</p></div>;
+    if (!pipeline) return <div className="hero"><span className="eyebrow">PR batches</span><h3>No pull requests from this run</h3><p>The run is {status}: its matched functions are kept.</p></div>;
     if (needsWork.length || loose > 0) {
       return (
         <div className="hero">
@@ -1173,12 +1287,13 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
           <p>One click does everything below, in order, and shows its progress here:</p>
           <ol className="plan">
             {loose > 0 && <li>Batch the {loose} matched packet{loose === 1 ? '' : 's'} that have no batch yet, checking each batch in a clean tree.</li>}
+            {live && batching?.rolling && batching.fresh.functions >= batching.batchSize && <li>Batch the ready functions that fill a batch.</li>}
             {failedCount > 0 && <li>Check {failedCount} failed batch{failedCount === 1 ? '' : 'es'} again in a clean tree.</li>}
             <li>Set aside what upstream already has or changed (seconds, no compiling).</li>
             <li>Dry-run each batch: only what changed is recompiled, on every idle slot at once.</li>
             <li>Hold back units someone else claimed, and set aside units a dry run blames; the rest is dry-run again.</li>
           </ol>
-          <p>Nothing is pushed: you still submit each pull request yourself.</p>
+          <p>Nothing is pushed: you still submit each pull request yourself.{live ? ' The workers keep going meanwhile.' : ''}</p>
           <div className="row"><button className="primary big" disabled={locked} onClick={prepare}>Prepare all for PR</button>{regroupButton}{ready.length > 0 && <span className="muted small">{ready.length} batch{ready.length === 1 ? ' is' : 'es are'} already ready to submit.</span>}</div>
         </div>
       );
@@ -1194,6 +1309,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
       );
     }
     if (submitted.length) return <div className="hero done"><span className="eyebrow">All done</span><h3>Every batch is submitted</h3><p>{submitted.length} pull request{submitted.length === 1 ? '' : 's'} open.{withheld + setAside ? ' Some packets are still held back: see below.' : ''}</p></div>;
+    if (live) return null; // the next-batch meter says what comes next
     return <div className="hero"><span className="eyebrow">PR batches</span><h3>Nothing to submit right now</h3><p>{withheld + setAside ? 'Everything left is held back: see below.' : 'This run has no batches waiting.'}</p></div>;
   })();
 
@@ -1226,9 +1342,9 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
     const units = new Set(b.functions.map((f) => f.unit)).size;
     const idle = !(b.dryRunState || busy === `dry-${b.id}`);
     // A failed check the code can fix: re-verification, or dry-run findings other than claims and upstream.
-    const fixable = completed && idle && (b.status === 'failed' || (b.status === 'branch_ready' && !!last?.dryRun && !last.ok && findings.some((x) => !isClaimBlocker(x) && !/upstream/i.test(x))));
+    const fixable = pipeline && idle && (b.status === 'failed' || (b.status === 'branch_ready' && !!last?.dryRun && !last.ok && findings.some((x) => !isClaimBlocker(x) && !/upstream/i.test(x))));
     const fixButton = fixable && (
-      <ConfirmButton className="" disabled={locked} onConfirm={() => fix(b)} confirmLabel="Send the failing packets back to the AI agents? The run starts again."
+      <ConfirmButton className="" disabled={locked} onConfirm={() => fix(b)} confirmLabel={live ? 'Send the failing packets back to the AI agents? The run picks them up.' : 'Send the failing packets back to the AI agents? The run starts again.'}
         title="The packets this check failed go back to the run's AI workers, at the tier that matched them, with what the check reported; they run through the flow again (workers, Gate Keeper, escalation). The other packets stay matched, and everything is batched and checked again when the run finishes. Nothing is pushed.">
         {busy === `fix-${b.id}` ? 'Sending to the agents…' : 'Fix with AI agents'}
       </ConfirmButton>
@@ -1244,9 +1360,9 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
         {explainClosed
           ? <button onClick={() => toggleExplain(explainId, false)} title="Shows the saved explanation again (no new model call)">Show the explanation</button>
           : <button disabled={locked} onClick={() => explain(b)} title="One short model call reads the comments and explains each one in plain words: what it is about, what it means, and what to do. Unchanged comments reuse the saved explanation.">{busy === `explain-${b.id}` ? 'Reading the comments…' : d?.prExplain ? 'Explain again' : 'Explain the comments'}</button>}
-        {completed && prState && prState !== 'merged' && !d?.reviewFix && (
+        {pipeline && prState && prState !== 'merged' && !d?.reviewFix && (
           <ConfirmButton className="" disabled={locked} onConfirm={() => fixReview(b)}
-            confirmLabel={`Send the ${review.length} comment(s) to the AI agents as instructions? The run starts again.`}
+            confirmLabel={`Send the ${review.length} comment(s) to the AI agents as instructions? ${live ? 'The run picks them up.' : 'The run starts again.'}`}
             title={prState === 'open'
               ? 'The packets the comments are about go back to the run\'s AI workers with the comments as instructions, through the whole flow (Gate Keeper, escalation). When the run finishes, you push the fixes to this same pull request as one more commit.'
               : 'The pull request is closed: the packets the comments are about go back to the AI workers with the comments as instructions, the others are batched again with them, and the result becomes a new pull request (dry run, then Submit).'}>
@@ -1350,6 +1466,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
 
   return (
     <div className="stack">
+      {live && batching && <RollingMeter b={batching} status={status} />}
       {hero}
       {msg && <div className="notice" role="status">{msg}</div>}
       {err && <div className="notice error" role="alert">{err}</div>}
@@ -1357,7 +1474,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
         <div className="tiles">
           <div className="tile ok"><b>{ready.length}</b><span>ready to submit</span></div>
           <div className={`tile ${needsWork.length ? 'next' : ''}`}><b>{needsWork.length}</b><span>need a dry run or a fix</span></div>
-          <div className={`tile ${withheld + setAside ? 'warn' : ''}`}><b>{withheld + setAside}</b><span>packets held back</span></div>
+          <div className={`tile ${withheld + setAside ? 'warn' : ''}`}><b>{fmtCount(heldFunctions)}</b><span>functions held back · {withheld + setAside} packet{withheld + setAside === 1 ? '' : 's'}</span></div>
           <div className="tile ok"><b>{openPrs.length}</b><span>pull requests open</span></div>
           {merged.length > 0 && <div className="tile ok"><b>{merged.length}</b><span>merged upstream</span></div>}
         </div>
@@ -1387,11 +1504,11 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
           </div>
         </div>
       )}
-      {completed && (current.some((b) => b.status === 'branch_ready') || loose > 0 || failedCount > 0) && (
+      {pipeline && (current.some((b) => b.status === 'branch_ready') || looseNow > 0 || failedCount > 0) && (
         <details className="panel flat">
           <summary><b>Run one step yourself</b> <span className="muted small">what Prepare all for PR does, one piece at a time</span></summary>
           <div className="row" style={{ marginTop: 12 }}>
-            {loose > 0 && <button disabled={locked} onClick={stage} title="Group matched packets that have no batch into batches and check each in a clean tree">Batch matched packets</button>}
+            {looseNow > 0 && <button disabled={locked} onClick={stage} title={live ? 'Batch the matched packets of finished units now, without waiting for a full batch, and check each batch in a clean tree' : 'Group matched packets that have no batch into batches and check each in a clean tree'}>{live && batching?.rolling ? `Batch the ${looseNow} ready packet${looseNow === 1 ? '' : 's'} now` : 'Batch matched packets'}</button>}
             {failedCount > 0 && <ConfirmButton className="" disabled={locked} onConfirm={restageFailed} confirmLabel="Check every failed batch again?">Check failed batches again</ConfirmButton>}
             <ConfirmButton className="" disabled={locked} onConfirm={setAsideUpstream} confirmLabel="Check every batch against upstream?" title="Reads upstream's data/progress.json and the files each batch writes (seconds, no compiling) and sets aside what it already has or changed">Check against upstream</ConfirmButton>
             <ConfirmButton className="" disabled={locked} onConfirm={dropAll} confirmLabel="Check claims for every batch?" title="One GitHub claims check for every unsubmitted batch; claimed units are held back and the rest restaged. Nothing is pushed.">Check claims in all batches</ConfirmButton>

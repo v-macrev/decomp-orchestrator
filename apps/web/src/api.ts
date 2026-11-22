@@ -95,6 +95,23 @@ export interface RunSummary {
   engine: { active: boolean; paused: boolean; activeSlots: number; busySlots: number };
 }
 
+/** How close a run is to its next PR batch (GET /api/runs/:id/batching). */
+export interface BatchingStatus {
+  batchSize: number;
+  /** A rolling batch is made once its whole units hold this many functions. */
+  fullAt: number;
+  /** Ready units are batched while the run goes on (staging on, run not finished). */
+  rolling: boolean;
+  /** Matched, and no packet of their unit is still being worked on. */
+  ready: { functions: number; packets: number; units: number };
+  /** Of those, the ones no failed batch holds: what the next rolling batch takes. */
+  fresh: { functions: number; packets: number; units: number };
+  /** Matched, but their unit still has packets in progress. */
+  waiting: { functions: number; packets: number; units: number };
+  /** A rolling batch is being made right now. */
+  batching: boolean;
+}
+
 export interface Metrics {
   run: { id: string; name: string; status: string; costUsd: number; startedAt: number | null; finishedAt: number | null; budgetUsd: number | null; error: string | null; contextMode: 'budgeted' | 'legacy'; routingEnabled: boolean };
   routing: RoutingMetrics | null;
@@ -396,7 +413,8 @@ export const api = {
   retryFailedTasks: (id: string) => req<{ ok: boolean; requeued: number; tier: number; tierLabel: string; status: string }>('POST', `/api/runs/${id}/retry-failed`, {}),
   metrics: (id: string) => req<Metrics>('GET', `/api/runs/${id}/metrics`),
   runAction: (id: string, action: 'pause' | 'resume' | 'cancel', body?: unknown) => req('POST', `/api/runs/${id}/${action}`, body ?? {}),
-  tasks: (id: string, state?: string, offset = 0) => req<Task[]>('GET', `/api/runs/${id}/tasks?limit=200&offset=${offset}${state ? `&state=${state}` : ''}`),
+  tasks: (id: string, state?: string, offset = 0, limit = 200) => req<Task[]>('GET', `/api/runs/${id}/tasks?limit=${limit}&offset=${offset}${state ? `&state=${state}` : ''}`),
+  batching: (id: string) => req<BatchingStatus>('GET', `/api/runs/${id}/batching`),
   batches: (id: string) => req<Batch[]>('GET', `/api/runs/${id}/batches`),
   applyRunFlow: (id: string) => req<RunSummary>('POST', `/api/runs/${id}/flow`, {}),
   updateRun: (id: string, patch: RunEdit) => req<RunSummary>('PATCH', `/api/runs/${id}`, patch),

@@ -119,6 +119,17 @@ describe('work stealing (queue)', () => {
     expect(got[0]!.task.id).toBe('t0'); // highest priority first
     store.db.close();
   });
+
+  it('finishes units it has started before opening new ones, so they reach a PR batch sooner', () => {
+    const store = new Store(openDatabase(':memory:'));
+    const run = store.createRun({ id: 'r', name: 'r', config: { flowId: 'default', selection: { source: 'synthetic', count: 4, seed: 1 } } as never, flow: defaultFlow() });
+    const unit = (u: string) => `reconstruction/x/${u}.cpp`;
+    store.insertTasks(run.id, [['a', 9], ['a', 8], ['b', 10], ['c', 1]].map(([u, p], i) => ({ id: `t${i}`, unit: unit(u as string), functions: [{ rva: `0x${i + 1}0`, name: null, size: 8 }], priority: p as number, tier: 0, difficulty: 'easy' as const })));
+    store.db.prepare(`UPDATE tasks SET state = 'passed' WHERE id = 't0'`).run(); // unit a is started
+    const q = new TaskQueue(store);
+    expect(q.lease(run.id, 0, 2, 10_000).map((l) => l.task.id)).toEqual(['t1', 't2']); // a's last packet before b's higher priority
+    store.db.close();
+  });
 });
 
 describe('capability-aware account selection', () => {

@@ -9,7 +9,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultFlow, type Flow } from '@decomp/core';
 import { openDatabase } from '../src/db/database.js';
 import { Store } from '../src/db/store.js';
-import { RunEngine } from '../src/orchestrator/engine.js';
+import { readyThreshold, RunEngine } from '../src/orchestrator/engine.js';
 import { packUnits } from '../src/orchestrator/staging.js';
 import type { PrComment, PrStatus } from '../src/repo/types.js';
 import { commentLine, reviewComments, reviewTargets } from '../src/orchestrator/review.js';
@@ -996,5 +996,95 @@ describe('pull requests after submission', () => {
     const next = s.store.listBatches(run.id).filter((b) => b.status === 'branch_ready' && b.taskIds.some((id) => batch.taskIds.includes(id)));
     expect(next.length).toBeGreaterThan(0);
     for (const b of next) expect((b.detail as unknown as { updatesPr?: unknown }).updatesPr).toBeUndefined();
+  }, 60_000);
+});
+
+describe('batching while the run goes on', () => {
+  /** Holds every compare of the first unit the workers reach until `release()`: that unit stays open. */
+  const holdFirstUnit = (s: ReturnType<typeof setup>) => {
+    const real = s.repo.compare.bind(s.repo);
+    let held: string | null = null;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    s.repo.compare = async (...args: Parameters<SimRepo['compare']>) => {
+      held ??= args[1].unit;
+      if (args[1].unit === held) await gate;
+      return real(...args);
+    };
+    return { unit: () => held, release };
+  };
+
+  it('batches finished units once they fill a batch, leaves open units out, and batches the rest at the end', async () => {
+    const s = setup();
+    const hold = holdFirstUnit(s);
+    const run = s.engine.createRun('rolling', { flowId: 'default', selection: { source: 'synthetic', count: 30, seed: 11 }, prBatchSize: 6 }, flow());
+    await s.engine.start(run.id);
+    await until(() => s.store.listBatches(run.id).some((b) => b.status === 'branch_ready'));
+    expect(s.store.getRun(run.id)!.status).toBe('running');
+    const early = s.store.listBatches(run.id).filter((b) => b.status === 'branch_ready');
+    for (const b of early) {
+      const tasks = b.taskIds.map((id) => s.store.getTask(id)!);
+      expect(tasks.every((t) => t.unit !== hold.unit())).toBe(true);
+      expect(tasks.reduce((n, t) => n + t.functions.length, 0)).toBeGreaterThanOrEqual(readyThreshold(6));
+    }
+    const st = s.engine.batchingStatus(run.id);
+    expect(st).toMatchObject({ batchSize: 6, fullAt: readyThreshold(6), rolling: true });
+    expect(st.fresh.functions).toBeLessThanOrEqual(st.ready.functions);
+
+    hold.release();
+    await s.engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    expect(s.store.functionCounts(run.id).passed ?? 0).toBe(0);
+    const staged = s.store.listTasks(run.id, { state: 'staged', limit: 1000 });
+    expect(staged.some((t) => t.unit === hold.unit())).toBe(true);
+    // Every staged packet is in exactly one live batch.
+    const live = s.store.listBatches(run.id).filter((b) => b.status === 'branch_ready').flatMap((b) => b.taskIds);
+    expect(new Set(live).size).toBe(live.length);
+    expect(new Set(live)).toEqual(new Set(staged.map((t) => t.id)));
+    expect(s.engine.batchingStatus(run.id).ready.functions).toBe(0);
+  }, 60_000);
+
+  it('runs a PR step beside the workers on finished units only, and the run ends only after it', async () => {
+    const s = setup();
+    const hold = holdFirstUnit(s);
+    const run = s.engine.createRun('beside', { flowId: 'default', selection: { source: 'synthetic', count: 24, seed: 5 }, prBatchSize: 40, staging: 'off' }, flow());
+    await s.engine.start(run.id);
+    await until(() => s.engine.readyTasks(run.id).length > 0);
+
+    const real = s.repo.stageBatch.bind(s.repo);
+    let entered!: () => void;
+    const inStep = new Promise<void>((r) => (entered = r));
+    let finishStep!: () => void;
+    const stepGate = new Promise<void>((r) => (finishStep = r));
+    const stagedUnits: string[] = [];
+    s.repo.stageBatch = async (input: StageBatchInput) => {
+      stagedUnits.push(...input.tasks.map((t) => t.task.unit));
+      entered();
+      await stepGate;
+      return real(input);
+    };
+    const step = s.engine.restage(run.id);
+    await inStep;
+    expect(stagedUnits).not.toContain(hold.unit());
+    // Another run cannot start while this one is loaded.
+    const other = createRun(s, 'other', 6, 9);
+    await expect(s.engine.start(other.id)).rejects.toThrow();
+
+    // The held unit finishes; the run has nothing left to work on but waits for the step.
+    hold.release();
+    await until(() => {
+      const fc = s.store.functionCounts(run.id);
+      return !(fc.pending || fc.leased || fc.gating);
+    });
+    await new Promise((r) => setTimeout(r, 150));
+    expect(s.store.getRun(run.id)!.status).toBe('running');
+
+    finishStep();
+    const r = await step;
+    expect(r.staged).toBeGreaterThan(0);
+    await s.engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    // The held unit was not in that batch: it is still matched, waiting for Prepare all.
+    expect(s.store.listTasks(run.id, { state: 'passed', limit: 1000 }).some((t) => t.unit === hold.unit())).toBe(true);
   }, 60_000);
 });
