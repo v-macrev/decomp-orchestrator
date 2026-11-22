@@ -744,6 +744,15 @@ function batchView(b: Batch): { tone: Tone; title: string; why: string; action: 
     return { tone: 'muted', title: 'Replaced', why: `${held || 'Its packets were checked again'}${d?.supersededBy?.length ? `; the rest moved to batch ${d.supersededBy.join(', ')}` : ''}.`, action: 'none', steps };
   }
   if (claimed) return { tone: 'bad', title: 'Someone else claimed part of it', why: `Other contributors have open claims or PRs on ${claimed} function(s), so sr submit refuses it. Hold those units back; the rest becomes a new batch.`, action: 'drop', steps };
+  const outside = b.outside ?? [];
+  if (dryFailed && otherFindings && outside.length >= otherFindings) {
+    const files = [...new Set(outside.map((x) => x.slice(0, x.search(/:\d+:/))))];
+    return {
+      tone: 'bad', title: 'Blocked by a file this batch does not write',
+      why: `The dry run blames ${files.map((f) => f.slice(f.lastIndexOf('/') + 1)).join(', ')}, an upstream file that includes a header this batch changes; the line is wrong upstream. The AI agents cannot fix it (it is not in their packets). Set aside the units that change that header; the rest becomes a new batch, and they come back once upstream fixes the file.`,
+      action: 'aside', steps,
+    };
+  }
   if (dryFailed && otherFindings) return { tone: 'bad', title: 'The dry run found problems', why: `${otherFindings} finding(s), listed under Details. Set aside the units they name; the rest becomes a new batch.`, action: 'aside', steps };
   if (dryFailed) return { tone: 'bad', title: 'The dry run did not pass', why: last?.error ?? 'See the details, then run it again.', action: 'dry', steps };
   if (unchecked.length) {
@@ -1351,7 +1360,9 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
     const units = new Set(b.functions.map((f) => f.unit)).size;
     const idle = !(b.dryRunState || busy === `dry-${b.id}`);
     // A failed check the code can fix: re-verification, or dry-run findings other than claims and upstream.
-    const fixable = pipeline && idle && (b.status === 'failed' || (b.status === 'branch_ready' && !!last?.dryRun && !last.ok && findings.some((x) => !isClaimBlocker(x) && !/upstream/i.test(x))));
+    // Findings in a file the batch does not write are not the agents' to fix: they never see that file.
+    const notOurs = new Set(b.outside ?? []);
+    const fixable = pipeline && idle && (b.status === 'failed' || (b.status === 'branch_ready' && !!last?.dryRun && !last.ok && findings.some((x) => !isClaimBlocker(x) && !/upstream/i.test(x) && !notOurs.has(x))));
     const fixButton = fixable && (
       <ConfirmButton className="" disabled={locked} onConfirm={() => fix(b)} confirmLabel={live ? 'Send the failing packets back to the AI agents? The run picks them up.' : 'Send the failing packets back to the AI agents? The run starts again.'}
         title="The packets this check failed go back to the run's AI workers, at the tier that matched them, with what the check reported; they run through the flow again (workers, Gate Keeper, escalation). The other packets stay matched, and everything is batched and checked again when the run finishes. Nothing is pushed.">
@@ -1409,7 +1420,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
             {findings.length > 0 && (
               <div>
                 <b className="small">What the last {last?.dryRun ? 'dry run' : 'submission'} found</b>
-                <ul className="findings">{findings.slice(0, 12).map((x) => <li key={x}>{x}</li>)}</ul>
+                <ul className="findings">{findings.slice(0, 12).map((x) => <li key={x}>{x}{notOurs.has(x) && <span className="chip" style={{ marginLeft: 6 }} title="An upstream file that includes a header this batch changes: not in any packet of the batch">not in this batch</span>}</li>)}</ul>
                 {findings.length > 12 && <span className="muted small">and {findings.length - 12} more</span>}
               </div>
             )}

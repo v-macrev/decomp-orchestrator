@@ -749,6 +749,21 @@ describe('handling what blocks a batch', () => {
     expect(Object.keys(blame.units)).toEqual([victim.unit]);
     expect(blame.unattributed).toEqual(['nowhere/Else.cpp:1: missing reconstruction origin statement']);
     expect(blame.claims).toHaveLength(1);
+    // Neither finding is in a file the batch writes: the agents get nothing, and are told why.
+    expect(blame.outside).toEqual([`${dir}/Upstream.cpp:1: missing reconstruction origin statement in leading header; fix: add one`, 'nowhere/Else.cpp:1: missing reconstruction origin statement']);
+    const plan = await s.engine.fixPlan(run.id, batch.id);
+    expect(plan.targets).toEqual([]);
+    expect(plan.why).toMatch(/does not write/);
+    await expect(s.engine.fixBatchWithAgents(run.id, batch.id)).rejects.toThrow(/does not write/);
+    expect(s.engine.listBatches(run.id).find((b) => b.id === batch.id)!.outside).toHaveLength(2);
+    // A finding in the victim's own file still goes to the agents.
+    s.store.updateBatch(batch.id, { detail: { ...(s.store.getBatch(batch.id)!.detail as unknown as Record<string, unknown>), lastSubmit: { dryRun: true, ok: false, blockers: [
+      `${victim.unit}:3: deterministic screen: include-outside-roots; fix: use a reconstruction-root header path`,
+      `${dir}/Upstream.cpp:1: missing reconstruction origin statement in leading header; fix: add one`,
+    ], problems: [] } } });
+    const mixed = await s.engine.fixPlan(run.id, batch.id);
+    expect(new Set(mixed.targets.map((t) => t.task.unit))).toEqual(new Set([victim.unit]));
+    for (const t of mixed.targets) expect(t.reasons).toEqual([`${victim.unit}:3: deterministic screen: include-outside-roots; fix: use a reconstruction-root header path`]);
   }, 60_000);
 
   it('"Prepare all for PR" sets aside upstream work, withholds claimed units, and dry-runs the rest clean', async () => {

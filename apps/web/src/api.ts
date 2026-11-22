@@ -228,6 +228,8 @@ export interface Batch {
   taskIds: string[];
   branch: string | null;
   dryRunState: 'running' | 'cancelling' | null;
+  /** Failed dry-run findings in files this batch does not write (an upstream file that includes a header it changes). */
+  outside?: string[];
   /** Every function of the batch, with its unit and its packet's state now. */
   functions: Array<{ rva: string; name: string | null; unit: string; taskId: string; state: string }>;
   detail: {

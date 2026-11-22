@@ -857,7 +857,17 @@ export class RunEngine {
         const t = store.getTask(id);
         return t ? t.functions.map((fn) => ({ rva: fn.rva, name: fn.name, unit: t.unit, taskId: t.id, state: t.state })) : [];
       });
-      return { ...batch, functions, dryRunState: dryRun ? (dryRun.signal.aborted ? 'cancelling' : 'running') : null };
+      // A failed dry run's findings in files the batch does not write (see blockingUnits).
+      const last = (batch.detail as { lastSubmit?: { ok?: boolean; blockers?: string[] } } | null)?.lastSubmit;
+      let outside: string[] = [];
+      if (batch.status === 'branch_ready' && last?.ok === false && last.blockers?.length) {
+        const files = new Set(batchContent(store, runId, batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t)).files.map((f) => f.path));
+        outside = last.blockers.filter((b) => {
+          const p = findingPath(b);
+          return !!p && !files.has(p) && !batch.taskIds.some((id) => store.getTask(id)?.unit === p);
+        });
+      }
+      return { ...batch, functions, outside, dryRunState: dryRun ? (dryRun.signal.aborted ? 'cancelling' : 'running') : null };
     });
   }
 
@@ -1066,14 +1076,18 @@ export class RunEngine {
     const reasons = new Map<string, string[]>();
     const unattributed: string[] = [];
     const claims: string[] = [];
+    // Findings in files the batch does not write (reached because they include a header it
+    // changes): the line is wrong upstream, so no change to these packets fixes it.
+    const outside: string[] = [];
     for (const b of d.lastSubmit?.blockers ?? []) {
       if (/another open claim or pull request/i.test(b)) {
         claims.push(b);
         continue;
       }
-      const path = /^([\w./-]+\.(?:cpp|cc|c|h|hpp|hh|inl|inc)):\d+:/.exec(b)?.[1];
+      const path = findingPath(b);
       let hit = path ? owners(path) : [];
       if (path && !hit.length) {
+        outside.push(b);
         const text = (await repo.baseFile(path).catch(() => null)) ?? '';
         const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
         const includes = [...text.matchAll(/^\s*#\s*include\s*[<"]([^>"]+)[>"]/gm)].map((m) => m[1]!.replace(/\\/g, '/'));
@@ -1094,7 +1108,7 @@ export class RunEngine {
       if (!hit.length) unattributed.push(p);
       for (const u of new Set(hit.map((t) => t.unit))) reasons.set(u, [...(reasons.get(u) ?? []), p]);
     }
-    return { units: Object.fromEntries(reasons), unattributed, claims };
+    return { units: Object.fromEntries(reasons), unattributed, claims, outside };
   }
 
   /** Batches whose packets may still be changed: staged, never submitted (a dry run is fine). */
@@ -1303,9 +1317,14 @@ export class RunEngine {
     const last = (batch.detail as { lastSubmit?: { ok?: boolean; dryRun?: boolean } } | null)?.lastSubmit;
     if (!last || last.ok !== false) return { check: 'dry-run', targets: [], why: 'its last dry run did not fail' };
     const blame = await this.blockingUnits(runId, batchId);
-    const units = new Map(Object.entries(blame.units).map(([u, rs]) => [u, rs.filter((r) => !/upstream/i.test(r))] as const).filter(([, rs]) => rs.length));
+    // Only findings in files these packets write go to the agents: one in a file the batch does
+    // not write cannot be fixed by them (they would match again unchanged and fail the same way).
+    const notOurs = new Set(blame.outside);
+    const units = new Map(Object.entries(blame.units).map(([u, rs]) => [u, rs.filter((r) => !/upstream/i.test(r) && !notOurs.has(r))] as const).filter(([, rs]) => rs.length));
     const targets = work!.tasks.filter((t) => units.has(t.unit)).map((task) => ({ task, reasons: units.get(task.unit)! }));
+    const outsideFiles = [...new Set(blame.outside.map((b) => findingPath(b)!))];
     const why = targets.length ? null
+      : outsideFiles.length ? `the dry run blames ${outsideFiles.join(', ')}, which this batch does not write: ${outsideFiles.length === 1 ? 'it includes' : 'they include'} a header the batch changes, and the line is wrong upstream. No change to these packets fixes that: set aside the units that change the header (they come back once upstream fixes the file)`
       : Object.keys(blame.units).length ? 'upstream already has or changed what the dry run blamed: set those units aside'
       : blame.claims.length ? 'only other contributors\' claims block it, and no code change fixes that'
       : `the dry run names no unit of this batch${blame.unattributed.length ? `: ${blame.unattributed[0]!.slice(0, 200)}` : ''}`;
@@ -2641,6 +2660,11 @@ export class RunEngine {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/** The source file a dry-run finding names (`path:line: ...`), or null. */
+export function findingPath(finding: string): string | null {
+  return /^([\w./-]+\.(?:cpp|cc|c|h|hpp|hh|inl|inc)):\d+:/.exec(finding)?.[1] ?? null;
+}
 
 /** A rolling batch is made once its ready units fill this much of a PR batch (90%, at least one function). */
 export function readyThreshold(batchSize: number) {
