@@ -514,10 +514,10 @@ export class Store {
       basicBlocks: r.basic_blocks as number | null, instructions: r.instructions as number | null, branches: r.branches as number | null, sources: p<string[]>(r.sources_json, []),
     }));
   }
-  setRunJson(runId: string, col: 'gather_json' | 'capacity_json', value: unknown) {
+  setRunJson(runId: string, col: 'gather_json' | 'capacity_json' | 'outage_json', value: unknown) {
     this.db.prepare(`UPDATE runs SET ${col} = ? WHERE id = ?`).run(value == null ? null : j(value), runId);
   }
-  runJson<T>(runId: string, col: 'gather_json' | 'capacity_json'): T | null {
+  runJson<T>(runId: string, col: 'gather_json' | 'capacity_json' | 'outage_json'): T | null {
     const r = this.db.prepare(`SELECT ${col} v FROM runs WHERE id = ?`).get(runId) as { v: string | null } | undefined;
     return r?.v ? (JSON.parse(r.v) as T) : null;
   }

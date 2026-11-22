@@ -341,6 +341,10 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE tasks ADD COLUMN fix_json TEXT;
   `,
+  // A run paused because every AI account its workers use was down: which, and since when.
+  `
+  ALTER TABLE runs ADD COLUMN outage_json TEXT;
+  `,
 ];
 
 export function openDatabase(path: string): DB {

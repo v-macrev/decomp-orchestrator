@@ -289,6 +289,26 @@ export class AccountPool {
     return { lease: { id: newId('acq'), account: slot.account, model, reservedIn: req.estInputTokens, reservedOut: outRes, probe, startedAt: this.now() } };
   }
 
+  /**
+   * Whether each account can take new work at all. Down: disabled (auth, or by the operator),
+   * quota or daily budget exhausted, circuit open, or cooling for more than `longCoolMs`. Rate
+   * limits, short backoffs and a full concurrency limit are normal and never count as down.
+   */
+  health(ids: string[], longCoolMs = 60_000): Array<{ id: string; status: AccountStatus; down: boolean; until: number | null; reason: string | null }> {
+    const t = this.now();
+    return ids.flatMap((id) => {
+      const slot = this.slots.get(id);
+      if (!slot) return [];
+      this.refresh(slot);
+      const rt = slot.rt;
+      const budget = slot.account.limits.dailyBudgetUsd;
+      const overBudget = budget !== undefined && rt.costUsdToday >= budget;
+      const down = rt.status === 'disabled' || rt.status === 'circuit_open' || rt.status === 'quota_exhausted' || overBudget
+        || (rt.status === 'cooling' && (rt.cooldownUntil ?? t) - t > longCoolMs);
+      return [{ id, status: rt.status, down, until: rt.status === 'disabled' ? null : rt.cooldownUntil, reason: rt.lastError }];
+    });
+  }
+
   /** Wait until some account in the binding can take the request. Throws AbortedError on abort. */
   async acquire(req: AcquireRequest, signal?: AbortSignal, onWait?: (ms: number, reason: string) => void): Promise<Lease> {
     for (;;) {

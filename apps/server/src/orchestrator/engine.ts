@@ -50,6 +50,8 @@ export interface EngineOptions {
   /** First back-off for a slot whose worktree cannot be restored (doubles per failed restore, cap 5 min). */
   slotParkBaseMs: number;
   maxProviderFailures: number;
+  /** How often to check whether every AI account a run's workers use is down (or back). */
+  outageCheckMs: number;
   providerTimeoutMs: number;
   maxOutputTokens: number;
   idlePollMs: number;
@@ -66,6 +68,7 @@ const DEFAULTS: EngineOptions = {
   maxInfraFailures: 5,
   slotParkBaseMs: 15_000,
   maxProviderFailures: 40,
+  outageCheckMs: 5_000,
   providerTimeoutMs: 15 * 60_000,
   maxOutputTokens: 32_000,
   idlePollMs: 1_000,
@@ -144,6 +147,7 @@ export class RunEngine {
   /** Runs that left `active` and are still staging: waitFor() resolves only once staging is over. */
   private finishing = new Map<string, Promise<void>>();
   private reaper: NodeJS.Timeout;
+  private outageWatch: ReturnType<typeof setInterval>;
   private claimWatch: NodeJS.Timeout;
   private prWatch: NodeJS.Timeout;
 
@@ -166,6 +170,84 @@ export class RunEngine {
     // Withheld packets go back into staging on their own once their blocking claims lapse.
     this.claimWatch = setInterval(() => this.autoRecheckWithheld(), 5 * 60_000).unref();
     this.prWatch = setInterval(() => void this.autoRefreshPullRequests(), 10 * 60_000).unref();
+    // Every AI account down: pause the run; one back: resume it (only runs this watcher paused).
+    this.outageWatch = setInterval(() => void this.watchOutages(), this.opts.outageCheckMs).unref();
+  }
+
+  // ---------------------------------------------------------------- AI account outages
+
+  /**
+   * The accounts the run's worker tiers can use, when every one of them is down (null otherwise,
+   * or when the flow resolves to no account at all: that is a configuration problem, not an outage).
+   */
+  workerOutage(runId: string, plan?: FlowPlan): OutageInfo | null {
+    const { pool, store } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) return null;
+    const p = plan ?? this.active.get(runId)?.plan ?? compileFlowPlan(row.flow);
+    const routing = row.config.routing;
+    const ids = new Set<string>();
+    for (const tier of p.tiers) {
+      const own = tier.node.data.pool;
+      const binding: PoolBinding = { ...own, capability: own.capability ?? (routing.enabled ? tier.capability : undefined) };
+      for (const c of pool.resolve(binding, 'worker')) ids.add(c.slot.account.id);
+    }
+    if (!ids.size) return null;
+    const health = pool.health([...ids]);
+    if (!health.length || health.some((h) => !h.down)) return null;
+    const until = health.map((h) => h.until).filter((u): u is number => u !== null);
+    return { since: Date.now(), nextBackAt: until.length ? Math.min(...until) : null, accounts: health.map(({ id, status, until: u, reason }) => ({ id, status, until: u, reason })) };
+  }
+
+  /** Pause a running run because every account is down; the watcher resumes it when one is back. */
+  private outagePause(runId: string, outage: OutageInfo) {
+    const { store, events } = this.deps;
+    const run = this.active.get(runId);
+    if (!run || run.paused || run.cancel.signal.aborted || store.getRun(runId)?.status !== 'running') return;
+    store.setRunJson(runId, 'outage_json', outage);
+    this.pause(runId);
+    const list = outage.accounts.map((a) => a.status === 'disabled' ? `${a.id} (disabled)` : `${a.id} (${a.status.replace('_', ' ')}${a.until ? ` until ${new Date(a.until).toLocaleTimeString()}` : ''})`).join(', ');
+    events.emit('run.outage_paused', `paused: no AI account can work right now: ${list}. It resumes on its own as soon as one is back`, {
+      runId, level: 'warn', data: { ...outage },
+    });
+  }
+
+  private watchingOutages = false;
+
+  /** Pause runs whose accounts are all down; resume the runs this watcher paused once one is back. */
+  async watchOutages() {
+    if (this.watchingOutages) return;
+    this.watchingOutages = true;
+    try {
+      const { store, events } = this.deps;
+      for (const [id, run] of this.active) {
+        if (run.paused || run.cancel.signal.aborted) continue;
+        const outage = this.workerOutage(id, run.plan);
+        if (outage) this.outagePause(id, outage);
+      }
+      const waiting = store.db.prepare("SELECT id FROM runs WHERE status = 'paused' AND outage_json IS NOT NULL").all() as Array<{ id: string }>;
+      for (const { id } of waiting) {
+        const prev = store.runJson<OutageInfo>(id, 'outage_json');
+        const outage = this.workerOutage(id);
+        if (outage) {
+          // Still down: keep the account list current for the run screen; since stays the first pause.
+          store.setRunJson(id, 'outage_json', { ...outage, since: prev?.since ?? outage.since });
+          continue;
+        }
+        const row = store.getRun(id);
+        if (!row || budgetReached(row)) {
+          store.setRunJson(id, 'outage_json', null);
+          continue;
+        }
+        // Not loaded (a restart) while another run holds the slots: try again on the next check.
+        if (!this.active.has(id) && (this.active.size || this.discovering || this.idleBorrowed || this.finishing.size)) continue;
+        store.setRunJson(id, 'outage_json', null);
+        events.emit('run.outage_resumed', 'an AI account is back: resuming', { runId: id });
+        await this.resumeRun(id).catch((e) => events.emit('run.failed', `could not resume after the outage: ${(e as Error).message}`, { runId: id, level: 'error' }));
+      }
+    } finally {
+      this.watchingOutages = false;
+    }
   }
 
   // ---------------------------------------------------------------- run lifecycle
@@ -343,6 +425,8 @@ export class RunEngine {
     } else if (budgetReached(row)) {
       return { ok: false, reason: `run budget $${row.config.budgetUsd} reached ($${row.costUsd.toFixed(2)} spent): resume with a higher budgetUsd, or budgetUsd: null to remove the cap` };
     }
+    // The operator takes over: if every account is still down, the watcher pauses it again.
+    this.deps.store.setRunJson(runId, 'outage_json', null);
     await this.resumeRun(runId);
     return { ok: true };
   }
@@ -504,6 +588,7 @@ export class RunEngine {
     clearInterval(this.reaper);
     clearInterval(this.claimWatch);
     clearInterval(this.prWatch);
+    clearInterval(this.outageWatch);
     for (const t of this.rollTimers.values()) clearTimeout(t);
     this.rollTimers.clear();
   }
@@ -512,6 +597,7 @@ export class RunEngine {
     clearInterval(this.reaper);
     clearInterval(this.claimWatch);
     clearInterval(this.prWatch);
+    clearInterval(this.outageWatch);
     for (const t of this.rollTimers.values()) clearTimeout(t);
     this.rollTimers.clear();
   }
@@ -2348,6 +2434,14 @@ export class RunEngine {
         if (pe.kind === 'refusal' || pe.kind === 'bad_request') {
           return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'PROVIDER_' + pe.kind.toUpperCase(), `provider ${pe.kind}: ${pe.message}`), { infra: false, strike: false }, tierIdx);
         }
+        // Every account the workers use is down: not this packet's fault, so it is not charged
+        // (a long outage would otherwise dead-letter packets); the run pauses until one is back.
+        const outage = this.workerOutage(run.row.id, run.plan);
+        if (outage) {
+          this.outagePause(run.row.id, outage);
+          this.queue.transition(task.id, leaseId, ['leased'], 'pending', { notBefore: Date.now() + 5_000 });
+          return;
+        }
         const pf = task.providerFailures + 1;
         if (pf >= this.opts.maxProviderFailures) {
           this.queue.transition(task.id, leaseId, ['leased'], 'dead', { providerFailures: pf });
@@ -2664,6 +2758,14 @@ export class RunEngine {
 /** The source file a dry-run finding names (`path:line: ...`), or null. */
 export function findingPath(finding: string): string | null {
   return /^([\w./-]+\.(?:cpp|cc|c|h|hpp|hh|inl|inc)):\d+:/.exec(finding)?.[1] ?? null;
+}
+
+/** Why a run is paused for an AI account outage (runs.outage_json). */
+export interface OutageInfo {
+  since: number;
+  /** The earliest time an account's cooldown ends (null: only the operator can bring one back). */
+  nextBackAt: number | null;
+  accounts: Array<{ id: string; status: string; until: number | null; reason: string | null }>;
 }
 
 /** A rolling batch is made once its ready units fill this much of a PR batch (90%, at least one function). */

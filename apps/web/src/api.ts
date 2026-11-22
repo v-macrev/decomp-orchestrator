@@ -95,6 +95,13 @@ export interface RunSummary {
   engine: { active: boolean; paused: boolean; activeSlots: number; busySlots: number };
 }
 
+/** A run paused because every AI account its workers use is down; it resumes on its own. */
+export interface RunOutage {
+  since: number;
+  nextBackAt: number | null;
+  accounts: Array<{ id: string; status: string; until: number | null; reason: string | null }>;
+}
+
 /** How close a run is to its next PR batch (GET /api/runs/:id/batching). */
 export interface BatchingStatus {
   batchSize: number;
@@ -113,7 +120,7 @@ export interface BatchingStatus {
 }
 
 export interface Metrics {
-  run: { id: string; name: string; status: string; costUsd: number; startedAt: number | null; finishedAt: number | null; budgetUsd: number | null; error: string | null; contextMode: 'budgeted' | 'legacy'; routingEnabled: boolean };
+  run: { id: string; name: string; status: string; costUsd: number; startedAt: number | null; finishedAt: number | null; budgetUsd: number | null; error: string | null; contextMode: 'budgeted' | 'legacy'; routingEnabled: boolean; outage?: RunOutage | null };
   routing: RoutingMetrics | null;
   knowledge: { byKind: Array<{ kind: string; n: number; uses: number }>; recent: Array<{ kind: string; symbol: string; sourceUnit: string; uses: number }> };
   skills: RunSkillMetrics;

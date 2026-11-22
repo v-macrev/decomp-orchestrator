@@ -134,6 +134,12 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    (`GET /api/runs/:id/batching`: functions ready, those waiting on their unit, the batch size).
    The Packets tab pages through packets (50 to 500 per page) and counts functions, not only
    packets, for every state.
+   **AI account outages**: when every account the run's workers can use is down (disabled, out of
+   quota or daily budget, circuit open, or rate limited for over a minute), the run pauses on its
+   own and resumes on its own as soon as one is back, even after a restart. Calls that fail during
+   the outage are not charged to the packets, so none is dead-lettered by it. A run you paused
+   yourself is never resumed by the server; resuming by hand during an outage is allowed (it pauses
+   again if every account is still down).
    After submission each PR batch shows its pull request as GitHub has it (open, merged, closed),
    read when the tab opens, every 10 minutes for open PRs, and on **Check GitHub now**
    (`POST /api/runs/:id/pull-requests/refresh`), with every comment, review and inline comment from

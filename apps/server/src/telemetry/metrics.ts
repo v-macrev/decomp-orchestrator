@@ -71,7 +71,7 @@ export function runMetrics(store: Store, engine: RunEngine, pool: AccountPool, r
   const ctxRaw = usage.context_raw_tokens ?? 0;
   const matchedFns = (functions.passed ?? 0) + (functions.staged ?? 0);
   return {
-    run: { id: run.id, name: run.name, status: run.status, costUsd: run.costUsd, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, budgetUsd: run.config.budgetUsd ?? null, error: run.error, contextMode: run.config.context.mode, routingEnabled: run.config.routing.enabled },
+    run: { id: run.id, name: run.name, status: run.status, costUsd: run.costUsd, createdAt: run.createdAt, startedAt: run.startedAt, finishedAt: run.finishedAt, budgetUsd: run.config.budgetUsd ?? null, error: run.error, contextMode: run.config.context.mode, routingEnabled: run.config.routing.enabled, outage: store.runJson(run.id, 'outage_json') },
     routing: plan
       ? {
           enabled: run.config.routing.enabled,

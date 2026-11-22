@@ -52,13 +52,13 @@ function flow(): Flow {
   };
 }
 
-function setup() {
+function setup(accountOptions: Record<string, unknown> = {}) {
   const d = mkdtempSync(join(tmpdir(), 'decomp-life-'));
   dirs.push(d);
   const store = new Store(openDatabase(join(d, 'orch.db')));
   const events = new EventBus(store);
   const repo = new SimRepo({ slots: 4, compareLatencyMs: [1, 3], infraRate: 0 });
-  const accounts = [mockAccount('m', { tags: ['w'], options: { latencyMs: [1, 3], skill: 0.95 } })];
+  const accounts = [mockAccount('m', { tags: ['w'], options: { latencyMs: [1, 3], skill: 0.95, ...accountOptions } })];
   const pool = new AccountPool(accounts, store, events, { circuitBaseMs: 100, rateLimitBaseMs: 20, overloadCooldownMs: 20 });
   const providers = new ProviderRegistry({ oracle: repo });
   const engine = new RunEngine({ store, pool, providers, repo, events }, { leaseMs: 5_000, heartbeatMs: 500, infraBackoffMs: 5, idlePollMs: 20 });
@@ -1101,5 +1101,80 @@ describe('batching while the run goes on', () => {
     expect(s.store.getRun(run.id)!.status).toBe('completed');
     // The held unit was not in that batch: it is still matched, waiting for Prepare all.
     expect(s.store.listTasks(run.id, { state: 'passed', limit: 1000 }).some((t) => t.unit === hold.unit())).toBe(true);
+  }, 60_000);
+});
+
+describe('every AI account down', () => {
+  const poolOf = (s: ReturnType<typeof setup>) => (s.engine as unknown as { deps: { pool: AccountPool } }).deps.pool;
+
+  it('pauses the run, keeps the outage across checks, and resumes on its own once an account is back', async () => {
+    const s = setup();
+    const pool = poolOf(s);
+    const run = createRun(s, 'outage', 24, 7);
+    await s.engine.start(run.id);
+    await until(() => (s.store.functionCounts(run.id).passed ?? 0) + (s.store.functionCounts(run.id).staged ?? 0) > 0);
+
+    pool.operatorDisable('m');
+    await s.engine.watchOutages();
+    expect(s.store.getRun(run.id)!.status).toBe('paused');
+    const outage = s.store.runJson<{ accounts: Array<{ id: string; status: string }>; nextBackAt: number | null }>(run.id, 'outage_json')!;
+    expect(outage.accounts).toEqual([expect.objectContaining({ id: 'm', status: 'disabled' })]);
+    expect(outage.nextBackAt).toBeNull(); // only the operator brings a disabled account back
+
+    await s.engine.watchOutages(); // still down: stays paused
+    expect(s.store.getRun(run.id)!.status).toBe('paused');
+
+    pool.operatorEnable('m');
+    await s.engine.watchOutages();
+    expect(s.store.getRun(run.id)!.status).toBe('running');
+    expect(s.store.runJson(run.id, 'outage_json')).toBeNull();
+    await s.engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    // Nothing was charged for the outage.
+    expect(s.store.listTasks(run.id, { limit: 1000 }).every((t) => t.providerFailures === 0)).toBe(true);
+  }, 60_000);
+
+  it('pauses as soon as a failed call leaves no account, without charging the packets', async () => {
+    const s = setup({ quotaAfterRequests: 4 });
+    const run = createRun(s, 'quota', 24, 9);
+    await s.engine.start(run.id);
+    await until(() => s.store.getRun(run.id)!.status === 'paused');
+    const outage = s.store.runJson<{ accounts: Array<{ id: string; status: string }>; nextBackAt: number | null }>(run.id, 'outage_json')!;
+    expect(outage.accounts).toEqual([expect.objectContaining({ id: 'm', status: 'quota_exhausted' })]);
+    expect(outage.nextBackAt).toEqual(expect.any(Number)); // a quota resets on its own
+    await until(() => s.engine.status(run.id).busySlots === 0);
+    const tasks = s.store.listTasks(run.id, { limit: 1000 });
+    expect(tasks.every((t) => t.providerFailures === 0)).toBe(true);
+    expect(tasks.some((t) => t.state === 'dead')).toBe(false);
+    await s.engine.cancel(run.id);
+  }, 60_000);
+
+  it('never resumes a run the operator paused, and a manual resume clears the outage mark', async () => {
+    const s = setup();
+    const pool = poolOf(s);
+    const run = createRun(s, 'manual', 24, 8);
+    await s.engine.start(run.id);
+    s.engine.pause(run.id);
+    pool.operatorDisable('m');
+    await s.engine.watchOutages();
+    expect(s.store.runJson(run.id, 'outage_json')).toBeNull(); // paused by you, not by the outage
+    pool.operatorEnable('m');
+    await s.engine.watchOutages();
+    expect(s.store.getRun(run.id)!.status).toBe('paused');
+
+    await s.engine.resume(run.id);
+    pool.operatorDisable('m');
+    await s.engine.watchOutages();
+    expect(s.store.getRun(run.id)!.status).toBe('paused');
+    expect(s.store.runJson(run.id, 'outage_json')).not.toBeNull();
+    // Resuming by hand during the outage: the mark goes; the watcher pauses it again while still down.
+    await s.engine.resume(run.id);
+    expect(s.store.runJson(run.id, 'outage_json')).toBeNull();
+    await s.engine.watchOutages();
+    expect(s.store.getRun(run.id)!.status).toBe('paused');
+    pool.operatorEnable('m');
+    await s.engine.watchOutages();
+    await s.engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
   }, 60_000);
 });

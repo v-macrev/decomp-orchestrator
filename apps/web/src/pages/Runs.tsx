@@ -3,7 +3,7 @@
 // packets and telemetry. Each screen leads with the one next step; details sit one click away.
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { Flow, Task, TelemetryEvent } from '@decomp/core';
-import { api, stream, type AccountView, type Batch, type BatchingStatus,type CapacityPlan, type ClaimCollision, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
+import { api, stream, type AccountView, type Batch, type BatchingStatus, type RunOutage, type CapacityPlan, type ClaimCollision, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { TaskDrawer } from '../components/TaskDrawer';
 
@@ -427,7 +427,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
   const sentence = (() => {
     switch (status) {
       case 'running': return `Working on it: ${inFlight} function(s) in progress, ${m.queueDepth} waiting${m.throughput.etaMinutes !== null ? `, about ${m.throughput.etaMinutes} min left` : ''}.`;
-      case 'paused': return overBudget ? 'Paused: the budget is used up. Raise it to continue.' : 'Paused. Resume to carry on where it stopped.';
+      case 'paused': return overBudget ? 'Paused: the budget is used up. Raise it to continue.' : m.run.outage ? 'Paused: no AI account can work right now. It resumes on its own as soon as one is back.' : 'Paused. Resume to carry on where it stopped.';
       case 'created': case 'discovering': return 'Getting the functions ready…';
       case 'completed': return `Finished: ${matched} matched, ${f.dead ?? 0} failed.${unbatched || batches.length ? ' Next: the PR batches tab.' : ''}`;
       case 'cancelled': return 'Cancelled. Matched functions are kept.';
@@ -479,6 +479,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
         {m.run.error && <div className="notice error">{m.run.error}</div>}
         {selectionShortfall && <div className="notice lvl-warn" role="status">{selectionShortfall.msg}</div>}
         {status === 'paused' && overBudget && <BudgetPausedBanner m={m} onChange={onChange} />}
+        {status === 'paused' && m.run.outage && <OutageBanner o={m.run.outage} />}
       </div>
 
       <div><nav className="segmented" aria-label="Run sections">
@@ -1701,6 +1702,27 @@ function RoutingPanel({ r, knowledge }: { r: RoutingMetrics; knowledge: Metrics[
 
 /** Per-worker quota progress against the hard per-run function cap, capacity plan and stalls. */
 /** A run paused on its budget can only continue with a new cap: plain Resume would pause again at once. */
+const ACCOUNT_STATE: Record<string, string> = {
+  disabled: 'disabled', circuit_open: 'failing (circuit open)', quota_exhausted: 'out of quota', cooling: 'rate limited',
+};
+
+/** Paused by the server because every AI account the workers use is down; resumed by it too. */
+function OutageBanner({ o }: { o: RunOutage }) {
+  const now = useNow(true);
+  const onlyYou = o.nextBackAt === null;
+  return (
+    <div className="notice lvl-warn" role="status">
+      <b>No AI account can work right now, so the run is paused.</b> It resumes on its own as soon as one is back{o.nextBackAt ? (o.nextBackAt > now ? `: the first should be back in ${fmtDuration(o.nextBackAt - now)}` : ': checking now') : ''}. Packets are not charged for the outage. Paused {fmtDuration(Math.max(0, now - o.since))} ago.
+      <ul className="small" style={{ margin: '6px 0 0', paddingLeft: 18 }}>
+        {o.accounts.map((a) => (
+          <li key={a.id}><span className="mono">{a.id}</span>: {ACCOUNT_STATE[a.status] ?? a.status}{a.until ? `, back ${a.until > now ? `in ${fmtDuration(a.until - now)}` : 'now'}` : a.status === 'disabled' ? ': enable it on the Accounts page' : ''}{a.reason ? <span className="muted"> · {a.reason.slice(0, 160)}</span> : null}</li>
+        ))}
+      </ul>
+      {onlyYou && <div className="small" style={{ marginTop: 6 }}>Every account is disabled, so only you can bring one back: fix it and enable it on the Accounts page, and the run resumes by itself.</div>}
+    </div>
+  );
+}
+
 function BudgetPausedBanner({ m, onChange }: { m: Metrics; onChange: () => void }) {
   const spent = m.run.costUsd;
   const [next, setNext] = useState(() => Math.ceil(Math.max(spent * 1.5, (m.run.budgetUsd ?? 0) + 1)));
