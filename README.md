@@ -38,7 +38,7 @@ Bulk LLM orchestration for function matching in
   * tree-sitter-sliced headers
   * pattern-matched lessons
   * declarations verified earlier in the run
-  * a structured retry delta
+  * a structured retry delta, with the comparator's aligned target/candidate listing of the last attempt (exposure consent only)
   * function-level edits for large units
 
   On real packets this sends 67% fewer tokens than full context (−77% with the cached prefix).

@@ -2454,10 +2454,17 @@ export class RunEngine {
       }
 
       // 4. parse output; materialise function-level edits into complete files
-      const parsed = WorkerOutput.safeParse(extractJson(text));
+      const json = extractJson(text);
+      const parsed = WorkerOutput.safeParse(json);
       if (!parsed.success) {
-        store.updateAttempt(attempt.id, { status: 'parse_error', error: 'output did not match the contract', finishedAt: Date.now() });
-        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_PARSE', 'reply was not a JSON object with "edits" or "files" as described in the output contract'), { infra: false, strike: false }, tierIdx);
+        // Say what was wrong and what came back: "did not match" alone gets the same reply again.
+        const issues = json === null || json === undefined
+          ? 'no JSON object was found in the reply'
+          : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.') || '(top level)'}: ${i.message}`).join('; ');
+        const reply = text.trim().replace(/\s+/g, ' ');
+        const why = `reply was not the JSON object of the output contract (${issues}). It began: "${reply.slice(0, 300)}${reply.length > 300 ? '…' : ''}". Return only {"files": [...]} or {"edits": [...]} as the contract describes, with no text around it.`;
+        store.updateAttempt(attempt.id, { status: 'parse_error', error: why.slice(0, 500), finishedAt: Date.now() });
+        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_PARSE', why), { infra: false, strike: false }, tierIdx);
       }
       if (outputMode === 'edits' && elided.length && parsed.data.files?.some((f) => f.path.endsWith('.cpp'))) {
         // Complete files cannot contain bodies the worker never saw: reject as a contract error, not a cheat strike.

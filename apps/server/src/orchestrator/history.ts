@@ -31,6 +31,8 @@ export interface HistoryEntry {
   machine: Map<string, string>;
   /** First mismatch offsets of the failing functions ('+0x0' = the very first instruction differs). */
   firstMismatches: string[];
+  /** Where the comparator left its private aligned listing of each failing function (local path, read on demand). */
+  listings: Array<{ rva: string; name: string | null; ref: string }>;
 }
 
 const flat = (s: string) => s.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
@@ -69,9 +71,9 @@ function outcomeOf(v: Verdict): string {
   const compile = blocks.find((f) => f.code === 'COMPARE_COMPILE_ERROR');
   if (compile) {
     const first = compile.message.split('\n').map((l) => l.trim()).find((l) => /error/i.test(l) && !l.startsWith('candidate failed'));
-    return `did not compile${first ? `: ${first.slice(0, 220)}` : ''}`;
+    return `did not compile${first ? `: ${first.slice(0, 500)}` : ''}`;
   }
-  return blocks.slice(0, 2).map((f) => `[${f.code}] ${f.message.split('\n')[0]!.slice(0, 160)}`).join('; ') || v.decision;
+  return blocks.slice(0, 3).map((f) => `[${f.code}] ${f.message.split('\n')[0]!.slice(0, 500)}`).join('; ') || v.decision;
 }
 
 function bodiesOf(attempt: Attempt, names: Set<string>): Map<string, string> {
@@ -103,6 +105,7 @@ export function buildHistory(store: Store, task: TaskRow): HistoryEntry[] {
       bodies: bodiesOf(a, names),
       machine: new Map((v.compare ?? []).filter((c) => c.codeSha256 && c.name).map((c) => [c.name!, c.codeSha256!])),
       firstMismatches: (v.compare ?? []).filter((c) => c.result !== 'pass' && c.firstMismatch).map((c) => c.firstMismatch!),
+      listings: (v.compare ?? []).filter((c) => c.result !== 'pass' && c.listingRef).map((c) => ({ rva: c.rva, name: c.name, ref: c.listingRef! })),
     });
   }
   return out;
@@ -170,7 +173,7 @@ export function renderHistory(history: HistoryEntry[], failing: string[], maxTok
     const isLast = g.entries.some((x) => x.n === last.n);
     const same = g.entries.length < 2 ? '' : g.sources.size > 1 ? ` (${g.sources.size} different sources, identical machine code: cosmetic changes)` : ' (same code)';
     const label = `- ${ns}${same}${e.model ? ` · ${e.model}` : ''} · ${e.outcome}${isLast ? ' · last attempt, code shown in <retry>' : ''}`;
-    const body = !isLast && g.body ? clipToTokens(g.body, 140).text : '';
+    const body = !isLast && g.body ? clipToTokens(g.body, 400).text : '';
     const block = body ? `${label}\n${body}` : label;
     const t = estimateTokens(block) + 1;
     if (used + t > maxTokens - 30) {

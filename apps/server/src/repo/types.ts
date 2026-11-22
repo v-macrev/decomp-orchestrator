@@ -57,6 +57,8 @@ export interface CompareOutcome {
   /** Tooling/infra failure (timeout, missing toolchain, crash): not the candidate's fault. */
   infraError: string | null;
   durationMs: number;
+  /** Bind hints written before the final compare (name -> pack-listed target address). */
+  bound?: Record<string, string>;
 }
 
 export interface PreflightOutcome {
@@ -107,6 +109,8 @@ export interface RepoAdapter {
    */
   analyze?(fns: FunctionTarget[], opts?: { packs?: string[] }): Promise<Map<string, FunctionFeatures>>;
   /** Budgeted listing for one pack: compact listing form, at most `maxChars` (exposure consent only). */
+  /** The comparator's private aligned target/candidate listing of a function's last compare (CompareFunctionResult.listingRef). */
+  readCompareListing?(ref: string, rva: string): Promise<string | null>;
   readPackSlice?(pack: string, maxChars: number, opts?: { withDecompiler?: boolean }): Promise<{ text: string; rawChars: number } | null>;
   /**
    * Everything the FunctionGatherer starts from: the repository's function inventory, the startable

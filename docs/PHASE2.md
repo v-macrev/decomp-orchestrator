@@ -175,8 +175,9 @@ least the new tier's level, and the next attempt carries the structured retry de
 | `unit_files` | ≤ 5,000 | The packet's own files. Above budget, accepted bodies are elided and the worker must return edits. |
 | `matched_pr_lessons` | 200–500 | Lessons and cookbook recipes whose tags match the packet's patterns (sse, vtable, eh, loop, switch, …). |
 | `shared_run_discoveries` | 100–400 | Verified declarations from earlier packets of this run. |
-| `retry_delta` | 200–600 | Retries only: category, comparator and Gate Keeper lines (with the compiler's own error lines and aligned bytes), a 2–3 sentence summary, and only the failing functions' previous bodies. |
-| `attempt_history` | ≤ 1,200 | Retries only: every earlier distinct candidate of the failing functions with its outcome, best first (added in Phase 4, see below). |
+| `retry_delta` | 200–2,000 | Retries only: category, comparator and Gate Keeper lines (with the compiler's own error lines and aligned bytes), a 2–3 sentence summary, and only the failing functions' previous bodies. |
+| `compare_listing` | ≤ 1,500 | Retries, exposure consent only: the comparator's private aligned listing (target vs candidate, each differing row classified, its suggested next step) of the last attempt, and of the best attempt when that is another one. Redacted when the bundle is stored. |
+| `attempt_history` | ≤ 2,500 | Retries only: every earlier distinct candidate of the failing functions with its outcome, best first (added in Phase 4, see below). |
 
 A bundle never contains full docs, whole unrelated headers, previous complete files or chat
 history. Each section records `rawTokens`, what the unsliced sources would have cost, so the

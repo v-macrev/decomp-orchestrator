@@ -25,10 +25,11 @@ export const FINDING_GUIDANCE: Record<string, string> = {
   CONV_HEADER_TOO_LONG: 'Header: one line per key (Source exposure, Code origin, Adapted bodies, SPDX) plus one 0x<rva> line per compared function; replace placeholders instead of adding lines; no Task/Recipe/disclaimer lines ("Drafted by" is written for you).',
   CONV_STATIC_ASSERT_NO_MESSAGE: 'Every static_assert needs a message.',
   CONV_ORIGIN_PLACEHOLDER: 'Replace the SKELETON_TODO line (and its wrapped second line) with "// Code origin: <how you wrote it>" and "// Adapted bodies: none" (or the adapted bodies) — do not add a second line below it.',
-  PREFLIGHT_PROBLEM: 'Every file you change needs a truthful "// Code origin:" line in its leading header — including the .h — and must keep licence notices complete.',
+  PREFLIGHT_PROBLEM: 'This is the repository preflight (the same check a pull request must pass). Its message names the file, the line and the exact fix after "fix:": apply that fix there and keep the rest of the header as it is.',
   SCOPE_LINE_TOO_LONG: 'Keep every line under 200 characters; state origin and adaptation in short header lines.',
   COMPARE_FUNCTION_SIZE_MISMATCH: 'The candidate compiles to a different size: compare branch structure, inlined helpers and return paths with the target before changing details.',
-  COMPARE_COMPILE_ERROR: 'Fix exactly the compiler errors listed. Declare every type and callee you use; an include the compiler cannot open can be written relative to the including file ("../../area/Y.h"), staying inside reconstruction/. To change a line of the .h (an #include, a member), return the complete .h in "files"; that is allowed even in edits mode.',
+  COMPARE_FUNCTION_SYMBOL_MISSING: "The compiled object has no function with the target's decorated name, so nothing was compared: declare and define it exactly as the unit header and the task signature say (class, name, parameter types, const, virtual), out of line in the .cpp, not inline, static or in an anonymous namespace.",
+  COMPARE_COMPILE_ERROR: 'Fix exactly the compiler errors listed. Declare every type and callee you use; write an include the compiler cannot open from the reconstruction root ("area/Y.h": the compiler searches reconstruction/), never with "../": the repository preflight rejects any include with a parent step (include-outside-roots). To change a line of the .h (an #include, a member), return the complete .h in "files"; that is allowed even in edits mode.',
   COMPARE_CODE_BYTE_MISMATCH: 'Same size, different code: the shape is close. Check operand types and widths, field offsets, comparison direction and which value is tested first; keep the size.',
   REPEATED_CANDIDATE: 'This exact code already failed (see <history>). Try a structurally different reconstruction.',
   COMPARE_SYMBOL_MISSING: 'Define the function with exactly the declared signature so it binds to its symbol.',
@@ -120,11 +121,47 @@ export async function ingestGithubReviews(store: Store, opts: { repoSlug: string
   return { codes: counts.size, comments };
 }
 
+/** Findings that say nothing another packet can use (its own repeats, parse slips, infrastructure). */
+const NOT_PITFALLS = new Set(['REPEATED_CANDIDATE', 'OUTPUT_PARSE', 'OUTPUT_EDIT']);
+
+/**
+ * The repository preflight's rule behind a PREFLIGHT_PROBLEM message, without the file, line and
+ * names it was reported on, and the fix the preflight itself gives for it.
+ */
+export function preflightRule(message: string): { rule: string; fix: string | null } {
+  const m = message.replace(/^(?:label|origin):\s*/, '').replace(/^\S+?:\d+:\s*/, '').replace(/^(?:label|origin):\s*/, '');
+  const [head, ...rest] = m.split(/;\s*fix:\s*/);
+  return { rule: (head ?? m).replace(/\s+/g, ' ').trim().slice(0, 400), fix: rest.length ? rest.join('; ').replace(/\s+/g, ' ').trim().slice(0, 300) : null };
+}
+
+/**
+ * The most frequent rejections of this run, as advice for the next attempt. A repository
+ * preflight problem is reported as its own rule with the preflight's own fix: one canned line for
+ * every preflight finding sent workers chasing a header line that was not the problem.
+ */
 export function runPitfalls(store: Store, runId: string): string[] {
-  return store
-    .topFindingCodes(runId, 6)
-    .filter((c) => c.n >= 3)
-    .map((c) => `${c.code} (${c.n}× this run): ${FINDING_GUIDANCE[c.code] ?? 'see Gate Keeper diagnostics'}`);
+  const rows = store.db.prepare(`SELECT json_extract(f.value, '$.code') code, json_extract(f.value, '$.message') message
+    FROM verdicts v JOIN tasks t ON t.id = v.task_id, json_each(v.findings_json) f
+    WHERE t.run_id = ? AND json_extract(f.value, '$.severity') = 'block' ORDER BY v.created_at DESC LIMIT 4000`).all(runId) as Array<{ code: string; message: string | null }>;
+  const counts = new Map<string, { n: number; text: string }>();
+  for (const r of rows) {
+    if (NOT_PITFALLS.has(r.code) || r.code.startsWith('INFRA')) continue;
+    let key = r.code;
+    let text = FINDING_GUIDANCE[r.code] ?? 'see Gate Keeper diagnostics';
+    if (r.code === 'PREFLIGHT_PROBLEM') {
+      const p = preflightRule(r.message ?? '');
+      key = `preflight: ${p.rule.slice(0, 60)}`;
+      text = `${p.rule}${p.fix ? ` — fix: ${p.fix}` : ''}`;
+    }
+    const c = counts.get(key) ?? { n: 0, text };
+    c.n++;
+    counts.set(key, c);
+  }
+  return [...counts]
+    .filter(([, c]) => c.n >= 3)
+    .sort((a, b) => b[1].n - a[1].n)
+    .slice(0, 6)
+    .map(([key, c]) => (key.startsWith('preflight: ') ? `Repository preflight (${c.n}× this run): ${c.text}` : `${key} (${c.n}× this run): ${c.text}`));
 }
 
 const hash = (s: string) => createHash('sha256').update(s).digest('hex').slice(0, 16);

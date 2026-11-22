@@ -171,7 +171,7 @@ export class GateKeeper {
           .filter((fn) => fn.result !== 'pass')
           .map((fn) => ({
             stage: 'compare', code: `COMPARE_${(fn.reason ?? 'MISMATCH').toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`, severity: 'block' as const,
-            message: `${fn.rva} ${fn.name ?? ''}: ${fn.result} ${fn.reason ?? ''}${fn.firstMismatch ? ` first mismatch at ${fn.firstMismatch}` : ''}; ${fn.exactBytes ?? '?'}/${fn.targetSize ?? fn.totalBytes ?? '?'} bytes exact${fn.alignedBytes != null ? `, ${fn.alignedBytes} bytes align${fn.alignedRegions != null ? ` in ${fn.alignedRegions} region(s)` : ''}` : ''}${fn.hint ? `. Hint: ${fn.hint}` : ''}`,
+            message: `${fn.rva} ${fn.name ?? ''}: ${fn.result} ${fn.reason ?? ''}${fn.firstMismatch ? ` first mismatch at ${fn.firstMismatch}` : ''}; ${fn.exactBytes ?? '?'}/${fn.targetSize ?? fn.totalBytes ?? '?'} bytes exact${fn.alignedBytes != null ? `, ${fn.alignedBytes} bytes align${fn.alignedRegions != null ? ` in ${fn.alignedRegions} region(s)` : ''}` : ''}${fn.detail ? ` (${fn.detail})` : ''}${fn.hint ? `. Hint: ${fn.hint}` : ''}${fn.unbound?.length ? `. Still unbound (no target address could be paired with them): ${fn.unbound.join(', ')}; reference the same data or callee the target does at that instruction (see <compare_listing>)` : ''}`,
           }));
       } finally {
         release();

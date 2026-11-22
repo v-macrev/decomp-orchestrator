@@ -27,6 +27,7 @@ import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
 import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, PrComment, PrStatus, ProgressFn, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
 import { batchPrText, withClaimLine, type CompareSummary } from './batchPr.js';
+import { autoBindHints, bindHintsPath, unboundNames, type AlignPair, type PackInstruction, type PackReference } from './binding.js';
 
 interface ProgressInventory {
   target_build_id?: string;
@@ -478,7 +479,13 @@ export class SrRepo implements RepoAdapter {
 
   async compare(slot: number, task: TaskRow, prep: PreparedTask, opts: { signal: AbortSignal; timeoutMs: number }): Promise<CompareOutcome> {
     const t = Date.now();
-    const { run, json } = await this.sr(this.wt(slot), ['compare', prep.srTaskId ?? ''], opts);
+    let { run, json } = await this.sr(this.wt(slot), ['compare', prep.srTaskId ?? ''], opts);
+    // UNBOUND references: write the bind hints the drafter card asks for (pack-listed addresses
+    // only) and compare once more, so a right candidate is not failed by a missing hint.
+    const bound = json && !run.timedOut && !run.aborted ? await this.bindUnbound(json, task) : {};
+    if (Object.keys(bound).length) ({ run, json } = await this.sr(this.wt(slot), ['compare', prep.srTaskId ?? ''], opts));
+    const privateDir = typeof json?.private_dir === 'string' ? this.localPath(json.private_dir) : null;
+    const unbound = unboundNames(json?.bind);
     const infraCodes = new Set(this.cfg.infraExitCodes ?? [2, 5, 7, 8]);
     const base = { durationMs: Date.now() - t };
     const fail = (infraError: string): CompareOutcome => ({ ...base, completed: false, allPass: false, compileError: false, functions: [], infraError });
@@ -496,11 +503,67 @@ export class SrRepo implements RepoAdapter {
         firstMismatch: f.first_mismatch ?? null, candidateSize: f.candidate_size ?? null, targetSize: f.target_size ?? null,
         exactBytes: f.coverage?.code_bytes_exact ?? null, totalBytes: f.coverage?.code_bytes_total ?? null,
         alignedBytes: aligned?.value ?? null, alignedRegions: aligned?.regions ?? null, codeSha256: f.code_section_sha256 ?? null,
+        ...(f.result !== 'pass' ? { detail: typeof f.detail === 'string' ? f.detail.slice(0, 400) : null, listingRef: privateDir, ...(unbound.length ? { unbound } : {}) } : {}),
       };
     });
     const expected = new Set(task.functions.map((f) => f.rva));
     const allPass = run.code === 0 && functions.length > 0 && functions.every((f) => f.result === 'pass') && [...expected].every((r) => functions.some((f) => f.rva === r));
-    return { ...base, completed: true, allPass, compileError: false, functions, infraError: null };
+    return { ...base, completed: true, allPass, compileError: false, functions, infraError: null, ...(Object.keys(bound).length ? { bound } : {}) };
+  }
+
+  /** A path the compare output printed (inside the docker sandbox SR_LOCAL_DIR is /local). */
+  private localPath(p: string) {
+    return this.cfg.sandbox.mode === 'docker' && p.startsWith('/local/') ? this.p.join(this.cfg.localDir, p.slice('/local/'.length)) : p;
+  }
+
+  /**
+   * For each `UNBOUND reference` of a compare, the target address its aligned target instruction
+   * references (see binding.ts), merged into the task's bind-hints.json. Returns the new hints.
+   */
+  private async bindUnbound(json: any, task: TaskRow): Promise<Record<string, string>> {
+    const names = unboundNames(json.bind);
+    const file = bindHintsPath(json.bind);
+    if (!names.length || !file || typeof json.private_dir !== 'string') return {};
+    const dir = this.localPath(json.private_dir);
+    const hints: Record<string, string> = {};
+    for (const f of (json.functions as Array<{ rva?: string; result?: string }> | undefined) ?? []) {
+      if (!f.rva || f.result === 'pass') continue;
+      const fn = task.functions.find((x) => x.rva === f.rva);
+      const pack = fn ? await this.packFor(fn) : null;
+      const sideBySide = await this.readHostFile(this.p.join(dir, f.rva, 'side-by-side.txt'));
+      const align = await this.readHostFile(this.p.join(dir, f.rva, 'align.json'));
+      const packJson = pack ? await this.readHostFile(this.p.join(pack, 'pack.json')) : null;
+      if (!sideBySide || !align || !packJson) continue;
+      try {
+        const a = JSON.parse(align) as { alignment?: AlignPair[] };
+        const p = JSON.parse(packJson) as { instructions?: PackInstruction[]; references?: PackReference[] };
+        Object.assign(hints, autoBindHints({ unbound: names, sideBySide, alignment: a.alignment ?? [], instructions: p.instructions ?? [], references: p.references ?? [] }));
+      } catch {
+        continue;
+      }
+    }
+    const path = this.localPath(file);
+    let previous: Record<string, string> = {};
+    try {
+      previous = JSON.parse((await this.readHostFile(path)) ?? '{}') as Record<string, string>;
+    } catch {
+      previous = {};
+    }
+    const fresh = Object.fromEntries(Object.entries(hints).filter(([k]) => !(k in previous)));
+    if (!Object.keys(fresh).length) return {};
+    try {
+      writeFileSync(this.host.fsPath(path), `${JSON.stringify({ ...previous, ...fresh }, null, 2)}\n`, 'utf8');
+    } catch {
+      return {};
+    }
+    this.notice?.('repo.bound', `bound ${Object.keys(fresh).length} reference(s) from the pack's reference table: ${Object.entries(fresh).map(([k, v]) => `${k} → ${v}`).join(', ')}`);
+    return fresh;
+  }
+
+  /** The comparator's private aligned listing of the last compare of one function (target vs candidate). */
+  async readCompareListing(ref: string, rva: string): Promise<string | null> {
+    if (!/^0x[0-9a-f]+$/.test(rva)) return null;
+    return (await this.readHostFile(this.p.join(ref, rva, 'align.txt'))) ?? (await this.readHostFile(this.p.join(ref, rva, 'side-by-side.txt')));
   }
 
   async preflight(slot: number, _task: TaskRow, prep: PreparedTask, opts: { signal: AbortSignal; timeoutMs: number }): Promise<PreflightOutcome> {
@@ -516,8 +579,8 @@ export class SrRepo implements RepoAdapter {
       ...list(json.origin_findings).map((x) => `origin: ${x}`),
       ...list(json.errors),
       ...(json.error ? [String(json.error)] : []),
-    ].map((s) => s.slice(0, 400));
-    if (!problems.length) problems.push(...list(json.messages).filter((m) => /BLOCKED|error|fail/i.test(m)).map((s) => s.slice(0, 400)));
+    ].map((s) => s.slice(0, 1_500));
+    if (!problems.length) problems.push(...list(json.messages).filter((m) => /BLOCKED|error|fail/i.test(m)).map((s) => s.slice(0, 1_500)));
     return { completed: true, ok: false, problems: problems.length ? problems : [`preflight exit ${run.code}`], infraError: null };
   }
 

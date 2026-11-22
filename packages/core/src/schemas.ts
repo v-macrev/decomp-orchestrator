@@ -438,6 +438,12 @@ export const CompareFunctionResult = z.object({
   alignedRegions: z.number().nullable().optional(),
   /** sha256 of the candidate's own compiled code section: equal hashes mean the same machine code. */
   codeSha256: z.string().nullable().optional(),
+  /** The comparator's one-line detail of a failure ("candidate function is 36 bytes; task range is 34 bytes"). */
+  detail: z.string().nullable().optional(),
+  /** Local path of the comparator's private run directory (aligned target/candidate listing): read locally, never stored with content. */
+  listingRef: z.string().nullable().optional(),
+  /** References the comparator could not bind to a target address (candidate symbol names). */
+  unbound: z.array(z.string()).optional(),
 });
 export type CompareFunctionResult = z.infer<typeof CompareFunctionResult>;
 
@@ -602,6 +608,8 @@ export const ContextSectionKind = z.enum([
   'matched_pr_lessons',
   'shared_run_discoveries',
   'retry_delta',
+  /** The comparator's private aligned target/candidate listing of the last (and best) attempt (retries, exposure consent only). */
+  'compare_listing',
   /** Every earlier distinct candidate of the packet with its outcome, best first (retries only). */
   'attempt_history',
   /** Triggered skills whose triggers are packet-static (stable across retries → inside the per-packet cache block). */
@@ -624,8 +632,9 @@ export const ContextBudgets = z.object({
   unit_files: SectionBudget.default({ min: 0, max: 5_000 }),
   matched_pr_lessons: SectionBudget.default({ min: 200, max: 500 }),
   shared_run_discoveries: SectionBudget.default({ min: 100, max: 400 }),
-  retry_delta: SectionBudget.default({ min: 200, max: 600 }),
-  attempt_history: SectionBudget.default({ min: 0, max: 1_200 }),
+  retry_delta: SectionBudget.default({ min: 200, max: 2_000 }),
+  compare_listing: SectionBudget.default({ min: 0, max: 1_500 }),
+  attempt_history: SectionBudget.default({ min: 0, max: 2_500 }),
   /** Top 0–2 triggered skills (each ≤ 600 tokens). */
   dynamic_skills: SectionBudget.default({ min: 0, max: 1_200 }),
   retry_skills: SectionBudget.default({ min: 0, max: 600 }),

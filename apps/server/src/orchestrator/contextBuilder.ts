@@ -21,7 +21,7 @@
 // bundle) — so savings are measured per attempt, not assumed.
 import { createHash } from 'node:crypto';
 import {
-  patternsOf, sizeOnlyFeatures,
+  ContextBudgets as ContextBudgetsSchema, patternsOf, sizeOnlyFeatures,
   type ContextBudgets, type ContextConfig, type ContextSection, type ContextSectionKind, type Difficulty, type FunctionFeatures, type TaskContextBundle,
 } from '@decomp/core';
 import { SkillMatcher, type MatchableSkill, type RunSkillSnapshot } from '@decomp/skills';
@@ -105,7 +105,7 @@ export class TaskContextBuilder {
   }
 
   async build(task: TaskRow, prepared: PreparedTask, slot: number, opts: BuildOptionsV2): Promise<TaskContextBundle> {
-    const B = opts.context.budgets;
+    const B = effectiveBudgets(opts.context.budgets);
     const sections: ContextSection[] = [];
     const add = (kind: ContextSectionKind, title: string, content: string, rawTokens: number, sources: string[], truncated = false, privacy: 'public' | 'private' = 'public') => {
       if (!content.trim()) return;
@@ -309,6 +309,8 @@ export class TaskContextBuilder {
     if (opts.feedback) {
       const r = renderRetryDelta(opts.feedback, task, B.retry_delta.max);
       add('retry_delta', `Retry: ${r.category}`, `${relevantPitfalls.length ? `<pitfalls>\n${relevantPitfalls.map((p) => `- ${p}`).join('\n')}\n</pitfalls>\n` : ''}${r.text}`, r.rawTokens, ['verdict']);
+      const listing = await this.compareListing(opts.feedback, opts.exposureConsent, charsFor(B.compare_listing.max));
+      if (listing) add('compare_listing', 'Comparator listing of the last attempt against the target', listing.text, listing.rawTokens, ['private-compare'], listing.truncated, 'private');
       if (opts.feedback.history?.length) {
         const h = renderHistory(opts.feedback.history, r.failing, B.attempt_history.max);
         if (h) add('attempt_history', `${opts.feedback.history.length} earlier attempt(s)`, h, 0, ['attempts']);
@@ -317,7 +319,7 @@ export class TaskContextBuilder {
       add('retry_delta', 'Common rejections in this run', `<pitfalls>\n${relevantPitfalls.map((p) => `- ${p}`).join('\n')}\n</pitfalls>`, 0, ['run']);
     }
 
-    const order: ContextSectionKind[] = ['static_system_prefix', 'function_spec', 'disassembly_slice', 'minimal_local_context', 'unit_files', 'matched_pr_lessons', 'dynamic_skills', 'shared_run_discoveries', 'retry_delta', 'attempt_history', 'retry_skills'];
+    const order: ContextSectionKind[] = ['static_system_prefix', 'function_spec', 'disassembly_slice', 'minimal_local_context', 'unit_files', 'matched_pr_lessons', 'dynamic_skills', 'shared_run_discoveries', 'retry_delta', 'compare_listing', 'attempt_history', 'retry_skills'];
     sections.sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
     const canon = JSON.stringify(sections.map((s) => [s.kind, s.content]));
     const hash = createHash('sha256').update(canon).digest('hex');
@@ -336,6 +338,52 @@ export class TaskContextBuilder {
     });
     return bundle;
   }
+
+  /**
+   * The comparator's aligned listing (target vs candidate, each differing row marked and
+   * classified, with its suggested next step) of the last attempt's failing functions, and of the
+   * best attempt when that is a different one. This is what the repository's drafter card tells a
+   * contributor to read after every compare. Private: exposure consent only, redacted when stored.
+   */
+  private async compareListing(feedback: Feedback, consent: boolean, maxChars: number): Promise<{ text: string; rawTokens: number; truncated: boolean } | null> {
+    if (!consent || !this.repo.readCompareListing || feedback.fix) return null;
+    const wanted: Array<{ label: string; rva: string; name: string | null; ref: string }> = [];
+    for (const c of feedback.verdict.compare ?? []) {
+      if (c.result !== 'pass' && c.listingRef) wanted.push({ label: `attempt ${feedback.attempt.n} (your last)`, rva: c.rva, name: c.name, ref: c.listingRef });
+    }
+    const best = feedback.history ? bestScore(feedback.history) : null;
+    const bestEntry = best && best.n !== feedback.attempt.n ? feedback.history!.find((h) => h.n === best.n) : null;
+    for (const l of bestEntry?.listings ?? []) wanted.push({ label: `attempt #${bestEntry!.n} (best so far)`, rva: l.rva, name: l.name, ref: l.ref });
+    if (!wanted.length) return null;
+    const blocks: string[] = [];
+    let raw = 0;
+    let truncated = false;
+    const per = Math.max(800, Math.floor(maxChars / wanted.length));
+    for (const w of wanted) {
+      const text = await this.repo.readCompareListing(w.ref, w.rva).catch(() => null);
+      if (!text) continue;
+      raw += estimateTokens(text);
+      const body = text.replace(/[ \t]+$/gm, '');
+      truncated ||= body.length > per;
+      blocks.push(`<function rva="${w.rva}" name="${(w.name ?? '').replace(/"/g, "'")}" from="${w.label}">\n${body.length > per ? `${body.slice(0, per)}\n[… ${body.length - per} more chars]` : body}\n</function>`);
+    }
+    if (!blocks.length) return null;
+    const text = `<compare_listing note="private: the comparator's aligned listing of your candidate against the target, the same one a contributor reads after each compare. Rows marked ! ~ - + differ; fix the first differing row first. Read only: never paste bytes, mnemonics or addresses into source.">\n${blocks.join('\n')}\n</compare_listing>`;
+    return { text, rawTokens: raw, truncated };
+  }
+}
+
+/**
+ * Retry feedback is never cut below these, also for runs created with the earlier, tighter
+ * budgets: a worker that only sees part of what the Gate Keeper and the comparator said keeps
+ * repeating the part it was not shown.
+ */
+const FEEDBACK_FLOORS: Partial<Record<ContextSectionKind, number>> = { retry_delta: 2_000, compare_listing: 1_500, attempt_history: 2_500 };
+
+export function effectiveBudgets(b: ContextBudgets): ContextBudgets {
+  const out = { ...ContextBudgetsSchema.parse({}), ...b } as ContextBudgets;
+  for (const [k, floor] of Object.entries(FEEDBACK_FLOORS) as Array<[ContextSectionKind, number]>) out[k] = { ...out[k], max: Math.max(out[k].max, floor) };
+  return out;
 }
 
 /** Should the per-packet block carry a cache breakpoint? Only when a retry is likely to read it. */
@@ -411,7 +459,7 @@ export function renderRetryDelta({ verdict, attempt, history, fix }: Feedback, t
   const lines = [`<retry category="${category}">`, `Summary: ${summary.join(' ')}`, 'Gate Keeper findings:'];
   for (const f of blocks.slice(0, 8)) {
     const guide = FINDING_GUIDANCE[f.code];
-    lines.push(`- [${f.code}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ''} ` : ''}${f.message.slice(0, f.code === 'COMPARE_COMPILE_ERROR' ? 1_200 : 400)}${guide ? ` → ${guide}` : ''}`);
+    lines.push(`- [${f.code}] ${f.file ? `${f.file}${f.line ? `:${f.line}` : ''} ` : ''}${f.message.slice(0, f.code === 'COMPARE_COMPILE_ERROR' ? 2_400 : 1_500)}${guide ? ` → ${guide}` : ''}`);
   }
   if (blocks.length > 8) lines.push(`- … ${blocks.length - 8} more finding(s)`);
   // Previous bodies of failing (or all, when nothing compiled) target functions only.
@@ -421,7 +469,7 @@ export function renderRetryDelta({ verdict, attempt, history, fix }: Feedback, t
     if (!file.path.endsWith('.cpp')) continue;
     for (const d of extractFunctions(lex(file.content).code)) {
       if (!wanted.has(d.name) && !wanted.has(flat(d.name))) continue;
-      prevBodies.push(clipToTokens(file.content.slice(d.start, d.close + 1), 160).text);
+      prevBodies.push(clipToTokens(file.content.slice(d.start, d.close + 1), 700).text);
     }
   }
   const head = lines.join('\n');

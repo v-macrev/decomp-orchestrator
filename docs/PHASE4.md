@@ -227,6 +227,22 @@ The attempt log showed why:
 Everything shown comes from the candidate's own compiled code or from counts; no target bytes or
 listing text reach a worker without exposure consent.
 
+### Feedback the workers were not shown
+
+The 100-function run of 22 November matched one packet in about 130 attempts. Its retries showed
+the models circling (`BSTask::GetDescription`: drop `<cstdio>`, then `sprintf_s` undeclared, then a
+blank origin line, then the wrong size again, fifteen times):
+
+| Problem seen | Fix |
+|---|---|
+| After every compare, `sr` writes an aligned target/candidate listing (`align.txt`, `side-by-side.txt`) that the drafter card tells a contributor to read; workers only got "first mismatch at +0x4, 20 bytes align" | With exposure consent, a retry carries `<compare_listing>`: that listing for the last attempt (and the best one), read from the comparator's private run directory. The verdict stores only the directory path; the stored bundle redacts the text |
+| `UNBOUND reference <name>`: the drafter card says to add the name with the address from the pack's reference table to the task's `bind-hints.json`, which workers cannot write, so a candidate loading a string literal or a global could never match | `repo/binding.ts` pairs each unbound name with the address the comparator's own alignment puts it against (pack-listed addresses only, ambiguous names left alone), writes the hint and compares once more |
+| Every `PREFLIGHT_PROBLEM` came with one canned line about the `Code origin:` header, and the run-wide pitfalls repeated it 56 times; the real problems were include paths, undeclared adapted bodies and label grammar | The guidance says to apply the preflight's own `fix:`; pitfalls name each preflight rule with that fix, and leave out `REPEATED_CANDIDATE` and parse slips, which say nothing to another packet |
+| Our compile-error advice said to write includes as `../../area/Y.h`; the preflight rejects any parent step (`include-outside-roots`, 10×) | The advice now says to include from the reconstruction root (`area/Y.h`) |
+| Messages were cut at 400 characters, previous bodies at 160 tokens, the retry section at 600 and the history at 1,200 | Messages up to 1,500 (2,400 for compiler errors), bodies 700 tokens, `retry_delta` 2,000, `attempt_history` 2,500; runs created with the old budgets get these floors too |
+| A reply that was not the output JSON was told only that | The finding names the schema problem and quotes how the reply began |
+| `COMPARE_FUNCTION_SYMBOL_MISSING` (16×) had no guidance | It says to declare and define the function exactly as the header and the task signature say, out of line |
+
 ### Throughput for the hardest packets
 
 | Problem seen | Fix |
