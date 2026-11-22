@@ -1029,7 +1029,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
   });
   const explain = (b: Batch) => run(`explain-${b.id}`, async () => {
     const r = await api.explainReview(runId, b.id);
-    setOpen((s) => new Set(s).add(`explain-${b.id}`));
+    toggleExplain(`${b.id}:${r.key}`, false);
     return `Batch ${b.seq}: ${r.points.length} point(s) explained on its card${r.cached ? ' (unchanged since the last explanation)' : ''}.`;
   });
   const fixReview = (b: Batch) => run(`review-${b.id}`, async () => {
@@ -1059,6 +1059,25 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
     return `${r.returnedTasks} set-aside packet(s) put back.${restaged(r.staged)}`;
   });
   const [open, setOpen] = useState<Set<string>>(new Set());
+  // Explanations this viewer closed (batch:comments key), kept in this browser; a new explanation opens again.
+  const [closedExplain, setClosedExplain] = useState<Set<string>>(() => {
+    try {
+      return new Set(JSON.parse(localStorage.getItem('closedExplanations') ?? '[]') as string[]);
+    } catch {
+      return new Set();
+    }
+  });
+  const toggleExplain = (id: string, close: boolean) => setClosedExplain((s) => {
+    const n = new Set(s);
+    if (close) n.add(id);
+    else n.delete(id);
+    try {
+      localStorage.setItem('closedExplanations', JSON.stringify([...n].slice(-200)));
+    } catch {
+      /* private window: closed for this visit only */
+    }
+    return n;
+  });
   const toggle = (id: string) => setOpen((s) => {
     const n = new Set(s);
     if (n.has(id)) n.delete(id);
@@ -1218,9 +1237,13 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
     const hasPr = b.status === 'submitted' && !!d?.pr && d.prUpdateOf === undefined;
     const review = hasPr ? reviewOf(b) : [];
     const prState = d?.prStatus?.state ?? null;
+    const explainId = d?.prExplain ? `${b.id}:${d.prExplain.key}` : '';
+    const explainClosed = !!explainId && closedExplain.has(explainId);
     const reviewButtons = review.length > 0 && (
       <>
-        <button disabled={locked} onClick={() => explain(b)} title="One short model call reads the comments and explains each one in plain words: what it is about, what it means, and what to do.">{busy === `explain-${b.id}` ? 'Reading the comments…' : d?.prExplain ? 'Explain again' : 'Explain the comments'}</button>
+        {explainClosed
+          ? <button onClick={() => toggleExplain(explainId, false)} title="Shows the saved explanation again (no new model call)">Show the explanation</button>
+          : <button disabled={locked} onClick={() => explain(b)} title="One short model call reads the comments and explains each one in plain words: what it is about, what it means, and what to do. Unchanged comments reuse the saved explanation.">{busy === `explain-${b.id}` ? 'Reading the comments…' : d?.prExplain ? 'Explain again' : 'Explain the comments'}</button>}
         {completed && prState && prState !== 'merged' && !d?.reviewFix && (
           <ConfirmButton className="" disabled={locked} onConfirm={() => fixReview(b)}
             confirmLabel={`Send the ${review.length} comment(s) to the AI agents as instructions? The run starts again.`}
@@ -1232,9 +1255,9 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, batches, relo
         )}
       </>
     );
-    const explained = hasPr && d?.prExplain && (
+    const explained = hasPr && d?.prExplain && !explainClosed && (
       <div className="explain">
-        <b className="small">What the comments mean</b>
+        <div className="row"><b className="small grow">What the comments mean</b><button className="tiny" onClick={() => toggleExplain(explainId, true)} aria-label="Close the explanation" title="Hide it; Show the explanation brings it back without a new model call">✕ Close</button></div>
         <p>{d.prExplain.summary}</p>
         {d.prExplain.points.length > 0 && (
           <ul>
