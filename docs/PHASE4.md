@@ -267,7 +267,19 @@ label). The **first attempt is the splice itself, with no model call**; the Gate
 compares it like any candidate. A unit the splice does not get through (say its body needs a member
 upstream's class does not have, which the splice never adds because it could move upstream's
 offsets) goes on to the workers, who see the spliced files and the compiler's or comparator's
-findings.
+findings. The free attempt carries the accepted file's own `Code origin:` and `Adapted bodies:`
+statements; where `sr start` appended its placeholder to a statement upstream's file already makes,
+the header repair keeps that statement and adds ours after it.
+
+### Which compare results count
+
+`sr start` keeps one task per class and adds every function ever started in it, so `sr compare` also
+checks the functions of dead packets and those a rebuild dropped. No candidate of the current packet
+can make those pass. The Gate Keeper therefore counts only the packet's own results and those of
+packets of the same unit the run accepted earlier (the carried functions); batches narrow the task
+the same way (`focusTasks`). Packets that died or were quarantined before this, although some
+candidate matched all their functions, go back with `POST /api/runs/:id/regate-matched`: each
+becomes a `regate` fix whose first attempt submits that candidate again, with no model call.
 
 ### Throughput for the hardest packets
 

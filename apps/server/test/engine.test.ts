@@ -274,6 +274,37 @@ describe('attempts per tier', () => {
   }, 60_000);
 });
 
+describe('re-gating packets only foreign compare results killed', () => {
+  it('submits the matched candidate again without a model call, and it passes', async () => {
+    const s = setup(tmpDb(), { slots: 4 });
+    const run = s.engine.createRun('regate', { flowId: 'default', selection: { source: 'synthetic', count: 6, seed: 9 }, routing: { enabled: false } }, flow(4, 2));
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const t = s.store.listTasks(run.id, { state: 'passed', limit: 100 })[0] ?? s.store.listTasks(run.id, { state: 'staged', limit: 100 })[0]!;
+    const pass = s.store.getVerdict(t.lastVerdictId!)!;
+    // As before the fix: the stale sr task also compared a dead packet's function, which failed.
+    const killed = {
+      ...pass, id: 'vd_killed', decision: 'reject' as const, route: 'retry' as const, createdAt: Date.now(),
+      compare: [...(pass.compare ?? []), { rva: '0xdead0', name: 'Gone::F', result: 'fail', reason: 'function-symbol-missing' } as NonNullable<typeof pass.compare>[number]],
+      findings: [{ stage: 'compare', code: 'COMPARE_FUNCTION_SYMBOL_MISSING', severity: 'block' as const, message: '0xdead0 Gone::F: fail function-symbol-missing' }],
+    };
+    s.store.insertVerdict(killed);
+    s.store.db.prepare("UPDATE tasks SET state = 'dead', last_verdict_id = 'vd_killed' WHERE id = ?").run(t.id);
+    const before = s.store.attemptsForTask(t.id).length;
+    const r = await s.engine.regateMatched(run.id);
+    expect(r.packets).toBe(1);
+    await s.engine.waitFor(run.id);
+    const after = s.store.getTask(t.id)!;
+    expect(['passed', 'staged']).toContain(after.state);
+    const last = s.store.getAttempt(s.store.getVerdict(after.lastVerdictId!)!.attemptId)!;
+    expect(last.model).toBe('stored candidate (no model call)');
+    expect(last.costUsd ?? 0).toBe(0);
+    expect(s.store.attemptsForTask(t.id).length).toBe(before + 1);
+    s.pool.close();
+    s.engine.close();
+  }, 60_000);
+});
+
 describe('packets the workers cannot finish', () => {
   it('sets aside, as held, a packet whose functions match but whose file fails the preflight on a line it did not write', async () => {
     // Every unit's base already has the include line; the preflight rejects that line in every file.

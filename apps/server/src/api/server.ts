@@ -426,6 +426,14 @@ export async function buildServer(app: App) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
+  f.post('/api/runs/:id/regate-matched', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.regateMatched(req.params.id)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   // Put set-aside units back (all, or the units named) and re-verify them.
   f.post('/api/runs/:id/set-aside/put-back', async (req: FastifyRequest<{ Params: { id: string }; Body: { units?: string[] } | undefined }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');

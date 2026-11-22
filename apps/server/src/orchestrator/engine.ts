@@ -1410,6 +1410,67 @@ export class RunEngine {
     return { units: unitsDone, packets: requeued, functions, dropped: plan.flatMap((p) => p.dropped), status: store.getRun(runId)?.status ?? 'running' };
   }
 
+  /**
+   * Dead or quarantined packets whose own functions all matched in some candidate that only
+   * compare results for functions outside the packet blocked (`sr start` keeps one task per class,
+   * so its compare also checked dead packets' functions and dropped ones; see GateInput.compared).
+   * Each goes back to the queue as a 'regate' fix: its first attempt submits that candidate again,
+   * with no model call, to the Gate Keeper, which now counts only the packet's own results.
+   */
+  async regateMatched(runId: string) {
+    const { store, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can re-gate packets`);
+    const key = (rva: string) => Number.parseInt(rva, 16);
+    const plan: Array<{ task: TaskRow; verdictId: string }> = [];
+    for (const t of [...store.listTasks(runId, { state: 'dead', limit: 100_000 }), ...store.listTasks(runId, { state: 'quarantined', limit: 100_000 })]) {
+      const own = new Set(t.functions.map((f) => key(f.rva)));
+      const found = store.verdictsForTask(t.id).find((v) => {
+        const mine = (v.compare ?? []).filter((c) => own.has(key(c.rva)));
+        if (mine.length !== own.size || !mine.every((c) => c.result === 'pass')) return false;
+        // Every blocking finding is a compare result for a function outside the packet.
+        return v.findings.filter((f) => f.severity === 'block').every((f) => f.code.startsWith('COMPARE_') && f.code !== 'COMPARE_COMPILE_ERROR'
+          && /^0x[0-9a-f]+\b/i.test(f.message) && !own.has(key(f.message.split(/\s/)[0]!)));
+      });
+      if (found) plan.push({ task: t, verdictId: found.id });
+    }
+    if (!plan.length) return { packets: 0, functions: 0, status: row.status };
+    const at = Date.now();
+    let requeued = 0;
+    let functions = 0;
+    await this.exclusive(`re-gating ${plan.length} matched packet(s) of ${runId}`, async () => {
+      for (const p of plan) {
+        const fix: BatchFix = {
+          batchId: '', seq: 0, check: 'regate', at, verdictId: p.verdictId,
+          reasons: [`its functions all matched in an earlier candidate that only results for functions outside the packet blocked; that candidate goes to the Gate Keeper again`],
+        };
+        store.tx(() => {
+          if (store.requeueForFix(runId, p.task.id, fix, ['dead', 'quarantined'])) {
+            store.db.prepare('UPDATE tasks SET last_verdict_id = ? WHERE id = ?').run(p.verdictId, p.task.id);
+            requeued++;
+            functions += p.task.functions.length;
+          }
+        });
+      }
+      if (requeued) store.setRunStatus(runId, 'running', ['completed']);
+      events.emit('run.regate_matched', `${functions} function(s) in ${requeued} dead or quarantined packet(s) matched in a candidate only other functions' results blocked: re-gating those candidates (no model call)`, {
+        runId, level: 'warn', data: { packets: requeued, functions },
+      });
+    }, { besideRun: true });
+    if (requeued) await this.wakeOrStart(runId);
+    return { packets: requeued, functions, status: store.getRun(runId)?.status ?? 'running' };
+  }
+
+  /** The candidate a 'regate' fix submits again, as the free attempt's answer. */
+  private storedCandidate(task: TaskRow) {
+    const { store } = this.deps;
+    const v = task.fix?.verdictId ? store.getVerdict(task.fix.verdictId) : null;
+    const a = v ? store.getAttempt(v.attemptId) : null;
+    if (!a?.files?.length) return null;
+    return { files: a.files, notes: [`attempt #${a.n} (${a.model ?? 'unknown model'}) again`], model: a.model ?? undefined, codeOrigin: undefined as string | undefined, adaptedBodies: undefined as string | undefined };
+  }
+
   /** Upstream's unit files (as the slot has them) with the packet's accepted functions spliced in. */
   private async spliceForRebuild(task: TaskRow, slot: number) {
     const { store, repo } = this.deps;
@@ -2416,7 +2477,8 @@ export class RunEngine {
       if (prepared.srTaskId && !this.queue.transition(task.id, leaseId, ['leased'], 'leased', { srTaskId: prepared.srTaskId })) return;
       // A unit rebuilt on upstream: every attempt starts from upstream's file with the packet's
       // accepted functions spliced in (the first attempt submits exactly that).
-      const spliced = task.fix?.check === 'rebuild' ? await this.spliceForRebuild(task, slot) : null;
+      // A packet re-gated: every attempt starts from the candidate whose functions all matched.
+      const spliced = task.fix?.check === 'rebuild' ? await this.spliceForRebuild(task, slot) : task.fix?.check === 'regate' ? this.storedCandidate(task) : null;
       if (spliced) await repo.writeFiles(slot, spliced.files);
 
       // 1b. late classification: prepare just produced the local packs — refine size-only estimates
@@ -2494,8 +2556,9 @@ export class RunEngine {
       if (spliced && freeAttempt) {
         text = JSON.stringify({ files: spliced.files, ...(spliced.codeOrigin ? { codeOrigin: spliced.codeOrigin } : {}), ...(spliced.adaptedBodies ? { adaptedBodies: spliced.adaptedBodies } : {}) });
         finisher = spliced.model ?? 'decomp-orchestrator';
-        store.updateAttempt(attempt.id, { model: 'splice (no model call)', latencyMs: 0 });
-        ev('attempt.spliced', `rebuilt on upstream without a model call: ${spliced.notes.join('; ').slice(0, 600)}`, 'info', { notes: spliced.notes });
+        const regate = task.fix?.check === 'regate';
+        store.updateAttempt(attempt.id, { model: regate ? 'stored candidate (no model call)' : 'splice (no model call)', latencyMs: 0 });
+        ev('attempt.spliced', `${regate ? 're-gated' : 'rebuilt on upstream'} without a model call: ${spliced.notes.join('; ').slice(0, 600)}`, 'info', { notes: spliced.notes });
       } else {
         const tier = run.plan.tiers[tierIdx]!;
         const binding: PoolBinding = { ...node.data.pool, capability: node.data.pool.capability ?? (routing.enabled ? tier.capability : undefined) };
@@ -2595,7 +2658,8 @@ export class RunEngine {
       mat.files = fixed.files;
       // The exact code (comments and spacing aside) already failed in the compiler: refuse it without
       // compiling and say which attempt it repeats, so the next try has to change the logic.
-      const repeat = findRepeat(history, mat.files);
+      // (A free attempt re-submits a stored candidate on purpose: the gate decides it again.)
+      const repeat = freeAttempt ? null : findRepeat(history, mat.files);
       if (repeat) {
         store.updateAttempt(attempt.id, { status: 'completed', files: mat.files, finishedAt: Date.now() });
         // The same code whose functions all matched, blocked only by lines it did not write: the

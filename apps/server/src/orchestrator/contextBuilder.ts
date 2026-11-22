@@ -437,7 +437,7 @@ export function findSignature(qualified: string, sources: string[]): string | nu
 
 /** Structured verdict + only the failing functions' previous bodies — never the whole previous file. */
 export function renderRetryDelta({ verdict, attempt, history, fix }: Feedback, task: TaskRow, maxTokens: number): { text: string; category: string; rawTokens: number; failing: string[] } {
-  if (fix && fix.check !== 'rebuild') {
+  if (fix && fix.check !== 'rebuild' && fix.check !== 'regate') {
     const category = fix.check === 'review' ? 'REVIEW_FIX' : 'BATCH_FIX';
     const lines = [`<retry category="${category}">`, ...fixSummary(fix, task, attempt.n), '</retry>'];
     const failing = task.functions.map((f) => f.name).filter((n): n is string => !!n);
