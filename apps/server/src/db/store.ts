@@ -541,7 +541,7 @@ export class Store {
    * Send a matched packet back to the worker queue at its tier to be fixed: fresh per-tier counters,
    * the fix reasons kept on the packet. Its accepted attempt stays its last verdict until a new one.
    */
-  requeueForFix(runId: string, taskId: string, fix: BatchFix, from: Array<'passed' | 'staged' | 'set_aside' | 'dead' | 'quarantined'> = ['passed']): boolean {
+  requeueForFix(runId: string, taskId: string, fix: BatchFix, from: Array<'passed' | 'staged' | 'set_aside' | 'dead' | 'quarantined' | 'pending'> = ['passed']): boolean {
     return this.db.prepare(`UPDATE tasks SET state = 'pending', attempts_at_tier = 0, attempts_at_difficulty = 0, no_improvement_streak = 0,
         best_exact_bytes = 0, infra_failures = 0, provider_failures = 0, not_before = 0, lease_id = NULL, lease_expires_at = NULL,
         fix_json = ?, hold_json = NULL, updated_at = ?

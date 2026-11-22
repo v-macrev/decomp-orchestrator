@@ -38,6 +38,7 @@ import { draftedByText, personOf } from './attribution.js';
 import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
 import { spliceUnit } from './splice.js';
+import { extractFunctions, lex } from '../gatekeeper/cpp.js';
 import { PR_BATCH_MAX, batchContent, finishingModel, packUnits, stageRun, type StageSummary } from './staging.js';
 import { SkillRegistry } from '../skills/registry.js';
 import { FunctionGatherer } from '../intel/gatherer.js';
@@ -1424,7 +1425,8 @@ export class RunEngine {
     if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can re-gate packets`);
     const key = (rva: string) => Number.parseInt(rva, 16);
     const plan: Array<{ task: TaskRow; verdictId: string }> = [];
-    for (const t of [...store.listTasks(runId, { state: 'dead', limit: 100_000 }), ...store.listTasks(runId, { state: 'quarantined', limit: 100_000 })]) {
+    const waiting = store.listTasks(runId, { state: 'pending', limit: 100_000 }).filter((t) => t.fix?.check === 'regate');
+    for (const t of [...store.listTasks(runId, { state: 'dead', limit: 100_000 }), ...store.listTasks(runId, { state: 'quarantined', limit: 100_000 }), ...waiting]) {
       const own = new Set(t.functions.map((f) => key(f.rva)));
       const found = store.verdictsForTask(t.id).find((v) => {
         const mine = (v.compare ?? []).filter((c) => own.has(key(c.rva)));
@@ -1436,38 +1438,73 @@ export class RunEngine {
       if (found) plan.push({ task: t, verdictId: found.id });
     }
     if (!plan.length) return { packets: 0, functions: 0, status: row.status };
+    // Upstream may have matched (or stopped publishing) some of these functions since: `sr claim`
+    // refuses those, so such a packet keeps only the rest and is rebuilt from that candidate on
+    // upstream's current file instead; a packet with nothing left stays where it is.
+    const st = this.deps.repo.upstreamState
+      ? await this.deps.repo.upstreamState({ rvas: plan.flatMap((p) => p.task.functions.map((f) => f.rva)), files: [], branch: null })
+      : null;
+    const why = (rva: string) => (!st?.checked ? null : Object.hasOwn(st.matched, rva) ? `matched upstream${st.matched[rva] ? ` (${st.matched[rva]})` : ''}` : st.untracked.includes(rva) ? 'no longer published upstream' : null);
     const at = Date.now();
     let requeued = 0;
     let functions = 0;
+    let rebuilt = 0;
     await this.exclusive(`re-gating ${plan.length} matched packet(s) of ${runId}`, async () => {
       for (const p of plan) {
-        const fix: BatchFix = {
-          batchId: '', seq: 0, check: 'regate', at, verdictId: p.verdictId,
-          reasons: [`its functions all matched in an earlier candidate that only results for functions outside the packet blocked; that candidate goes to the Gate Keeper again`],
-        };
+        const keep = p.task.functions.filter((f) => !why(f.rva));
+        if (!keep.length) continue;
+        const dropped = p.task.functions.filter((f) => why(f.rva)).map((f) => ({ rva: f.rva, name: f.name ?? null, why: why(f.rva)! }));
+        const fix: BatchFix = dropped.length
+          ? {
+            batchId: '', seq: 0, check: 'rebuild', at, verdictId: p.verdictId, dropped,
+            reasons: [`its functions all matched in an earlier candidate that only results for functions outside the packet blocked; rebuilt from it on upstream's current ${p.task.unit}; left out: ${dropped.map((d) => `${d.rva} (${d.why})`).join(', ')}`],
+          }
+          : {
+            batchId: '', seq: 0, check: 'regate', at, verdictId: p.verdictId,
+            reasons: [`its functions all matched in an earlier candidate that only results for functions outside the packet blocked; that candidate goes to the Gate Keeper again`],
+          };
         store.tx(() => {
-          if (store.requeueForFix(runId, p.task.id, fix, ['dead', 'quarantined'])) {
+          if (store.requeueForFix(runId, p.task.id, fix, ['dead', 'quarantined', 'pending'])) {
             store.db.prepare('UPDATE tasks SET last_verdict_id = ? WHERE id = ?').run(p.verdictId, p.task.id);
+            if (dropped.length) {
+              store.setTaskFunctions(p.task.id, keep);
+              rebuilt++;
+            }
             requeued++;
-            functions += p.task.functions.length;
+            functions += keep.length;
           }
         });
       }
       if (requeued) store.setRunStatus(runId, 'running', ['completed']);
-      events.emit('run.regate_matched', `${functions} function(s) in ${requeued} dead or quarantined packet(s) matched in a candidate only other functions' results blocked: re-gating those candidates (no model call)`, {
-        runId, level: 'warn', data: { packets: requeued, functions },
+      events.emit('run.regate_matched', `${functions} function(s) in ${requeued} dead or quarantined packet(s) matched in a candidate only other functions' results blocked: re-gating those candidates (no model call)${rebuilt ? `; ${rebuilt} of them rebuilt on upstream's current file without the functions upstream matched or dropped since` : ''}`, {
+        runId, level: 'warn', data: { packets: requeued, functions, rebuilt },
       });
     }, { besideRun: true });
     if (requeued) await this.wakeOrStart(runId);
-    return { packets: requeued, functions, status: store.getRun(runId)?.status ?? 'running' };
+    return { packets: requeued, functions, rebuilt, status: store.getRun(runId)?.status ?? "running" };
   }
 
-  /** The candidate a 'regate' fix submits again, as the free attempt's answer. */
-  private storedCandidate(task: TaskRow) {
-    const { store } = this.deps;
+  /**
+   * The candidate a 'regate' fix submits again, as the free attempt's answer, while it still keeps
+   * every function body upstream's current unit has. Upstream moved on since (it matched more of
+   * the unit): the old file would take those bodies out, so the packet's functions are spliced into
+   * upstream's current file instead.
+   */
+  private async storedCandidate(task: TaskRow, slot: number) {
+    const { store, repo } = this.deps;
     const v = task.fix?.verdictId ? store.getVerdict(task.fix.verdictId) : null;
     const a = v ? store.getAttempt(v.attemptId) : null;
     if (!a?.files?.length) return null;
+    const mine = new Set(task.functions.map((f) => (f.name ?? '').split('::').pop()));
+    const up = (await repo.baseFile(task.unit)) ?? '';
+    const ours = extractFunctions(lex(a.files.find((f) => f.path === task.unit)?.content ?? '').code);
+    const lost = extractFunctions(lex(up).code)
+      .filter((d) => !mine.has(d.name.split('::').pop()))
+      .filter((d) => !ours.some((o) => o.name === d.name && o.body === d.body));
+    if (lost.length) {
+      const s = await this.spliceForRebuild(task, slot);
+      if (s) return { ...s, notes: [`upstream's current file has ${lost.length} body(ies) the stored candidate lacks (${lost.slice(0, 4).map((d) => d.name).join(', ')}): spliced into it instead`, ...s.notes] };
+    }
     return { files: a.files, notes: [`attempt #${a.n} (${a.model ?? 'unknown model'}) again`], model: a.model ?? undefined, codeOrigin: undefined as string | undefined, adaptedBodies: undefined as string | undefined };
   }
 
@@ -2478,7 +2515,7 @@ export class RunEngine {
       // A unit rebuilt on upstream: every attempt starts from upstream's file with the packet's
       // accepted functions spliced in (the first attempt submits exactly that).
       // A packet re-gated: every attempt starts from the candidate whose functions all matched.
-      const spliced = task.fix?.check === 'rebuild' ? await this.spliceForRebuild(task, slot) : task.fix?.check === 'regate' ? this.storedCandidate(task) : null;
+      const spliced = task.fix?.check === 'rebuild' ? await this.spliceForRebuild(task, slot) : task.fix?.check === 'regate' ? await this.storedCandidate(task, slot) : null;
       if (spliced) await repo.writeFiles(slot, spliced.files);
 
       // 1b. late classification: prepare just produced the local packs — refine size-only estimates
