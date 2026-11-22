@@ -109,7 +109,7 @@ export interface BatchFix {
   batchId: string;
   seq: number;
   /** 're-verify': the batch's combined tree no longer matched it; 'dry-run': `sr submit --dry-run` blamed its unit; 'review': comments on its pull request. */
-  check: 're-verify' | 'dry-run' | 'review';
+  check: 're-verify' | 'dry-run' | 'review' | 'rebuild';
   reasons: string[];
   at: number;
   /** For 'review': the pull request, and whether it is still open (the fix is pushed to it, not a new PR). */
@@ -117,6 +117,8 @@ export interface BatchFix {
   prOpen?: boolean;
   /** The passing verdict it had: its first fix attempt reads these reasons; later ones the Gate Keeper's. */
   verdictId: string | null;
+  /** For 'rebuild': functions taken out of the packet (matched upstream since, or no longer published). */
+  dropped?: Array<{ rva: string; name: string | null; why: string }>;
 }
 
 type Raw = Record<string, any>;
@@ -539,11 +541,15 @@ export class Store {
    * Send a matched packet back to the worker queue at its tier to be fixed: fresh per-tier counters,
    * the fix reasons kept on the packet. Its accepted attempt stays its last verdict until a new one.
    */
-  requeueForFix(runId: string, taskId: string, fix: BatchFix, from: Array<'passed' | 'staged'> = ['passed']): boolean {
+  requeueForFix(runId: string, taskId: string, fix: BatchFix, from: Array<'passed' | 'staged' | 'set_aside'> = ['passed']): boolean {
     return this.db.prepare(`UPDATE tasks SET state = 'pending', attempts_at_tier = 0, attempts_at_difficulty = 0, no_improvement_streak = 0,
         best_exact_bytes = 0, infra_failures = 0, provider_failures = 0, not_before = 0, lease_id = NULL, lease_expires_at = NULL,
-        fix_json = ?, updated_at = ?
+        fix_json = ?, hold_json = NULL, updated_at = ?
       WHERE id = ? AND run_id = ? AND state IN (${from.map(() => '?').join(',')})`).run(j(fix), Date.now(), taskId, runId, ...from).changes > 0;
+  }
+  /** Narrow a packet to some of its functions (the rest stay out of it for good). */
+  setTaskFunctions(taskId: string, functions: FunctionTarget[]) {
+    this.db.prepare('UPDATE tasks SET functions_json = ?, updated_at = ? WHERE id = ?').run(j(functions), Date.now(), taskId);
   }
   /** Record (or forget, with null) why a packet whose functions all match is set aside. */
   setHold(taskIds: string[], hold: TaskHold | null) {

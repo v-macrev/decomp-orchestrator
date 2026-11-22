@@ -253,6 +253,22 @@ Later in the same run:
 | 83 of the run's 100 functions are claim-time functions: on the published target-hash list and offered by `contributor-targets.json`, with no `data/progress.json` entry until their claim is recorded (`sr next` names them `Class::Function<rva>`, GUESS). The batch check called them "no longer tracked upstream" and set their unit aside | The upstream check counts an RVA that the base revision publishes and offers as tracked |
 | `COMPARE_FUNCTION_SYMBOL_MISSING` (41×): most candidates had simply not defined the function (they returned the unit with only the other functions) | The finding says so ("your files do not define X at all"), or, when a definition exists, that it must be an out-of-line member with the declared signature |
 
+### Rebuilding set-aside units on upstream
+
+A pull request sends whole unit files. A unit set aside because upstream has since matched (or
+stopped publishing) some of its functions still holds functions nobody else has, but they cannot go
+upstream inside our old file: it would overwrite upstream's matched bodies and still name the dropped
+functions. **Rebuild on upstream** (`POST /api/runs/:id/set-aside/rebuild`, button in the set-aside
+list) narrows each set-aside packet of those units to the functions upstream still needs and requeues
+it as a `rebuild` fix. Every attempt of such a packet starts from upstream's current files with the
+packet's accepted definitions spliced in (`orchestrator/splice.ts`: the definitions, their `0x<rva>`
+header lines, missing includes and file-scope declarations, a declaration in the class and its
+label). The **first attempt is the splice itself, with no model call**; the Gate Keeper compiles and
+compares it like any candidate. A unit the splice does not get through (say its body needs a member
+upstream's class does not have, which the splice never adds because it could move upstream's
+offsets) goes on to the workers, who see the spliced files and the compiler's or comparator's
+findings.
+
 ### Throughput for the hardest packets
 
 | Problem seen | Fix |

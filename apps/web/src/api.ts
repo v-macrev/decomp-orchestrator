@@ -489,6 +489,7 @@ export const api = {
   tidyPullRequest: (id: string, batchId: string) => req<{ ok: boolean; title: string | null; warnings: string[]; error: string | null }>('POST', `/api/runs/${id}/batches/${batchId}/tidy-pr`, { confirm: true }),
   setAsideBlocking: (id: string, batchId: string) => req<SetAsideResult>('POST', `/api/runs/${id}/batches/${batchId}/set-aside`, {}),
   setAsideUpstream: (id: string) => req<SetAsideUpstreamResult>('POST', `/api/runs/${id}/batches/set-aside-upstream`, {}),
+  rebuildOnUpstream: (id: string, units?: string[]) => req<{ ok: true; units: number; packets: number; functions: number; dropped: Array<{ rva: string; name: string | null; why: string }>; status: string }>('POST', `/api/runs/${id}/set-aside/rebuild`, units ? { units } : {}),
   putBackSetAside: (id: string, units?: string[]) => req<{ ok: true; returnedTasks: number; staged: StageResult }>('POST', `/api/runs/${id}/set-aside/put-back`, units ? { units } : {}),
   cancelBatchDryRun: (id: string, batchId: string) => req<{ ok: true }>('POST', `/api/runs/${id}/batches/${batchId}/cancel-dry-run`, {}),
   clearBatchBranches: (id: string, batchId: string, scope: 'preview' | 'batch') => req<{ deleted: string[] }>('DELETE', `/api/runs/${id}/batches/${batchId}/branches`, { scope }),

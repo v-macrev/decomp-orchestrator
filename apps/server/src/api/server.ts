@@ -416,6 +416,16 @@ export async function buildServer(app: App) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
+  // Rebuild set-aside units on upstream's current files (all units with dropped functions, or the units named).
+  f.post('/api/runs/:id/set-aside/rebuild', async (req: FastifyRequest<{ Params: { id: string }; Body: { units?: string[] } | undefined }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    const units = Array.isArray(req.body?.units) ? req.body.units.filter((u): u is string => typeof u === 'string') : undefined;
+    try {
+      return { ok: true, ...(await engine.rebuildOnUpstream(req.params.id, units)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   // Put set-aside units back (all, or the units named) and re-verify them.
   f.post('/api/runs/:id/set-aside/put-back', async (req: FastifyRequest<{ Params: { id: string }; Body: { units?: string[] } | undefined }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');

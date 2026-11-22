@@ -437,7 +437,7 @@ export function findSignature(qualified: string, sources: string[]): string | nu
 
 /** Structured verdict + only the failing functions' previous bodies — never the whole previous file. */
 export function renderRetryDelta({ verdict, attempt, history, fix }: Feedback, task: TaskRow, maxTokens: number): { text: string; category: string; rawTokens: number; failing: string[] } {
-  if (fix) {
+  if (fix && fix.check !== 'rebuild') {
     const category = fix.check === 'review' ? 'REVIEW_FIX' : 'BATCH_FIX';
     const lines = [`<retry category="${category}">`, ...fixSummary(fix, task, attempt.n), '</retry>'];
     const failing = task.functions.map((f) => f.name).filter((n): n is string => !!n);
@@ -456,6 +456,7 @@ export function renderRetryDelta({ verdict, attempt, history, fix }: Feedback, t
     if (best && best.n !== attempt.n) summary.push(`Best so far is attempt #${best.n} (score ${best.score}); see <history>.`);
   } else if (cats.includes('ANTI_CHEAT_VIOLATION')) summary.push('The candidate was blocked before compiling; another violation is quarantined.');
   else if (cats.includes('COMPILE_ERROR')) summary.push('It did not compile, so there is no byte evidence yet: fix the compiler errors below exactly.');
+  if (task.fix?.check === 'rebuild') summary.push(`This unit is being rebuilt on upstream's current file (upstream matched or dropped some of its functions since it was drafted): the unit files you get are upstream's, with your accepted ${task.functions.map((f) => f.name ?? f.rva).join(', ')} spliced in. Keep every function upstream already has exactly as it is; make yours compile and match in it.`);
   const lines = [`<retry category="${category}">`, `Summary: ${summary.join(' ')}`, 'Gate Keeper findings:'];
   for (const f of blocks.slice(0, 8)) {
     const guide = FINDING_GUIDANCE[f.code];

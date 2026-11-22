@@ -1055,7 +1055,7 @@ function HeldBackKpis({ batches, held }: { batches: Batch[]; held?: HeldPacket[]
 }
 
 /** Set-aside units across the run, with the findings that blocked each, and Put back. */
-function SetAsideList({ batches, held = [], locked, busy, putBack }: { batches: Batch[]; held?: HeldPacket[]; locked: boolean; busy: string | null; putBack: (units?: string[]) => void }) {
+function SetAsideList({ batches, held = [], locked, busy, putBack, rebuild }: { batches: Batch[]; held?: HeldPacket[]; locked: boolean; busy: string | null; putBack: (units?: string[]) => void; rebuild?: (units?: string[]) => void }) {
   // The latest batch that set a unit aside knows why; a held packet never reached a batch.
   const units = new Map<string, { reasons: string[]; fns: Array<{ rva: string }>; seq: number | null }>();
   for (const h of held) {
@@ -1093,7 +1093,11 @@ function SetAsideList({ batches, held = [], locked, busy, putBack }: { batches: 
           ))}
         </tbody>
       </table>
-      {units.size > 1 && <div style={{ marginTop: 6 }}><ConfirmButton disabled={locked} onConfirm={() => putBack()} confirmLabel={`Put all ${units.size} set-aside units back and re-verify them?`}>Put all back</ConfirmButton></div>}
+      <div className="row" style={{ marginTop: 6 }}>
+        {units.size > 1 && <ConfirmButton disabled={locked} onConfirm={() => putBack()} confirmLabel={`Put all ${units.size} set-aside units back and re-verify them?`}>Put all back</ConfirmButton>}
+        {rebuild && <ConfirmButton disabled={locked} onConfirm={() => rebuild()} confirmLabel="Rebuild every set-aside unit that upstream has partly matched or dropped, on upstream's current files? The first try is a free splice; units it cannot finish go to the AI workers.">{busy === 'rebuild' ? 'Rebuilding…' : 'Rebuild on upstream'}</ConfirmButton>}
+        {rebuild && <span className="muted small">For units upstream partly matched or dropped since: keeps only the functions upstream still needs, inside upstream's current files.</span>}
+      </div>
     </details>
   );
 }
@@ -1264,6 +1268,10 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
   const fix = (b: Batch) => run(`fix-${b.id}`, async () => {
     const r = await api.fixBatch(runId, b.id);
     return `Batch ${b.seq}: ${r.functions} function(s) in ${r.requeued} packet(s) went back to the AI agents with what its ${r.check === 're-verify' ? 'check' : 'dry run'} reported. The run is running again through its flow${r.kept ? `; its other ${r.kept} packet(s) stay matched` : ''}, and everything is batched again when it finishes.`;
+  });
+  const rebuild = (units?: string[]) => run('rebuild', async () => {
+    const r = await api.rebuildOnUpstream(runId, units);
+    return `${r.functions} function(s) in ${r.packets} packet(s) of ${r.units} unit(s) go back to be rebuilt on upstream's current files (first try: a splice, no model call); ${r.dropped.length} function(s) upstream matched or dropped stay out.`;
   });
   const putBack = (units?: string[]) => run('put-back', async () => {
     const r = await api.putBackSetAside(runId, units);
@@ -1599,7 +1607,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
               <div className="group">
                 <b>{setAside} packet{setAside === 1 ? '' : 's'} set aside</b>
                 <div className="muted small">They blocked a dry run, upstream already has them, or their file fails the preflight on a line they did not write. Put a unit back once its cause is gone.</div>
-                <SetAsideList batches={batches} held={batching?.held} locked={locked} busy={busy} putBack={putBack} />
+                <SetAsideList batches={batches} held={batching?.held} locked={locked} busy={busy} putBack={putBack} rebuild={rebuild} />
               </div>
             )}
           </div>

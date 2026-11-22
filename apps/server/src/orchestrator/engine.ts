@@ -11,7 +11,7 @@
 // most the in-flight attempts abandoned (and not counted against any task's budget).
 import {
   CAPABILITY_RANK, DIFFICULTIES, DIFFICULTY_RANK, Flow, RunConfig, WorkerOutput, compileFlowPlan, harder, stealSources, tierFor, validateFlow,
-  type Attempt, type CapabilityTier, type Difficulty, type FlowPlan, type PoolBinding, type Route, type SkillSelection, type TaskState, type Verdict,
+  type Attempt, type CapabilityTier, type Difficulty, type FlowPlan, type FunctionTarget, type PoolBinding, type Route, type SkillSelection, type TaskState, type Verdict,
 } from '@decomp/core';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
@@ -37,6 +37,7 @@ import { buildHistory, findRepeat, progressScore, type HistoryEntry } from './hi
 import { draftedByText, personOf } from './attribution.js';
 import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
+import { spliceUnit } from './splice.js';
 import { PR_BATCH_MAX, batchContent, finishingModel, packUnits, stageRun, type StageSummary } from './staging.js';
 import { SkillRegistry } from '../skills/registry.js';
 import { FunctionGatherer } from '../intel/gatherer.js';
@@ -1345,6 +1346,84 @@ export class RunEngine {
     }, { besideRun: true });
   }
 
+  /**
+   * Rebuild set-aside units on upstream: a unit set aside because upstream has since matched (or
+   * stopped publishing) some of its functions still holds functions nobody else has, but a pull
+   * request sends whole files. Each set-aside packet of those units is narrowed to the functions
+   * still worth sending and goes back to the queue as a 'rebuild' fix: its first attempt splices
+   * its accepted definitions into upstream's current file, with no model call, and the Gate Keeper
+   * checks that; a packet the splice does not get through goes on to the workers from there.
+   * Units given by name are rebuilt even when nothing in them was dropped.
+   */
+  async rebuildOnUpstream(runId: string, units?: string[]) {
+    const { store, repo, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can be rebuilt`);
+    if (!repo.upstreamState) throw new Error('this repository adapter cannot read upstream');
+    if (budgetReached(row)) throw new Error(`run budget ${row.config.budgetUsd} reached (${row.costUsd.toFixed(2)} spent): raise it first`);
+    const pick = units?.length ? new Set(units) : null;
+    const tasks = store.listTasks(runId, { state: 'set_aside', limit: 100_000 }).filter((t) => !pick || pick.has(t.unit));
+    if (!tasks.length) throw new Error('no set-aside packets');
+    const st = await repo.upstreamState({ rvas: tasks.flatMap((t) => t.functions.map((f) => f.rva)), files: [], branch: null });
+    if (!st.checked) throw new Error('upstream data/progress.json could not be read');
+    const why = (rva: string) => (Object.hasOwn(st.matched, rva) ? `matched upstream${st.matched[rva] ? ` (${st.matched[rva]})` : ''}` : st.untracked.includes(rva) ? 'no longer published upstream' : null);
+    const byUnit = new Map<string, TaskRow[]>();
+    for (const t of tasks) byUnit.set(t.unit, [...(byUnit.get(t.unit) ?? []), t]);
+    const plan: Array<{ task: TaskRow; keep: FunctionTarget[]; dropped: NonNullable<BatchFix['dropped']> }> = [];
+    let unitsDone = 0;
+    for (const [unit, ts] of byUnit) {
+      const dropsAny = ts.some((t) => t.functions.some((f) => why(f.rva)));
+      if (!dropsAny && !pick?.has(unit)) continue;
+      let any = false;
+      for (const t of ts) {
+        const keep = t.functions.filter((f) => !why(f.rva));
+        if (!keep.length) continue;
+        plan.push({ task: t, keep, dropped: t.functions.filter((f) => why(f.rva)).map((f) => ({ rva: f.rva, name: f.name ?? null, why: why(f.rva)! })) });
+        any = true;
+      }
+      if (any) unitsDone++;
+    }
+    if (!plan.length) throw new Error('none of these set-aside units has a function left that upstream still needs');
+    const at = Date.now();
+    let requeued = 0;
+    const functions = plan.reduce((n, p) => n + p.keep.length, 0);
+    await this.exclusive(`rebuilding ${unitsDone} set-aside unit(s) of ${runId} on upstream`, async () => {
+      for (const p of plan) {
+        const fix: BatchFix = {
+          batchId: '', seq: 0, check: 'rebuild', at, verdictId: p.task.lastVerdictId, dropped: p.dropped,
+          reasons: [`rebuild on upstream's current ${p.task.unit}${p.dropped.length ? `; left out: ${p.dropped.map((d) => `${d.rva} (${d.why})`).join(', ')}` : ''}`],
+        };
+        store.tx(() => {
+          if (store.requeueForFix(runId, p.task.id, fix, ['set_aside'])) {
+            if (p.keep.length !== p.task.functions.length) store.setTaskFunctions(p.task.id, p.keep);
+            requeued++;
+          }
+        });
+      }
+      if (requeued) store.setRunStatus(runId, 'running', ['completed']);
+      events.emit('run.rebuild_on_upstream', `${functions} function(s) in ${requeued} packet(s) of ${unitsDone} set-aside unit(s) go back to be rebuilt on upstream's current files (first try: a splice, no model call)`, {
+        runId, level: 'warn', data: { units: unitsDone, packets: requeued, functions, dropped: plan.reduce((n, p) => n + p.dropped.length, 0) },
+      });
+    }, { besideRun: true });
+    if (requeued) await this.wakeOrStart(runId);
+    return { units: unitsDone, packets: requeued, functions, dropped: plan.flatMap((p) => p.dropped), status: store.getRun(runId)?.status ?? 'running' };
+  }
+
+  /** Upstream's unit files (as the slot has them) with the packet's accepted functions spliced in. */
+  private async spliceForRebuild(task: TaskRow, slot: number) {
+    const { store, repo } = this.deps;
+    const v = task.fix?.verdictId ? store.getVerdict(task.fix.verdictId) : null;
+    const a = v ? store.getAttempt(v.attemptId) : null;
+    if (!a?.files?.length) return null;
+    const h = task.unit.replace(/.cpp$/, '.h');
+    const ours = new Map(a.files.map((f) => [f.path, f.content]));
+    const upstream = new Map<string, string | null>([[task.unit, await repo.readFile(slot, task.unit)], [h, await repo.readFile(slot, h)]]);
+    const drop = (task.fix?.dropped ?? []).map((d) => ({ rva: d.rva, name: d.name, size: 0 }));
+    const r = spliceUnit({ cpp: task.unit, ours, upstream, keep: task.functions as FunctionTarget[], drop });
+    return { ...r, model: a.model };
+  }
+
   /** Put set-aside units back (all, or these units) and re-verify them into batches. */
   async putBackSetAside(runId: string, units?: string[]) {
     const { store, repo, events } = this.deps;
@@ -2322,6 +2401,10 @@ export class RunEngine {
         return this.infraFailure(run, task, leaseId, `prepare failed: ${(e as Error).message}`);
       }
       if (prepared.srTaskId && !this.queue.transition(task.id, leaseId, ['leased'], 'leased', { srTaskId: prepared.srTaskId })) return;
+      // A unit rebuilt on upstream: every attempt starts from upstream's file with the packet's
+      // accepted functions spliced in (the first attempt submits exactly that).
+      const spliced = task.fix?.check === 'rebuild' ? await this.spliceForRebuild(task, slot) : null;
+      if (spliced) await repo.writeFiles(slot, spliced.files);
 
       // 1b. late classification: prepare just produced the local packs — refine size-only estimates
       const routing = cfg.routing;
@@ -2391,72 +2474,83 @@ export class RunEngine {
       this.skills.recordSelections({ attemptId: attempt.id, runId, taskId: task.id, difficulty: task.difficulty, functions: task.functions.length }, selections);
 
       // 3. account lease + model call
-      const tier = run.plan.tiers[tierIdx]!;
-      const binding: PoolBinding = { ...node.data.pool, capability: node.data.pool.capability ?? (routing.enabled ? tier.capability : undefined) };
-      const estIn = contextTokens;
-      let waitedEmitted = false;
-      // Model rotation: after two attempts without progress, the accounts (= models) that made them
-      // go to the back of the queue, so a different model brings different ideas to the packet.
-      const recent = history.filter((h) => h.accountId).slice(-2);
-      const deprioritize = task.noImprovementStreak >= 2 && recent.length === 2 ? [...new Set(recent.map((h) => h.accountId!))] : [];
-      const lease = await pool.acquire(
-        { binding, role: 'worker', estInputTokens: estIn, estOutputTokens: Math.min(this.opts.maxOutputTokens, outputMode === 'edits' ? 3_000 : 8_000), deprioritize },
-        signal,
-        (ms, reason) => {
-          if (!waitedEmitted && ms > 3_000) {
-            waitedEmitted = true;
-            ev('pool.wait', `waiting ${Number.isFinite(ms) ? Math.round(ms / 1000) + 's' : '∞'} for an account (${reason})`, 'debug');
-          }
-        },
-      );
-      store.updateAttempt(attempt.id, { accountId: lease.account.id, model: lease.model.id });
-      if (deprioritize.length) {
-        ev('pool.rotated', deprioritize.includes(lease.account.id)
-          ? `no progress in 2 attempts, but only ${lease.account.id} could take this one`
-          : `no progress in 2 attempts on ${deprioritize.join(', ')}: switched to ${lease.account.id}/${lease.model.id}`, 'info', { from: deprioritize, to: lease.account.id });
-      }
-      const t0 = Date.now();
+      // A unit rebuilt on upstream: its first attempt is the splice itself, with no model call.
       let text: string;
-      try {
-        const resp = await providers.complete(lease.account, {
-          system, prompt, blocks, cacheKey, model: lease.model, effort: node.data.pool.effort, jsonSchema,
-          maxOutputTokens: Math.min(this.opts.maxOutputTokens, lease.model.maxOutputTokens), timeoutMs: this.opts.providerTimeoutMs, signal,
-        });
-        const latencyMs = Date.now() - t0;
-        pool.release(lease, { kind: 'ok', usage: resp.usage, latencyMs, rateLimit: resp.rateLimit });
-        const cost = costUsd(lease.model, resp.usage);
-        store.addRunUsage(runId, cost, resp.usage);
-        store.updateAttempt(attempt.id, { usage: resp.usage, costUsd: cost, latencyMs });
-        text = resp.text;
-      } catch (e) {
-        const pe = e instanceof ProviderError ? e : new ProviderError(signal.aborted ? 'aborted' : 'network', (e as Error).message);
-        pool.release(lease, { kind: pe.kind, retryAfterMs: pe.retryAfterMs, message: pe.message, latencyMs: Date.now() - t0 });
-        if (pe.kind === 'aborted' || signal.aborted) throw new AbortedError();
-        store.updateAttempt(attempt.id, { status: 'provider_error', error: `${pe.kind}: ${pe.message}`, finishedAt: Date.now() });
-        ev('attempt.provider_error', `${lease.account.id}/${lease.model.id}: ${pe.kind}`, 'warn', { accountId: lease.account.id, kind: pe.kind });
-        // Refusals/bad requests are about this packet, not the account: they consume an attempt.
-        if (pe.kind === 'refusal' || pe.kind === 'bad_request') {
-          return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'PROVIDER_' + pe.kind.toUpperCase(), `provider ${pe.kind}: ${pe.message}`), { infra: false, strike: false }, tierIdx);
+      let finisher: string;
+      const freeAttempt = !!spliced && task.fix?.verdictId === task.lastVerdictId;
+      if (spliced && freeAttempt) {
+        text = JSON.stringify({ files: spliced.files });
+        finisher = spliced.model ?? 'decomp-orchestrator';
+        store.updateAttempt(attempt.id, { model: 'splice (no model call)', latencyMs: 0 });
+        ev('attempt.spliced', `rebuilt on upstream without a model call: ${spliced.notes.join('; ').slice(0, 600)}`, 'info', { notes: spliced.notes });
+      } else {
+        const tier = run.plan.tiers[tierIdx]!;
+        const binding: PoolBinding = { ...node.data.pool, capability: node.data.pool.capability ?? (routing.enabled ? tier.capability : undefined) };
+        const estIn = contextTokens;
+        let waitedEmitted = false;
+        // Model rotation: after two attempts without progress, the accounts (= models) that made them
+        // go to the back of the queue, so a different model brings different ideas to the packet.
+        const recent = history.filter((h) => h.accountId).slice(-2);
+        const deprioritize = task.noImprovementStreak >= 2 && recent.length === 2 ? [...new Set(recent.map((h) => h.accountId!))] : [];
+        const lease = await pool.acquire(
+          { binding, role: 'worker', estInputTokens: estIn, estOutputTokens: Math.min(this.opts.maxOutputTokens, outputMode === 'edits' ? 3_000 : 8_000), deprioritize },
+          signal,
+          (ms, reason) => {
+            if (!waitedEmitted && ms > 3_000) {
+              waitedEmitted = true;
+              ev('pool.wait', `waiting ${Number.isFinite(ms) ? Math.round(ms / 1000) + 's' : '∞'} for an account (${reason})`, 'debug');
+            }
+          },
+        );
+        store.updateAttempt(attempt.id, { accountId: lease.account.id, model: lease.model.id });
+        if (deprioritize.length) {
+          ev('pool.rotated', deprioritize.includes(lease.account.id)
+            ? `no progress in 2 attempts, but only ${lease.account.id} could take this one`
+            : `no progress in 2 attempts on ${deprioritize.join(', ')}: switched to ${lease.account.id}/${lease.model.id}`, 'info', { from: deprioritize, to: lease.account.id });
         }
-        // Every account the workers use is down: not this packet's fault, so it is not charged
-        // (a long outage would otherwise dead-letter packets); the run pauses until one is back.
-        const outage = this.workerOutage(run.row.id, run.plan);
-        if (outage) {
-          this.outagePause(run.row.id, outage);
-          this.queue.transition(task.id, leaseId, ['leased'], 'pending', { notBefore: Date.now() + 5_000 });
+        const t0 = Date.now();
+        try {
+          const resp = await providers.complete(lease.account, {
+            system, prompt, blocks, cacheKey, model: lease.model, effort: node.data.pool.effort, jsonSchema,
+            maxOutputTokens: Math.min(this.opts.maxOutputTokens, lease.model.maxOutputTokens), timeoutMs: this.opts.providerTimeoutMs, signal,
+          });
+          const latencyMs = Date.now() - t0;
+          pool.release(lease, { kind: 'ok', usage: resp.usage, latencyMs, rateLimit: resp.rateLimit });
+          const cost = costUsd(lease.model, resp.usage);
+          store.addRunUsage(runId, cost, resp.usage);
+          store.updateAttempt(attempt.id, { usage: resp.usage, costUsd: cost, latencyMs });
+          text = resp.text;
+        } catch (e) {
+          const pe = e instanceof ProviderError ? e : new ProviderError(signal.aborted ? 'aborted' : 'network', (e as Error).message);
+          pool.release(lease, { kind: pe.kind, retryAfterMs: pe.retryAfterMs, message: pe.message, latencyMs: Date.now() - t0 });
+          if (pe.kind === 'aborted' || signal.aborted) throw new AbortedError();
+          store.updateAttempt(attempt.id, { status: 'provider_error', error: `${pe.kind}: ${pe.message}`, finishedAt: Date.now() });
+          ev('attempt.provider_error', `${lease.account.id}/${lease.model.id}: ${pe.kind}`, 'warn', { accountId: lease.account.id, kind: pe.kind });
+          // Refusals/bad requests are about this packet, not the account: they consume an attempt.
+          if (pe.kind === 'refusal' || pe.kind === 'bad_request') {
+            return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'PROVIDER_' + pe.kind.toUpperCase(), `provider ${pe.kind}: ${pe.message}`), { infra: false, strike: false }, tierIdx);
+          }
+          // Every account the workers use is down: not this packet's fault, so it is not charged
+          // (a long outage would otherwise dead-letter packets); the run pauses until one is back.
+          const outage = this.workerOutage(run.row.id, run.plan);
+          if (outage) {
+            this.outagePause(run.row.id, outage);
+            this.queue.transition(task.id, leaseId, ['leased'], 'pending', { notBefore: Date.now() + 5_000 });
+            return;
+          }
+          const pf = task.providerFailures + 1;
+          if (pf >= this.opts.maxProviderFailures) {
+            this.queue.transition(task.id, leaseId, ['leased'], 'dead', { providerFailures: pf });
+            ev('task.dead', `dead-lettered after ${pf} provider failures`, 'error');
+            return;
+          }
+          // Failover: requeue immediately; the scheduler routes the next try to a healthy account.
+          this.queue.transition(task.id, leaseId, ['leased'], 'pending', { providerFailures: pf, notBefore: Date.now() + Math.min(30_000, 250 * pf) });
           return;
         }
-        const pf = task.providerFailures + 1;
-        if (pf >= this.opts.maxProviderFailures) {
-          this.queue.transition(task.id, leaseId, ['leased'], 'dead', { providerFailures: pf });
-          ev('task.dead', `dead-lettered after ${pf} provider failures`, 'error');
-          return;
-        }
-        // Failover: requeue immediately; the scheduler routes the next try to a healthy account.
-        this.queue.transition(task.id, leaseId, ['leased'], 'pending', { providerFailures: pf, notBefore: Date.now() + Math.min(30_000, 250 * pf) });
-        return;
-      }
 
+        finisher = lease.model.id;
+      }
       // 4. parse output; materialise function-level edits into complete files
       const json = extractJson(text);
       const parsed = WorkerOutput.safeParse(json);
@@ -2470,7 +2564,7 @@ export class RunEngine {
         store.updateAttempt(attempt.id, { status: 'parse_error', error: why.slice(0, 500), finishedAt: Date.now() });
         return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_PARSE', why), { infra: false, strike: false }, tierIdx);
       }
-      if (outputMode === 'edits' && elided.length && parsed.data.files?.some((f) => f.path.endsWith('.cpp'))) {
+      if (!freeAttempt && outputMode === 'edits' && elided.length && parsed.data.files?.some((f) => f.path.endsWith('.cpp'))) {
         // Complete files cannot contain bodies the worker never saw: reject as a contract error, not a cheat strike.
         store.updateAttempt(attempt.id, { status: 'parse_error', error: 'returned complete files in edits mode', finishedAt: Date.now() });
         return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_MODE', `accepted bodies were elided (${elided.length} function(s)); return "edits" with only the functions you add or change, never complete files`), { infra: false, strike: false }, tierIdx);
@@ -2483,7 +2577,7 @@ export class RunEngine {
       // Deterministic header repair (skeleton placeholders, duplicate keys, banned lines, origin in .h).
       const untouched = await Promise.all(prepared.allowedPaths.filter((p) => !mat.files.some((f) => f.path === p)).map(async (p) => ({ path: p, current: await repo.readFile(slot, p), base: await repo.baseFile(p) })));
       const fixed = await repairAnswer(mat.files, (p) => repo.readFile(slot, p), { codeOrigin: parsed.data.codeOrigin, adaptedBodies: parsed.data.adaptedBodies }, {
-        untouched, attribution: { person: personOf(cfg.draftedBy), model: lease.model.id },
+        untouched, attribution: { person: personOf(cfg.draftedBy), model: finisher },
       });
       mat.files = fixed.files;
       // The exact code (comments and spacing aside) already failed in the compiler: refuse it without
@@ -2517,9 +2611,9 @@ export class RunEngine {
       if (gate.verdict.decision === 'pass') await this.learn(run, task, written, carriedMap).catch((e) => ev('knowledge.failed', `knowledge extraction failed: ${(e as Error).message}`, 'warn'));
       this.route(run, task, leaseId, attempt, gate.verdict, { infra: gate.infra, strike: gate.strike }, tierIdx, prepared.srTaskId);
       if (gate.verdict.decision === 'pass' && prepared.srTaskId && repo.recordAttribution && store.getTask(task.id)?.lastVerdictId === gate.verdict.id) {
-        const draftedBy = draftedByText(personOf(cfg.draftedBy), [lease.model.id]);
-        const r = await repo.recordAttribution({ task, srTaskId: prepared.srTaskId, model: lease.model.id, draftedBy, slot }).catch((e: Error) => ({ ok: false, problems: [e.message] }));
-        ev(r.ok ? 'task.attributed' : 'task.attribution_failed', r.ok ? `claim and task attributed to ${lease.model.id} (drafted by ${draftedBy})` : `could not record ${lease.model.id} as the finishing model: ${r.problems.join('; ').slice(0, 300)}`, r.ok ? 'debug' : 'warn', { model: lease.model.id });
+        const draftedBy = draftedByText(personOf(cfg.draftedBy), [finisher]);
+        const r = await repo.recordAttribution({ task, srTaskId: prepared.srTaskId, model: finisher, draftedBy, slot }).catch((e: Error) => ({ ok: false, problems: [e.message] }));
+        ev(r.ok ? 'task.attributed' : 'task.attribution_failed', r.ok ? `claim and task attributed to ${finisher} (drafted by ${draftedBy})` : `could not record ${finisher} as the finishing model: ${r.problems.join('; ').slice(0, 300)}`, r.ok ? 'debug' : 'warn', { model: finisher });
       }
       return;
     } catch (e) {

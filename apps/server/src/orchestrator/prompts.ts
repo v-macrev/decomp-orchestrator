@@ -77,6 +77,13 @@ export function fixSummary(fix: BatchFix, task: TaskRow, attemptNo: number): str
       ...(fix.reasons.length > 12 ? [`- … ${fix.reasons.length - 12} more`] : []),
     ];
   }
+  if (fix.check === 'rebuild') {
+    return [
+      `Upstream has since matched or dropped some functions of this unit, and a pull request sends whole files, so ${names} must be rebuilt inside upstream's current file.`,
+      "The unit files you are given are upstream's, with your accepted functions spliced in. Keep every function upstream already has exactly as it is; make yours compile and match in it.",
+      ...fix.reasons.slice(0, 4).map((r) => `- ${r.slice(0, 600)}`),
+    ];
+  }
   const what = fix.check === 're-verify'
     ? `when batch ${fix.seq} was re-verified as one tree with the other packets of this run, the comparator no longer matched it`
     : `the repository's \`sr submit --dry-run\` of batch ${fix.seq} blamed this unit`;
