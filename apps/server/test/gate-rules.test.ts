@@ -49,6 +49,13 @@ const LEGIT: Array<[string, string, { before?: string; targets?: FunctionTarget[
     '// 0x3cc6d0 TESActorBase::GetHasPLSpecTex', '// 0x3b03a0 TESActorBase::GetIsPlayerOwner', '// 0x3b03c0 TESActorBase::GetIsGhost',
     '// TESActorBase: COMMUNITY(CharmedBaryon/CommonLibSSE-NG@0d9f1c2, MIT)', '// GetIsGhost: GUESS(low)',
     '// Adapted bodies: none', '#include "TESActorBase.h"', 'bool TESActorBase::GetIsGhost() const { return flags & 1; }', ''].join('\n')],
+  // The packet's own target had an earlier body upstream that never matched: rewriting it is the job,
+  // whether the target is named qualified or by its bare method name.
+  ['rewrites its own target over an unmatched upstream draft', `${HEADER}void BSOrderedNode::OnVisible(Cull& c)\n{\n    Base::OnVisible(c);\n    Walk(c);\n}\n`,
+    { before: `${HEADER}void BSOrderedNode::OnVisible(Cull& c)\n{\n    Walk(c);\n}\n`, targets: [T('BSOrderedNode::OnVisible', 48)] }],
+  ['rewrites its own target named without its class', `${HEADER}void BSOrderedNode::OnVisible(Cull& c)\n{\n    Base::OnVisible(c);\n}\n`,
+    { before: `${HEADER}void BSOrderedNode::OnVisible(Cull& c)\n{\n    Walk(c);\n}\n`, targets: [T('OnVisible', 48)] }],
+  ['allowed standard header', `${HEADER}#include <cstdint>\n#include <intrin.h>\n`],
 ];
 
 const CHEATS: Array<[string, string, string, { before?: string; targets?: FunctionTarget[] }?]> = [
@@ -81,6 +88,13 @@ const CHEATS: Array<[string, string, string, { before?: string; targets?: Functi
   ['host path include', `${HEADER}#include "C:/Users/me/secret.h"\n`, 'LEAK_INCLUDE_OUTSIDE_ROOTS'],
   ['parent-escaping include', `${HEADER}#include "../../../tools/x.h"\n`, 'LEAK_INCLUDE_OUTSIDE_ROOTS'],
   ['non-allowlisted std include', `${HEADER}#include <fstream>\n`, 'LEAK_INCLUDE_OUTSIDE_ROOTS'],
+  // The repository screen lists no <algorithm> or <memory>: a PR with one fails its preflight.
+  ['<algorithm> include', `${HEADER}#include <algorithm>\n`, 'LEAK_INCLUDE_OUTSIDE_ROOTS'],
+  ['<memory> include', `${HEADER}#include <memory>\n`, 'LEAK_INCLUDE_OUTSIDE_ROOTS'],
+  // Any parent step is refused by the screen, even one that stays inside reconstruction/.
+  ['parent step inside the roots', `${HEADER}#include "../shared/TESObject.h"\n`, 'LEAK_INCLUDE_OUTSIDE_ROOTS'],
+  ['matched body of a function that is not a target modified', `${HEADER}int TESForm::A() const { return a + 1; }\nint TESForm::B() const { return b; }\n`, 'CHEAT_MATCHED_BODY_MODIFIED',
+    { before: `${HEADER}int TESForm::A() const { return a; }\n`, targets: [T('TESForm::B', 12)] }],
   ['static_assert without message', `${HEADER}static_assert(sizeof(TESForm) == 0x20);\n`, 'CONV_STATIC_ASSERT_NO_MESSAGE'],
   ['licence text in header', `// Permission is hereby granted, free of charge, to any person\n// Code origin: original\n${HEADER}`, 'CONV_HEADER_LICENCE_TEXT'],
   ['origin placeholder', HEADER.replace('original; the listing and community declarations only', '<fill me>'), 'CONV_ORIGIN_PLACEHOLDER'],

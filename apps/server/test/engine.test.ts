@@ -273,3 +273,40 @@ describe('attempts per tier', () => {
     s.engine.close();
   }, 60_000);
 });
+
+describe('packets the workers cannot finish', () => {
+  it('sets aside, as held, a packet whose functions match but whose file fails the preflight on a line it did not write', async () => {
+    // Every unit's base already has the include line; the preflight rejects that line in every file.
+    class Upstream extends SimRepo {
+      override async baseFile(path: string) {
+        return path.endsWith('.cpp') ? '#include "Sim.h"\n' : null;
+      }
+      override async preflight(slot: number, task: Parameters<SimRepo['preflight']>[1]) {
+        const src = (await this.readFile(slot, task.unit)) ?? '';
+        const n = src.split('\n').findIndex((l) => l.trim() === '#include "Sim.h"') + 1;
+        const problems = n ? [`${task.unit}:${n}: deterministic screen: include-outside-roots; fix: use a reconstruction-root header path`] : [];
+        return { completed: true, ok: !problems.length, problems, infraError: null };
+      }
+    }
+    const s = setup(tmpDb());
+    const repo = new Upstream({ slots: 4, compareLatencyMs: [1, 2] });
+    const engine = new RunEngine({ store: s.store, pool: s.pool, providers: new ProviderRegistry({ oracle: repo }), repo, events: s.events }, { leaseMs: 5_000, heartbeatMs: 500, infraBackoffMs: 5, idlePollMs: 20 });
+    const run = engine.createRun('held', { flowId: 'default', selection: { source: 'synthetic', count: 12, seed: 4 }, routing: { enabled: false } }, flow(4, 2));
+    await engine.start(run.id);
+    await engine.waitFor(run.id);
+    const held = s.store.listTasks(run.id, { state: 'set_aside', limit: 100 });
+    expect(held.length).toBeGreaterThan(0);
+    for (const t of held) {
+      expect(t.hold?.problems[0]?.message).toMatch(/include-outside-roots.*already in the file before this packet/);
+      const vs = s.store.verdictsForTask(t.id);
+      // One retry to change the line, then held: never retried until its attempts run out.
+      expect(vs.at(-1)!.route).toBe('hold');
+      expect(vs.filter((v) => v.findings.some((f) => f.code === 'PREFLIGHT_PREEXISTING')).length).toBe(2);
+    }
+    expect(s.store.listTasks(run.id, { state: 'dead', limit: 100 }).filter((t) => s.store.verdictsForTask(t.id).some((v) => v.findings.some((f) => f.code === 'PREFLIGHT_PREEXISTING'))).length).toBe(0);
+    expect(engine.batchingStatus(run.id).held.length).toBe(held.length);
+    s.pool.close();
+    s.engine.close();
+    engine.close();
+  }, 60_000);
+});

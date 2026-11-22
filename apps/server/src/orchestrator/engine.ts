@@ -669,6 +669,10 @@ export class RunEngine {
       fresh: sum(units.filter((u) => !failed.has(u.unit))),
       waiting: { functions: Math.max(0, passed.functions - ready.functions), packets: Math.max(0, passed.packets - ready.packets), units: Math.max(0, passed.units - ready.units) },
       batching: this.rolling.has(runId),
+      // Set aside with every function matching: the preflight blocks on lines they did not write.
+      held: (store.db.prepare("SELECT id FROM tasks WHERE run_id = ? AND state = 'set_aside' AND hold_json IS NOT NULL ORDER BY updated_at DESC LIMIT 500").all(runId) as Array<{ id: string }>)
+        .map(({ id }) => store.getTask(id)!)
+        .map((t) => ({ taskId: t.id, unit: t.unit, functions: t.functions.map((f) => ({ rva: f.rva, name: f.name ?? null })), problems: t.hold!.problems, at: t.hold!.at })),
     };
   }
 
@@ -1351,7 +1355,7 @@ export class RunEngine {
     const tasks = store.listTasks(runId, { state: 'set_aside', limit: 100_000 }).filter((t) => !pick || pick.has(t.unit));
     if (!tasks.length) throw new Error('no set-aside packets');
     return this.exclusive(`putting back set-aside packets of ${runId}`, async () => {
-      const back = store.db.prepare("UPDATE tasks SET state = 'passed', updated_at = ? WHERE id = ? AND run_id = ? AND state = 'set_aside'");
+      const back = store.db.prepare("UPDATE tasks SET state = 'passed', hold_json = NULL, updated_at = ? WHERE id = ? AND run_id = ? AND state = 'set_aside'");
       store.tx(() => tasks.forEach((t) => back.run(Date.now(), t.id, runId)));
       events.emit('run.set_aside_returned', `${tasks.length} set-aside packet(s) in ${new Set(tasks.map((t) => t.unit)).size} unit(s) put back into staging`, { runId });
       const staged = await stageRun(store, repo, events, runId, row.config.prBatchSize, { only: tasks.map((t) => t.id), progress: this.progress });
@@ -2487,6 +2491,13 @@ export class RunEngine {
       const repeat = findRepeat(history, mat.files);
       if (repeat) {
         store.updateAttempt(attempt.id, { status: 'completed', files: mat.files, finishedAt: Date.now() });
+        // The same code whose functions all matched, blocked only by lines it did not write: the
+        // worker kept them on purpose (another body needs them). Same code, same verdict: hold it.
+        const prior = store.verdictsForTask(task.id).find((v) => store.getAttempt(v.attemptId)?.n === repeat.n);
+        if (prior && isHeldOnly(prior)) {
+          ev('attempt.repeated', `candidate repeats attempt #${repeat.n}, whose functions all match; only lines it did not write block it`, 'debug', { repeats: repeat.n });
+          return this.route(run, task, leaseId, attempt, { ...prior, id: newId('vd'), attemptId: attempt.id, createdAt: Date.now() }, { infra: false, strike: false }, tierIdx);
+        }
         ev('attempt.repeated', `candidate repeats attempt #${repeat.n}; refused without compiling`, 'debug', { repeats: repeat.n });
         return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'REPEATED_CANDIDATE', `the code is identical to attempt #${repeat.n} (comments and spacing do not count), which already failed: ${repeat.outcome}. Change the logic.`), { infra: false, strike: false }, tierIdx);
       }
@@ -2632,6 +2643,19 @@ export class RunEngine {
     }
     if (verdict.decision === 'quarantine') {
       if (this.settle(run, task, leaseId, 'quarantined', { ...common, attemptsTotal, attemptsAtTier, cheatStrikes, bestExactBytes }, verdict, 'quarantine')) events.emit('task.quarantined', `QUARANTINE ${fnLabel}: ${verdict.findings.filter((f) => f.severity === 'block').map((f) => f.code).join(', ')}`, { runId, taskId: task.id, level: 'error' });
+      return;
+    }
+    // Every function matches and the preflight blocks only on lines that were in the file before
+    // this packet: the worker had one retry to change them and could not (or must not: another
+    // body needs them). Set it aside, matched, with the reason, instead of retrying forever.
+    if (isHeldOnly(verdict) && store.verdictsForTask(task.id).some((v) => v.id !== verdict.id && isHeldOnly(v))) {
+      const problems = verdict.findings.filter((x) => x.severity === 'block').map((x) => ({ file: x.file ?? null, line: x.line ?? null, message: x.message }));
+      if (this.settle(run, task, leaseId, 'set_aside', { ...common, attemptsTotal, attemptsAtTier, bestExactBytes, noImprovementStreak: 0 }, verdict, 'hold')) {
+        store.setHold([task.id], { verdictId: verdict.id, at: Date.now(), problems });
+        events.emit('task.held', `HELD ${fnLabel}: every function matches, but the repository preflight blocks on line(s) that were in the file before this packet: ${problems.map((p) => `${p.file ?? '?'}:${p.line ?? '?'}`).join(', ')}; set aside until they are fixed`, {
+          runId, taskId: task.id, level: 'warn', data: { problems },
+        });
+      }
       return;
     }
     const limit = tierNode.node.data;
@@ -2825,6 +2849,16 @@ const FORMAT_RETRIES = 3;
 /** True when a run has a budget and its spend has reached it (the engine pauses such a run). */
 export function budgetReached(row: { costUsd: number; config: { budgetUsd?: number } }): boolean {
   return row.config.budgetUsd !== undefined && row.costUsd >= row.config.budgetUsd;
+}
+
+/**
+ * Every compared function passes and every blocking finding is a preflight problem on a line that
+ * was in the file before the packet: the functions are ready, the file is not the packet's to fix.
+ */
+export function isHeldOnly(v: Verdict): boolean {
+  const blocks = v.findings.filter((f) => f.severity === 'block');
+  const compare = v.compare ?? [];
+  return v.decision === 'reject' && blocks.length > 0 && blocks.every((f) => f.code === 'PREFLIGHT_PREEXISTING') && compare.length > 0 && compare.every((c) => c.result === 'pass');
 }
 
 export function isFormatOnly(v: Verdict): boolean {

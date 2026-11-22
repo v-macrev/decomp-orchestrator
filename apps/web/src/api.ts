@@ -140,6 +140,16 @@ export interface BatchingStatus {
   waiting: { functions: number; packets: number; units: number };
   /** A rolling batch is being made right now. */
   batching: boolean;
+  /** Set aside with every function matching: the repository preflight blocks on lines they did not write. */
+  held?: HeldPacket[];
+}
+
+export interface HeldPacket {
+  taskId: string;
+  unit: string;
+  functions: Array<{ rva: string; name: string | null }>;
+  problems: TaskHold['problems'];
+  at: number;
 }
 
 export interface Metrics {
@@ -243,8 +253,15 @@ export interface FlowPlanView {
   routeSource: Record<Difficulty, 'edge' | 'capability'>;
 }
 
+/** Why a packet whose functions all match was set aside: preflight lines it did not write. */
+export interface TaskHold {
+  verdictId: string;
+  at: number;
+  problems: Array<{ file: string | null; line: number | null; message: string }>;
+}
+
 export interface TaskDetail {
-  task: Task;
+  task: Task & { hold?: TaskHold | null };
   attempts: Attempt[];
   verdicts: Verdict[];
   baseFiles: Record<string, string | null>;

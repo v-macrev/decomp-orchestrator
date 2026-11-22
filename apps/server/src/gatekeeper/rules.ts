@@ -18,8 +18,10 @@ import { extractFunctions, lex, lineOf, normalise, topLevelArgs } from './cpp.js
 // ---------------------------------------------------------------- LEAK (mirror of leakgrep.py)
 
 const STANDARD_HEADERS = new Set([
-  'cstddef', 'cstdint', 'cstring', 'climits', 'cfloat', 'cmath', 'type_traits', 'utility', 'new', 'limits', 'memory',
-  'typeinfo', 'atomic', 'algorithm', 'stddef.h', 'stdint.h', 'intrin.h',
+  // Exactly the repository screen's STANDARD_HEADERS (tools/contrib_screen.py): a header it does not
+  // list fails the pull request's preflight with include-outside-roots, whatever compiles here.
+  'cstddef', 'cstdint', 'cstring', 'climits', 'cfloat', 'cmath', 'type_traits', 'utility', 'new', 'limits',
+  'stddef.h', 'stdint.h', 'intrin.h',
 ]);
 const MNEMONICS = ('mov movzx movsx movaps movups movss movsd lea push pop call jmp je jne jz jnz ja jae jb jbe jg jge ' +
   'jl jle cmp test xor and or add sub adc sbb imul mul idiv div inc dec shl shr sar sal rol ror neg not ' +
@@ -41,22 +43,14 @@ const PINNED_REVISION = /(?<![0-9A-Za-z])[0-9a-f]{40}(?:[0-9a-f]{24})?(?![0-9A-Z
 const COMMENT_LINE = /^\s*(?:\/\/|\*|\/\*)/;
 const INCLUDE = /^\s*#\s*include\s*([<"])([^>"]*)[>"]/;
 
-function includeProblem(line: string, path: string): boolean {
+function includeProblem(line: string, _path: string): boolean {
   const m = INCLUDE.exec(line);
   if (!m) return false;
   const [, kind, target] = m as unknown as [string, string, string];
-  const parts = target.split('/');
-  if (target.includes('\\') || target.includes(':') || target.startsWith('/') || !/^[A-Za-z0-9_./-]+$/.test(target)) return true;
-  if (parts.includes('..') && kind === '"') {
-    const dir = path.split('/').slice(0, -1);
-    for (const p of parts) {
-      if (p === '..') dir.pop();
-      else if (p !== '.') dir.push(p);
-    }
-    const resolved = dir.join('/');
-    return !resolved.startsWith('reconstruction/');
-  }
-  if (!parts.length || parts.some((p) => p === '.' || p === '..')) return true;
+  // The repository screen (tools/contrib_screen.py): no "." or ".." step, no host path, plain
+  // characters; an angle include is a listed standard header or a repository .h; a quoted one a .h.
+  const parts = target.split('/').filter(Boolean);
+  if (!parts.length || parts.some((p) => p === '.' || p === '..') || target.includes('\\') || target.includes(':') || target.startsWith('/') || !/^[A-Za-z0-9_./-]+$/.test(target)) return true;
   if (kind === '<') return !STANDARD_HEADERS.has(target) && !target.endsWith('.h');
   return !target.endsWith('.h');
 }
@@ -68,7 +62,7 @@ function includeMessage(line: string): string {
   if (m?.[1] === '<') {
     return `#include ${shown} is not an allowed standard header (allowed: ${[...STANDARD_HEADERS].map((h) => `<${h}>`).join(' ')}); remove it and declare the function or type you need yourself (e.g. extern "C" int sprintf_s(char*, std::size_t, const char*, ...);)`;
   }
-  return `#include ${shown} must be the unit's own header ("X.h"), a reconstruction-root path ("area/Y.h") or a relative path that stays inside reconstruction/`;
+  return `#include ${shown} must be the unit's own header ("X.h"): the compiler only searches the unit's directory and the repository preflight rejects "../" (include-outside-roots), so declare any other type or function you need in the unit's own .h, marked STANDIN`;
 }
 
 /** Lines present in `after` but not in `before` (multiset difference), with 1-based line numbers. */
@@ -221,8 +215,11 @@ export function cheatScan(ctx: CheatContext): Finding[] {
   if (ctx.before) {
     const prev = extractFunctions(lex(ctx.before).code);
     const now = new Map(defs.map((d) => [d.name, d]));
+    // The packet's own targets are what it is here to write: an earlier body of one of them (an
+    // upstream draft that never matched, a skeleton) is not someone else's matched code.
+    const isTarget = (name: string) => byBase.has(name) || [...byBase.keys()].some((n) => n.endsWith(`::${name}`) || name.endsWith(`::${n}`));
     for (const p of prev) {
-      if (!p.body) continue;
+      if (!p.body || isTarget(p.name)) continue;
       const cur = now.get(p.name);
       if (!cur) push(f, 'CHEAT_MATCHED_BODY_REMOVED', 'block', path, p.line, `previously accepted function ${p.name} was removed; add new functions alongside matched ones`);
       else if (normalise(cur.body) !== normalise(p.body)) push(f, 'CHEAT_MATCHED_BODY_MODIFIED', 'block', path, cur.line, `previously accepted function ${p.name} was modified; never change matched bodies`);

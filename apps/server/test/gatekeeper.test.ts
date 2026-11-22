@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 import { describe, expect, it } from 'vitest';
-import { GateChecks } from '@decomp/core';
+import { GateChecks, type Verdict } from '@decomp/core';
 import type { TaskRow } from '../src/db/store.js';
-import { GateKeeper } from '../src/gatekeeper/gatekeeper.js';
+import { GateKeeper, insideTargetBody, lineInFile, symbolMissingNote } from '../src/gatekeeper/gatekeeper.js';
+import { isHeldOnly } from '../src/orchestrator/engine.js';
 import { simIdent } from '../src/providers/mock.js';
 import { SimRepo } from '../src/repo/simRepo.js';
 import { Semaphore } from '../src/util/async.js';
@@ -131,6 +132,50 @@ describe('GateKeeper pipeline', () => {
     expect(ok.verdict.decision).toBe('pass');
   });
 
+  it('tells a problem on a line the packet did not write apart from one in its own code', async () => {
+    const t = task();
+    class Upstream extends SimRepo {
+      override async baseFile(path: string) {
+        return path === t.unit ? '#include "Sim.h"\n#include <algorithm>\n' : null;
+      }
+      override async preflight(slot: number) {
+        const lines = ((await this.readFile(slot, t.unit)) ?? '').split('\n');
+        const at = (text: string) => lines.findIndex((l) => l.trim() === text) + 1;
+        return { completed: true, ok: false, infraError: null, problems: [
+          `${t.unit}:${at('#include <algorithm>')}: deterministic screen: include-outside-roots; fix: use a reconstruction-root header path`,
+          `${t.unit}:${at('#include <memory>')}: deterministic screen: include-outside-roots; fix: use a reconstruction-root header path`,
+        ] };
+      }
+    }
+    const repo = new Upstream({ slots: 1 });
+    const src = unit(repo, t).replace('#include "Sim.h"\n', '#include "Sim.h"\n#include <algorithm>\n#include <memory>\n');
+    const r = await run(repo, t, [{ path: t.unit, content: src }], GateChecks.parse({ leak: false }));
+    expect(r.verdict.findings.filter((x) => x.stage === 'preflight').map((x) => [x.code, x.line])).toEqual([
+      ['PREFLIGHT_PREEXISTING', 4], // in the base already: another body may need it
+      ['PREFLIGHT_PROBLEM', 5], // added by this packet
+    ]);
+    expect(r.verdict.findings[0]!.message).toMatch(/already in the file before this packet/);
+  });
+
+  it('never calls a line inside the packet\'s own function pre-existing', () => {
+    const src = 'int Foo::Bar()\n{\n    return 1;\n}\nint Foo::Baz()\n{\n    return 2;\n}\n';
+    expect(lineInFile(src, 3)).toBe('    return 1;');
+    expect(lineInFile(src, 99)).toBeNull();
+    expect(insideTargetBody(src, 3, [{ rva: '0x1', name: 'Foo::Bar', size: 8 }])).toBe(true);
+    expect(insideTargetBody(src, 3, [{ rva: '0x1', name: 'Bar', size: 8 }])).toBe(true);
+    expect(insideTargetBody(src, 7, [{ rva: '0x1', name: 'Foo::Bar', size: 8 }])).toBe(false);
+  });
+
+  it('holds only a verdict whose functions all pass and whose every block is pre-existing', () => {
+    const base = { id: 'v', taskId: 't', attemptId: 'a', decision: 'reject', route: 'retry', exactBytes: 40, stages: [], createdAt: 0 } as const;
+    const pre = { stage: 'preflight', code: 'PREFLIGHT_PREEXISTING', severity: 'block', message: 'x' } as const;
+    const pass = [{ rva: '0x1', name: 'F', result: 'pass' }] as unknown as Verdict['compare'];
+    expect(isHeldOnly({ ...base, findings: [pre], compare: pass } as unknown as Verdict)).toBe(true);
+    expect(isHeldOnly({ ...base, findings: [pre, { ...pre, code: 'PREFLIGHT_PROBLEM' }], compare: pass } as unknown as Verdict)).toBe(false);
+    expect(isHeldOnly({ ...base, findings: [pre], compare: [{ rva: '0x1', name: 'F', result: 'fail' }] } as unknown as unknown as Verdict)).toBe(false);
+    expect(isHeldOnly({ ...base, findings: [pre], compare: null } as unknown as Verdict)).toBe(false);
+  });
+
   it('LLM review can block but deterministic failure always wins', async () => {
     const repo = new SimRepo({ slots: 1 });
     const t = task();
@@ -146,5 +191,14 @@ describe('GateKeeper pipeline', () => {
     const mismatch = await new GateKeeper(repo, new Semaphore(1), approve).evaluate({ task: t, attemptId: 'a', slot: 0, prepared, files: [{ path: t.unit, content: unit(repo, t, 'return 0x1;') }], checks, compareTimeoutMs: 1000, signal: sig });
     expect(mismatch.verdict.decision).toBe('reject');
     expect(mismatch.verdict.stages.find((s) => s.name === 'review')).toBeUndefined();
+  });
+});
+
+describe('symbol-missing feedback', () => {
+  it('says when the candidate never defined the function, and when its definition is not the bound one', () => {
+    const kept = [{ path: 'reconstruction/a/E.cpp', content: '#include "E.h"\nint E::Function400() { return value; }\n' }];
+    expect(symbolMissingNote('E::Function454', kept)).toMatch(/do not define E::Function454 at all/);
+    const both = [{ path: 'reconstruction/a/E.cpp', content: `${kept[0]!.content}int E::Function454() { return 1; }\n` }];
+    expect(symbolMissingNote('E::Function454', both)).toMatch(/is defined in your \.cpp, but the object has no symbol/);
   });
 });

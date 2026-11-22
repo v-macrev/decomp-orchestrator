@@ -89,6 +89,19 @@ export interface TaskRow extends Task {
   assignedWorker?: string | null;
   /** Set when the packet was sent back to the worker tiers because its batch failed a check. */
   fix?: BatchFix | null;
+  /** Set when the packet was set aside because every function matches but the preflight blocks on a line it did not write. */
+  hold?: TaskHold | null;
+}
+
+/**
+ * Why a packet whose functions all match was set aside instead of passed: the repository preflight
+ * blocks on lines that were in the file before the packet (e.g. an include another, unmatched body
+ * needs), which no worker can fix by editing its own functions. Put back once those lines are fixed.
+ */
+export interface TaskHold {
+  verdictId: string;
+  at: number;
+  problems: Array<{ file: string | null; line: number | null; message: string }>;
 }
 
 /** Why a matched packet went back to the AI workers: the batch check it failed and what it reported. */
@@ -122,6 +135,7 @@ function toTask(r: Raw): TaskRow {
     attemptsAtDifficulty: r.attempts_at_difficulty ?? 0, assessment: p<ComplexityAssessment | null>(r.assessment_json, null),
     assignedWorker: r.assigned_worker ?? null,
     fix: p<BatchFix | null>(r.fix_json, null),
+    hold: p<TaskHold | null>(r.hold_json, null),
   };
 }
 
@@ -530,6 +544,11 @@ export class Store {
         best_exact_bytes = 0, infra_failures = 0, provider_failures = 0, not_before = 0, lease_id = NULL, lease_expires_at = NULL,
         fix_json = ?, updated_at = ?
       WHERE id = ? AND run_id = ? AND state IN (${from.map(() => '?').join(',')})`).run(j(fix), Date.now(), taskId, runId, ...from).changes > 0;
+  }
+  /** Record (or forget, with null) why a packet whose functions all match is set aside. */
+  setHold(taskIds: string[], hold: TaskHold | null) {
+    const set = this.db.prepare('UPDATE tasks SET hold_json = ? WHERE id = ?');
+    this.tx(() => taskIds.forEach((id) => set.run(hold ? j(hold) : null, id)));
   }
   /** Forget why packets were sent back to the workers (their fix has landed). */
   clearFix(taskIds: string[]) {

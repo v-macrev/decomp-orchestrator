@@ -19,6 +19,7 @@ import type { CompareFunctionResult, Finding, FunctionTarget, GateChecks, Verdic
 import type { TaskRow } from '../db/store.js';
 import type { PreparedTask, RepoAdapter } from '../repo/types.js';
 import { Semaphore, newId } from '../util/async.js';
+import { extractFunctions, lex } from './cpp.js';
 import { STRIKE_CODES, cheatScan, leakScan } from './rules.js';
 import { DEFAULT_SCOPE_LIMITS, checkScope, type ScopeLimits } from './scope.js';
 
@@ -171,7 +172,7 @@ export class GateKeeper {
           .filter((fn) => fn.result !== 'pass')
           .map((fn) => ({
             stage: 'compare', code: `COMPARE_${(fn.reason ?? 'MISMATCH').toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`, severity: 'block' as const,
-            message: `${fn.rva} ${fn.name ?? ''}: ${fn.result} ${fn.reason ?? ''}${fn.firstMismatch ? ` first mismatch at ${fn.firstMismatch}` : ''}; ${fn.exactBytes ?? '?'}/${fn.targetSize ?? fn.totalBytes ?? '?'} bytes exact${fn.alignedBytes != null ? `, ${fn.alignedBytes} bytes align${fn.alignedRegions != null ? ` in ${fn.alignedRegions} region(s)` : ''}` : ''}${fn.detail ? ` (${fn.detail})` : ''}${fn.hint ? `. Hint: ${fn.hint}` : ''}${fn.unbound?.length ? `. Still unbound (no target address could be paired with them): ${fn.unbound.join(', ')}; reference the same data or callee the target does at that instruction (see <compare_listing>)` : ''}`,
+            message: `${fn.rva} ${fn.name ?? ''}: ${fn.result} ${fn.reason ?? ''}${fn.firstMismatch ? ` first mismatch at ${fn.firstMismatch}` : ''}; ${fn.exactBytes ?? '?'}/${fn.targetSize ?? fn.totalBytes ?? '?'} bytes exact${fn.alignedBytes != null ? `, ${fn.alignedBytes} bytes align${fn.alignedRegions != null ? ` in ${fn.alignedRegions} region(s)` : ''}` : ''}${fn.detail ? ` (${fn.detail})` : ''}${fn.hint ? `. Hint: ${fn.hint}` : ''}${fn.reason === 'function-symbol-missing' ? `. ${symbolMissingNote(fn.name, accepted)}` : ''}${fn.unbound?.length ? `. Still unbound (no target address could be paired with them): ${fn.unbound.join(', ')}; reference the same data or callee the target does at that instruction (see <compare_listing>)` : ''}`,
           }));
       } finally {
         release();
@@ -201,8 +202,15 @@ export class GateKeeper {
       return r.problems.map((p) => {
         const file = /^([\w./-]+\.(?:h|cpp|hpp|inl)):(\d+):/.exec(p);
         const outOfScope = file && !writable.has(file[1]!) && !accepted.some((a) => a.path === file[1]);
-        return outOfScope
-          ? { stage: 'preflight', code: 'PREFLIGHT_OUT_OF_SCOPE', severity: 'warn' as const, file: file[1], line: Number(file[2]), message: `pre-existing, outside this packet: ${p}` }
+        if (outOfScope) return { stage: 'preflight', code: 'PREFLIGHT_OUT_OF_SCOPE', severity: 'warn' as const, file: file[1], line: Number(file[2]), message: `pre-existing, outside this packet: ${p}` };
+        // A problem on a line that was already in the file before this packet (the base revision,
+        // or what earlier packets of this run accepted), outside the packet's own functions: often
+        // something the packet cannot change, e.g. an include that another function's body needs.
+        const line = file ? lineInFile(accepted.find((a) => a.path === file[1])?.content, Number(file[2])) : null;
+        const before = file ? (input.carried?.get(file[1]!) ?? bases.get(file[1]!) ?? null) : null;
+        const preexisting = line !== null && line.trim() !== '' && before !== null && before.split(/\r?\n/).some((l) => l.trim() === line.trim()) && !insideTargetBody(accepted.find((a) => a.path === file![1])!.content, Number(file![2]), task.functions as FunctionTarget[]);
+        return preexisting
+          ? { stage: 'preflight', code: 'PREFLIGHT_PREEXISTING', severity: 'block' as const, file: file![1], line: Number(file![2]), message: `${p} (this line was already in the file before this packet; change it only if nothing outside your functions needs it)` }
           : { stage: 'preflight', code: 'PREFLIGHT_PROBLEM', severity: 'block' as const, ...(file ? { file: file[1], line: Number(file[2]) } : {}), message: p };
       });
     }))) return done('reject', 'retry');
@@ -235,4 +243,35 @@ export function foreignErrorFiles(errors: string[], allowed: string[]): string[]
     if (!allow.has(p)) out.add(p);
   }
   return [...out];
+}
+
+/** Line `n` (1-based) of a file's content, or null. */
+export function lineInFile(content: string | undefined, n: number): string | null {
+  if (content === undefined || !Number.isInteger(n) || n < 1) return null;
+  return content.split(/\r?\n/)[n - 1] ?? null;
+}
+
+/**
+ * Why the compiled object may lack a target's symbol: most often the candidate never defined the
+ * function at all (it returned the unit with only the other functions), else the definition is not
+ * the one the comparator binds (inline in the class, static, or another signature).
+ */
+export function symbolMissingNote(name: string | null, files: Array<{ path: string; content: string }>): string {
+  if (!name) return 'Define the function out of line in the .cpp with the signature the unit header declares.';
+  const bare = name.split('::').pop()!;
+  const defined = files.filter((f) => f.path.endsWith('.cpp')).some((f) => extractFunctions(lex(f.content).code).some((d) => d.name === name || d.name.split('::').pop() === bare));
+  return defined
+    ? `${name} is defined in your .cpp, but the object has no symbol for it: it must be an out-of-line member definition (not inline in the class, not static, not in an anonymous namespace), declared in the class with the same parameters, const and return type as the definition`
+    : `Your files do not define ${name} at all: write its definition (${name}(...) { ... }) in the .cpp and declare it in the class in the .h, next to the functions you kept`;
+}
+
+/** Is line `n` inside the body of one of the packet's own target functions? */
+export function insideTargetBody(content: string, n: number, targets: FunctionTarget[]): boolean {
+  const names = targets.map((t) => t.name).filter((x): x is string => !!x);
+  const lineAt = (offset: number) => content.slice(0, offset).split('\n').length;
+  for (const d of extractFunctions(lex(content).code)) {
+    if (!names.some((t) => t === d.name || t.endsWith(`::${d.name}`) || d.name.endsWith(`::${t}`))) continue;
+    if (n >= lineAt(d.start) && n <= lineAt(d.close)) return true;
+  }
+  return false;
 }

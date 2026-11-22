@@ -74,6 +74,13 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
         <DifficultyBadge d={t.difficulty} score={t.complexity} promoted={!!t.assessment && t.assessment.difficulty !== t.difficulty} />
         <span className="muted">tier {t.tier} · {t.attemptsTotal} attempts · best {t.bestExactBytes} B exact · strikes {t.cheatStrikes}</span>
       </div>
+      {t.hold && (
+        <div className="notice" style={{ marginBottom: 8 }}>
+          <b className="lvl-warn">Held: every function matches, but the file cannot pass the repository preflight.</b>
+          <div className="muted small">The preflight blocks on line(s) that were in the file before this packet, which the workers cannot change without breaking another function. Fix them in the repository, then put the packet back from the run's held-back list.</div>
+          <ul style={{ margin: '6px 0', paddingLeft: 18, fontSize: 13 }}>{t.hold.problems.map((p, i) => <li key={i}><span className="mono">{p.file ?? '?'}:{p.line ?? '?'}</span> {p.message}</li>)}</ul>
+        </div>
+      )}
       {t.assessment && (
         <details style={{ marginBottom: 8 }}>
           <summary className="muted">Complexity {t.assessment.score} ({t.assessment.decidedBy}{t.assessment.borderline ? ', borderline' : ''}; features from {t.assessment.features.source.replace('_', ' ')})</summary>
@@ -125,9 +132,9 @@ export function TaskDrawer({ taskId, onClose }: { taskId: string; onClose: () =>
                 <>
                   <h3>Comparator</h3>
                   <table>
-                    <thead><tr><th>RVA</th><th>Result</th><th>Reason</th><th>First mismatch</th><th>Bytes exact</th><th title="Bytes that match the target after alignment: progress even when the first byte differs">Aligned</th><th>Hint</th></tr></thead>
+                    <thead><tr><th>RVA</th><th>Result</th><th>Reason</th><th>First mismatch</th><th title="Bytes identical to the target, plus relocated fields (addresses, call targets) that point at the same target and so match by reference">Bytes that agree</th><th title="Bytes that match the target after alignment: progress even when the first byte differs">Aligned</th><th>Hint</th></tr></thead>
                     <tbody>{verdict.compare.map((c) => (
-                      <tr key={c.rva}><td className="mono">{c.rva}</td><td><span className={`chip ${c.result === 'pass' ? 'ok' : 'error'}`}>{c.result}</span></td><td>{c.reason ?? '—'}</td><td className="mono">{c.firstMismatch ?? '—'}</td><td>{c.exactBytes ?? '?'}/{c.targetSize ?? c.totalBytes ?? '?'}</td><td>{c.alignedBytes ?? '—'}</td><td className="muted">{c.hint ?? ''}</td></tr>
+                      <tr key={c.rva}><td className="mono">{c.rva}</td><td><span className={`chip ${c.result === 'pass' ? 'ok' : 'error'}`}>{c.result}</span></td><td>{c.reason ?? '—'}</td><td className="mono">{c.firstMismatch ?? '—'}</td><td title={c.referenceBytes ? `${c.exactBytes ?? 0} identical + ${c.referenceBytes} in relocated fields that match by reference` : undefined}>{c.exactBytes == null ? '?' : c.exactBytes + (c.referenceBytes ?? 0)}/{c.targetSize ?? c.totalBytes ?? '?'}{c.referenceBytes ? <span className="muted small"> ({c.referenceBytes} by reference)</span> : null}</td><td>{c.alignedBytes ?? '—'}</td><td className="muted">{c.hint ?? ''}</td></tr>
                     ))}</tbody>
                   </table>
                 </>

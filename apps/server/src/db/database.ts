@@ -345,6 +345,11 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE runs ADD COLUMN outage_json TEXT;
   `,
+  // A packet whose functions all match but whose file the repository preflight blocks on a line it
+  // did not write: set aside with that reason.
+  `
+  ALTER TABLE tasks ADD COLUMN hold_json TEXT;
+  `,
 ];
 
 export function openDatabase(path: string): DB {

@@ -438,6 +438,8 @@ export const CompareFunctionResult = z.object({
   alignedRegions: z.number().nullable().optional(),
   /** sha256 of the candidate's own compiled code section: equal hashes mean the same machine code. */
   codeSha256: z.string().nullable().optional(),
+  /** Bytes of relocated fields (REL32 displacements, call targets) that match by reference: same target, raw bytes differ by design. Exact + by reference = the bytes that agree. */
+  referenceBytes: z.number().nullable().optional(),
   /** The comparator's one-line detail of a failure ("candidate function is 36 bytes; task range is 34 bytes"). */
   detail: z.string().nullable().optional(),
   /** Local path of the comparator's private run directory (aligned target/candidate listing): read locally, never stored with content. */
@@ -449,7 +451,9 @@ export type CompareFunctionResult = z.infer<typeof CompareFunctionResult>;
 
 export const Decision = z.enum(['pass', 'reject', 'quarantine']);
 /** 'stale': the attempt's lease was lost before routing, so its verdict moved nothing. */
-export const Route = z.enum(['accept', 'retry', 'escalate', 'quarantine', 'dead_letter', 'stale']);
+// 'hold': every function matches, but the repository preflight blocks on a line that was in the file
+// before the packet (one the worker cannot change): the packet is set aside until that line is fixed.
+export const Route = z.enum(['accept', 'retry', 'escalate', 'quarantine', 'dead_letter', 'stale', 'hold']);
 export type Route = z.infer<typeof Route>;
 export const Verdict = z.object({
   id: z.string(),

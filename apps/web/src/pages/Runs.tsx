@@ -3,7 +3,7 @@
 // packets and telemetry. Each screen leads with the one next step; details sit one click away.
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
 import type { Flow, TelemetryEvent } from '@decomp/core';
-import { api, stream, type AccountView, type Batch, type BatchingStatus, type RunOutage, type CapacityPlan, type ClaimCollision, type PacketFacet, type PacketFilters, type PacketPage, type PacketSort, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
+import { api, stream, type AccountView, type Batch, type BatchingStatus, type HeldPacket, type RunOutage, type CapacityPlan, type ClaimCollision, type PacketFacet, type PacketFilters, type PacketPage, type PacketSort, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { TaskDrawer } from '../components/TaskDrawer';
 import { PACKET_COLS, PacketHead, clearCol, colFiltered } from '../components/PacketHead';
@@ -961,12 +961,13 @@ function OperationPanel({ op, runId }: { op: OperationProgress; runId: string })
   );
 }
 
-type HeldReason = 'merged' | 'untracked' | 'changed' | 'dryrun' | 'claimed' | 'fixing';
+type HeldReason = 'merged' | 'untracked' | 'changed' | 'dryrun' | 'preflight' | 'claimed' | 'fixing';
 const HELD_LABEL: Record<HeldReason, string> = {
   merged: 'Already merged upstream',
   untracked: 'No longer tracked upstream',
   changed: 'Upstream changed the file',
   dryrun: 'Blocked a dry run',
+  preflight: 'Matched, file blocked by a line it did not write',
   claimed: 'Claimed by someone else',
   fixing: 'Being fixed by AI agents',
 };
@@ -975,13 +976,18 @@ const HELD_HINT: Record<HeldReason, string> = {
   untracked: 'Upstream data/progress.json no longer lists these functions.',
   changed: 'Upstream changed a file these units write since they were batched: submitting would overwrite their version.',
   dryrun: 'sr submit --dry-run blamed their unit (lint, origin statements, a failed compare…).',
+  preflight: 'Every function matches, but the repository preflight blocks on a line that was in the file before the packet (e.g. an include another body needs). The agents cannot fix it without breaking that body: fix the line in the repository, then put the unit back.',
   claimed: "Another contributor's open claim or PR names a function in their unit.",
   fixing: 'Sent back to the AI agents from a failed check: they come back to a batch when the run finishes.',
 };
 
 /** Why each held-back function is out of the PRs, from the set-aside findings, the withheld claims and the agents' fixes. */
-function heldBackReasons(batches: Batch[]) {
+function heldBackReasons(batches: Batch[], held: HeldPacket[] = []) {
   const byFn = new Map<string, { reason: HeldReason; rva: string; name: string | null; unit: string; detail: string }>();
+  for (const h of held) {
+    const where = h.problems.map((p) => `${(p.file ?? '?').slice((p.file ?? '').lastIndexOf('/') + 1)}:${p.line ?? '?'}`).join(', ');
+    for (const fn of h.functions) byFn.set(`${h.taskId}:${fn.rva}`, { reason: 'preflight', rva: fn.rva, name: fn.name, unit: h.unit, detail: `${where}: ${h.problems[0]?.message ?? ''}` });
+  }
   const latest = [...batches].sort((x, y) => y.seq - x.seq);
   for (const b of latest) {
     const sa = b.detail?.setAside;
@@ -1010,11 +1016,11 @@ function heldBackReasons(batches: Batch[]) {
 }
 
 /** KPIs: why matched functions are not in a pull request yet, each with the functions behind it. */
-function HeldBackKpis({ batches }: { batches: Batch[] }) {
-  const { counts, rows } = heldBackReasons(batches);
+function HeldBackKpis({ batches, held }: { batches: Batch[]; held?: HeldPacket[] }) {
+  const { counts, rows } = heldBackReasons(batches, held);
   const [show, setShow] = useState<HeldReason | null>(null);
   if (!rows.length) return null;
-  const tone: Record<HeldReason, string | undefined> = { merged: 'var(--ok)', untracked: undefined, changed: 'var(--warn)', dryrun: 'var(--bad)', claimed: 'var(--warn)', fixing: undefined };
+  const tone: Record<HeldReason, string | undefined> = { merged: 'var(--ok)', untracked: undefined, changed: 'var(--warn)', dryrun: 'var(--bad)', preflight: 'var(--warn)', claimed: 'var(--warn)', fixing: undefined };
   const list = show ? rows.filter((r) => r.reason === show) : [];
   return (
     <div className="panel stack" style={{ gap: 8 }}>
@@ -1049,14 +1055,20 @@ function HeldBackKpis({ batches }: { batches: Batch[] }) {
 }
 
 /** Set-aside units across the run, with the findings that blocked each, and Put back. */
-function SetAsideList({ batches, locked, busy, putBack }: { batches: Batch[]; locked: boolean; busy: string | null; putBack: (units?: string[]) => void }) {
-  // The latest batch that set a unit aside knows why.
-  const units = new Map<string, { reasons: string[]; fns: Batch['functions']; seq: number }>();
+function SetAsideList({ batches, held = [], locked, busy, putBack }: { batches: Batch[]; held?: HeldPacket[]; locked: boolean; busy: string | null; putBack: (units?: string[]) => void }) {
+  // The latest batch that set a unit aside knows why; a held packet never reached a batch.
+  const units = new Map<string, { reasons: string[]; fns: Array<{ rva: string }>; seq: number | null }>();
+  for (const h of held) {
+    const u = units.get(h.unit) ?? { reasons: [], fns: [], seq: null };
+    u.fns.push(...h.functions);
+    u.reasons.push(...h.problems.map((p) => `matched, but the preflight blocks on a line it did not write: ${p.message}`));
+    units.set(h.unit, u);
+  }
   for (const b of [...batches].sort((x, y) => y.seq - x.seq)) {
     const sa = b.detail?.setAside;
     if (!sa) continue;
     for (const unit of sa.units) {
-      if (units.has(unit)) continue;
+      if (units.has(unit)) continue; // held, or set aside by a later batch
       const fns = b.functions.filter((f) => f.unit === unit && f.state === 'set_aside');
       if (fns.length) units.set(unit, { reasons: sa.reasons[unit] ?? [], fns, seq: b.seq });
     }
@@ -1071,7 +1083,7 @@ function SetAsideList({ batches, locked, busy, putBack }: { batches: Batch[]; lo
         <tbody>
           {[...units].map(([unit, u]) => (
             <tr key={unit}>
-              <td><div className="mono" style={{ fontSize: 12 }}>{unit}</div><div className="muted" style={{ fontSize: 11 }}>{u.fns.map((f) => f.rva).join(', ')} · from batch {u.seq}</div></td>
+              <td><div className="mono" style={{ fontSize: 12 }}>{unit}</div><div className="muted" style={{ fontSize: 11 }}>{u.fns.map((f) => f.rva).join(', ')}{u.seq !== null ? ` · from batch ${u.seq}` : ' · held by the Gate Keeper'}</div></td>
               <td style={{ fontSize: 12 }}>
                 {u.reasons.slice(0, 3).map((r) => <div key={r}>{r}</div>)}
                 {u.reasons.length > 3 && <details><summary className="muted">{u.reasons.length - 3} more</summary>{u.reasons.slice(3).map((r) => <div key={r}>{r}</div>)}</details>}
@@ -1569,7 +1581,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
         </div>
       )}
       {sorted.length > 0 && <div className="cards">{sorted.map(card)}</div>}
-      <HeldBackKpis batches={batches} />
+      <HeldBackKpis batches={batches} held={batching?.held} />
       {(withheld > 0 || setAside > 0) && (
         <div className="panel stack">
           <div><h2 style={{ marginBottom: 4 }}>Held back</h2><span className="muted">These matched but are kept out of pull requests for now. Nothing is lost.</span></div>
@@ -1586,8 +1598,8 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
             {setAside > 0 && (
               <div className="group">
                 <b>{setAside} packet{setAside === 1 ? '' : 's'} set aside</b>
-                <div className="muted small">They blocked a dry run, or upstream already has them. Put a unit back once its cause is gone.</div>
-                <SetAsideList batches={batches} locked={locked} busy={busy} putBack={putBack} />
+                <div className="muted small">They blocked a dry run, upstream already has them, or their file fails the preflight on a line they did not write. Put a unit back once its cause is gone.</div>
+                <SetAsideList batches={batches} held={batching?.held} locked={locked} busy={busy} putBack={putBack} />
               </div>
             )}
           </div>

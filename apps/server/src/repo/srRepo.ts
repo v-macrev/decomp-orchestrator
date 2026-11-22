@@ -501,7 +501,7 @@ export class SrRepo implements RepoAdapter {
       return {
         rva: f.rva, name: f.name ?? null, result: f.result ?? 'fail', reason: f.reason ?? null, hint: f.hint || null,
         firstMismatch: f.first_mismatch ?? null, candidateSize: f.candidate_size ?? null, targetSize: f.target_size ?? null,
-        exactBytes: f.coverage?.code_bytes_exact ?? null, totalBytes: f.coverage?.code_bytes_total ?? null,
+        exactBytes: f.coverage?.code_bytes_exact ?? null, referenceBytes: f.coverage?.code_bytes_by_reference ?? null, totalBytes: f.coverage?.code_bytes_total ?? null,
         alignedBytes: aligned?.value ?? null, alignedRegions: aligned?.regions ?? null, codeSha256: f.code_section_sha256 ?? null,
         ...(f.result !== 'pass' ? { detail: typeof f.detail === 'string' ? f.detail.slice(0, 400) : null, listingRef: privateDir, ...(unbound.length ? { unbound } : {}) } : {}),
       };
@@ -636,22 +636,51 @@ export class SrRepo implements RepoAdapter {
     return claimCollisionResult(run, wanted);
   }
 
+  /**
+   * RVAs `sr next` offers before they are in data/progress.json (tools/claimable.py): published in
+   * the target-hash shards and offered with a class in contributor-targets.json, at the base revision.
+   */
+  private async claimTimeRvas(buildId: string | null): Promise<Set<number>> {
+    if (!buildId || !/^[w.-]+$/.test(buildId)) return new Set();
+    const out = new Set<number>();
+    try {
+      const offered = JSON.parse((await this.baseFile('data/target-hashes/contributor-targets.json')) ?? '{}') as { functions?: Array<{ rva?: unknown; class?: unknown }> };
+      const manifest = JSON.parse((await this.baseFile(`data/target-hashes/${buildId}.json`)) ?? '{}') as { shards?: Array<{ path?: unknown }> };
+      const published = new Set<number>();
+      for (const shard of manifest.shards ?? []) {
+        if (typeof shard.path !== 'string' || !/^[w./-]+$/.test(shard.path)) continue;
+        const rows = (JSON.parse((await this.baseFile(shard.path)) ?? '{}') as { functions?: Array<{ rva?: unknown }> }).functions ?? [];
+        for (const r of rows) if (typeof r.rva === 'number') published.add(r.rva);
+      }
+      for (const r of offered.functions ?? []) if (typeof r.rva === 'number' && r.class && published.has(r.rva)) out.add(r.rva);
+    } catch {
+      /* unreadable lists: nothing counts as claim-time, as before */
+    }
+    return out;
+  }
+
   async upstreamState(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState> {
     const out: UpstreamState = { checked: false, matched: {}, untracked: [], changed: [], builtOn: null };
     const text = await this.baseFile('data/progress.json');
     if (!text) return out;
     let fns: Array<{ rva?: unknown; status?: unknown; owner?: unknown }>;
+    let buildId: string | null = null;
     try {
-      const j = JSON.parse(text) as { functions?: unknown };
+      const j = JSON.parse(text) as { functions?: unknown; target_build_id?: unknown };
       fns = Array.isArray(j.functions) ? j.functions : [];
+      buildId = typeof j.target_build_id === 'string' ? j.target_build_id : null;
     } catch {
       return out;
     }
     const byRva = new Map(fns.map((f) => [typeof f.rva === 'number' ? f.rva : Number.parseInt(String(f.rva), 16), f]));
+    // A function of the published target-hash list that a contributor-targets row offers has no
+    // inventory entry until its claim is recorded (`sr next` offers it as Class::Function<rva>):
+    // it is tracked, not gone.
+    const claimTime = await this.claimTimeRvas(buildId);
     for (const rva of new Set(input.rvas)) {
       const e = byRva.get(Number.parseInt(rva, 16));
-      if (!e) out.untracked.push(rva);
-      else if (e.status === 'matched') out.matched[rva] = typeof e.owner === 'string' ? e.owner : null;
+      if (!e && !claimTime.has(Number.parseInt(rva, 16))) out.untracked.push(rva);
+      else if (e?.status === 'matched') out.matched[rva] = typeof e.owner === 'string' ? e.owner : null;
     }
     if (input.branch && /^[A-Za-z0-9._/-]+$/.test(input.branch)) {
       const r = await this.git(this.cfg.repoPath, ['log', '-1', '--format=%P', input.branch, '--']);

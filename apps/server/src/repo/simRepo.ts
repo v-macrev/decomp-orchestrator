@@ -56,6 +56,8 @@ export class SimRepo implements RepoAdapter, SimOracle {
   upstreamChanged = new Set<string>();
   /** Test hooks: pull requests on GitHub by URL, and the fixes pushed to them. */
   pullRequests = new Map<string, PrStatus>();
+  /** Test hook: the comparator's aligned listing for a compare (unset: the simulator writes none). */
+  readCompareListing?: (ref: string, rva: string) => Promise<string | null>;
   prUpdates: Array<{ branch: string; pullRequest: string; files: string[]; tasks: string[]; message: string }> = [];
 
   constructor(private opts: SimRepoOptions) {
