@@ -278,7 +278,8 @@ describe('end to end: routed + budgeted vs legacy', () => {
     if (byD.hard !== undefined) expect(byD.hard).toBe(2);
     if (byD.easy !== undefined) expect(byD.easy).toBe(0);
     const kinds = Object.fromEntries((s.store.db.prepare(`SELECT kind, COUNT(*) n FROM events WHERE run_id = ? GROUP BY kind`).all(run.id) as Array<{ kind: string; n: number }>).map((k) => [k.kind, k.n]));
-    expect(kinds['task.promoted'] ?? 0).toBeGreaterThan(0);
+    // A packet leaves a tier only after the tier's attempts (no early promotion any more).
+    expect(kinds['task.promoted'] ?? 0).toBe(0);
     expect(kinds['task.stolen'] ?? 0).toBeGreaterThan(0);
     // knowledge from passing packets reached later bundles
     expect(s.store.knowledgeStats(run.id).reduce((a, k) => a + k.n, 0)).toBeGreaterThan(0);

@@ -62,7 +62,7 @@ flowchart LR
   and handles re-queues. In Phase 1 the Orchestrator is deterministic code. The node's account
   binding is reserved for an LLM planner (Phase 2: prioritising and annotating packets).
 * **Worker** tiers draft units from a Task Context Bundle. A tier is a flow node with `instances`
-  parallel slots, its own account binding, and a retry policy (`maxAttempts`, `stuckAfter`).
+  parallel slots, its own account binding, and its attempts (`maxAttempts`, the only retry setting).
   Tiers chain with `escalate` edges, for example cheap Sonnet/GPT/local models first, Opus for the
   stragglers. This mirrors the repo's own `cheap`/`full` profiles and stopping rules.
 * **Gate Keeper** nodes select which checks run. Multiple gate nodes merge their settings, and the
@@ -112,8 +112,9 @@ Moving to Postgres means swapping `json_extract` for `->>` and the lease query f
     to a healthy account. No attempt is consumed. Dead-lettered after `maxProviderFailures`.
   * Refusal or bad request: consumes an attempt, because that is about the packet, not the account.
   * Rejection: retry at the same tier with the verdict trace and the previous candidate. The task
-    escalates to the next tier after `maxAttempts` or `stuckAfter` attempts without an improvement
-    in exact bytes. On the last tier it is dead-lettered.
+    escalates to the next tier after exactly the tier's `maxAttempts` (format-only rejections do not
+    count). On the last tier it is dead-lettered. `stuckAfter` and the run's `promoteAfterFailures`
+    are no longer used (kept so saved flows and runs load).
 * **Crash recovery.** On boot every lease is stale by definition. Leased and gating tasks return to
   `pending`, running attempts become `abandoned`, and runs that were `running` resume. A periodic
   reaper also reclaims leases from slots that stalled without the process dying. The engine tests

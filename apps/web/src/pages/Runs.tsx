@@ -81,7 +81,7 @@ function NewRun({ mode, runs, onCreated, onCancel }: { mode: string; runs: RunSu
   const [f, setF] = useState({
     name: `run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, flowId: 'default', source: mode === 'sim' ? 'synthetic' : 'sr_next',
     ...flowRunDefaults(undefined), rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: true, draftedBy: 'operator',
-    routing: true, llmTieBreak: false, promoteAfter: 2, workStealing: true, contextMode: 'budgeted',
+    routing: true, llmTieBreak: false, workStealing: true, contextMode: 'budgeted',
     skills: true, autoCurate: false, staging: mode === 'sim' ? 'branches' : 'off',
     gMaxSize: 256, gNamespaces: '', gModules: '', gRange: '', gExcludeGuess: false, gExcludeDrafted: false,
   });
@@ -151,7 +151,7 @@ function NewRun({ mode, runs, onCreated, onCancel }: { mode: string; runs: RunSu
       const r = await api.createRun(f.name, f.flowId, {
         ...(selection ? { selection } : {}), ...(carryOn.length ? { carry: { fromRuns: carryOn } } : {}), maxFunctionsPerWorker: f.capPerWorker, staging: f.staging, packetMaxFunctions: f.packetMaxFunctions, gateConcurrency: f.gateConcurrency, prBatchSize: f.prBatchSize,
         exposureConsent: f.exposureConsent, draftedBy: f.draftedBy, ...(f.budgetUsd ? { budgetUsd: Number(f.budgetUsd) } : {}),
-        routing: { enabled: f.routing, llmTieBreak: f.llmTieBreak, promoteAfterFailures: f.promoteAfter, workStealing: f.workStealing },
+        routing: { enabled: f.routing, llmTieBreak: f.llmTieBreak, workStealing: f.workStealing },
         context: { mode: f.contextMode },
         skills: { enabled: f.skills, autoCurate: f.autoCurate },
       });
@@ -243,7 +243,6 @@ function NewRun({ mode, runs, onCreated, onCancel }: { mode: string; runs: RunSu
             <label title="Off: nothing is committed in the target repository and every claim is released at the end">When finished<select value={f.staging} onChange={(e) => set('staging', e.target.value)}><option value="off">commit nothing</option><option value="branches">stage local branches</option></select></label>
             <label title="Hard ceiling of distinct functions one worker instance may take in this run">Max functions per worker<input type="number" min={1} max={5000} value={f.capPerWorker} onChange={(e) => set('capPerWorker', Number(e.target.value))} /></label>
             <label>Context<select value={f.contextMode} onChange={(e) => set('contextMode', e.target.value)}><option value="budgeted">budgeted bundles (v2)</option><option value="legacy">legacy bundles</option></select></label>
-            <label>Promote after failures<input type="number" min={1} max={20} value={f.promoteAfter} disabled={!f.routing} onChange={(e) => set('promoteAfter', Number(e.target.value))} /></label>
           </div>
           {capacity && !capacity.warnings.length && <span className="muted small">{capacity.workers} worker(s) × {capacity.maxPerWorker} = room for {capacity.capacity} of {capacity.batch} functions — ok.</span>}
           <div className="row">

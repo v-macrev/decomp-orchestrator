@@ -169,9 +169,9 @@ export const FlowNodeData = z.object({
   label: z.string().default(''),
   instances: z.number().int().min(1).max(256).default(1),
   pool: PoolBinding.default(PoolBinding.parse({})),
-  /** Worker: max attempts at this tier before escalating / dead-lettering. */
+  /** Worker: the only retry setting. Attempts at this tier, then the next tier (on the last, dead). */
   maxAttempts: z.number().int().min(1).max(20).default(6),
-  /** Worker: stop the tier after N attempts without improvement in matching bytes. */
+  /** No longer used (kept so saved flows still load): only `maxAttempts` decides when a tier ends. */
   stuckAfter: z.number().int().min(1).max(20).default(3),
   gate: GateChecks.default(GateChecks.parse({})),
   notes: z.string().optional(),
@@ -578,7 +578,7 @@ export const RoutingConfig = z.object({
   /** Ask the Orchestrator's model (features only, no listing) to settle borderline scores. */
   llmTieBreak: z.boolean().default(false),
   llmTieBreakMax: z.number().int().min(0).max(5000).default(200),
-  /** Promote difficulty (and the routing tier) after this many failed attempts at a difficulty. */
+  /** No longer used (kept so saved runs still load): the flow node's `maxAttempts` decides when a packet moves up. */
   promoteAfterFailures: z.number().int().min(1).max(20).default(2),
   /** Idle higher-capability slots pull lower-tier backlog. */
   workStealing: z.boolean().default(true),

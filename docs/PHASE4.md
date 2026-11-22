@@ -20,7 +20,7 @@ See [PHASE2.md](PHASE2.md) and [PHASE3.md](PHASE3.md).
 |---|---|---|
 | Function gathering | **New** | `apps/server/src/intel/gatherer.ts`; `backlog()` on `repo/srRepo.ts` and `repo/simRepo.ts`; `GatherFilter` and the `gather` selection source in `packages/core/src/schemas.ts` |
 | Complexity classification | Extended (Phase 2) | `packages/core/src/complexity.ts`: two new signals, templated names (+1) and incoming xrefs (up to +0.6). `tasks.difficulty` / `tasks.complexity` are exposed as `complexity_tier` / `complexity_score` through the `task_complexity` view |
-| Tiered routing, stealing, retry escalation | Existing (Phase 2) | `packages/core/src/flow.ts`, `orchestrator/engine.ts`, `queue/taskQueue.ts`. Escalation after the 2nd failed attempt (`promoteAfterFailures: 2`) carries the structured retry delta |
+| Tiered routing, stealing, retry escalation | Existing (Phase 2) | `packages/core/src/flow.ts`, `orchestrator/engine.ts`, `queue/taskQueue.ts`. Escalation after the tier's attempts (the flow node's `maxAttempts`, the only retry setting) carries the structured retry delta |
 | Per-worker function cap | **New** | `queue/taskQueue.ts` (charge in the lease transaction, stall check, refunds), `orchestrator/capacity.ts` (planner), `orchestrator/engine.ts` (worker identities, capped slots, stall pause), `db/store.ts` |
 | Pre-run capacity warning | **New** | `POST /api/flows/validate?batch=&cap=` (form), `run.capacity` event + `runs.capacity_json` (exact, after classification) |
 | TaskContextBundle, prefix caching, discoveries, telemetry | Existing (Phase 2/3) | `orchestrator/contextBuilder.ts`, `providers/*`, `run_knowledge_cache` (also exposed as the `shared_run_discoveries` view) |

@@ -60,7 +60,7 @@ function RoleNode({ data, selected }: NodeProps<RFNode>) {
           {data.stealDown === false ? ' · no stealing' : ''}
         </div>
       )}
-      {data.role === 'worker' && <div className="meta">≤{data.maxAttempts} attempts · stuck after {data.stuckAfter}</div>}
+      {data.role === 'worker' && <div className="meta">{data.maxAttempts} attempts, then the next tier</div>}
       {data.role === 'gatekeeper' && (
         <div className="meta">{Object.entries(data.gate).filter(([, v]) => v).map(([k]) => k).join(' · ')}</div>
       )}
@@ -490,8 +490,7 @@ function NodeInspector({ node, accounts, onChange, onDelete }: { node: RFNode; a
       {d.role === 'worker' && (
         <>
           <h3>Retry policy</h3>
-          <label>Max attempts at this tier<input type="number" min={1} max={20} value={d.maxAttempts} onChange={(e) => onChange({ maxAttempts: Number(e.target.value) })} /></label>
-          <label>Escalate after N attempts without byte improvement<input type="number" min={1} max={20} value={d.stuckAfter} onChange={(e) => onChange({ stuckAfter: Number(e.target.value) })} /></label>
+          <label title="The only retry setting: a packet gets exactly this many attempts on this tier, then moves to the next tier (on the last tier, it fails). Format-only rejections (header, lint, output contract) do not count.">Attempts at this tier<input type="number" min={1} max={20} value={d.maxAttempts} onChange={(e) => onChange({ maxAttempts: Number(e.target.value) })} /></label>
           <h3>Capability routing</h3>
           <label>Capability tier
             <select value={d.capability ?? ''} onChange={(e) => { const c = (e.target.value || undefined) as CapabilityTier | undefined; onChange({ capability: c, pool: { ...pool, capability: c } }); }}>

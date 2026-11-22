@@ -159,10 +159,10 @@ carries its reasons, for example "6 conditional branches (+3.6)". Default thresh
 tiers, but only the surplus beyond that tier's idle slots, so it never takes work a cheap slot is
 about to pick up. A stolen packet moves to the stealer's tier.
 
-**Retry promotion.** After `promoteAfterFailures` failed attempts (default 2) at a difficulty, the
-packet is promoted (easy → medium → hard) and moves to the tier for the new difficulty, never down.
-The next attempt carries the structured retry delta. Climbing the ladder through exhausted attempts
-also raises difficulty to at least the new tier's level.
+**Retry promotion** (removed). It used to promote a packet after `promoteAfterFailures` failed
+attempts and move it up early, which overrode the flow's attempts per tier. Now a packet stays on a
+tier for exactly that tier's `maxAttempts`, then climbs; climbing still raises its difficulty to at
+least the new tier's level, and the next attempt carries the structured retry delta.
 
 ## 2. TaskContextBundle v2
 

@@ -10,7 +10,7 @@
 // work immediately. All state lives in SQLite, so a crash at any point resumes on restart with at
 // most the in-flight attempts abandoned (and not counted against any task's budget).
 import {
-  CAPABILITY_RANK, DIFFICULTIES, DIFFICULTY_RANK, Flow, RunConfig, WorkerOutput, compileFlowPlan, harder, promote, stealSources, tierFor, validateFlow,
+  CAPABILITY_RANK, DIFFICULTIES, DIFFICULTY_RANK, Flow, RunConfig, WorkerOutput, compileFlowPlan, harder, stealSources, tierFor, validateFlow,
   type Attempt, type CapabilityTier, type Difficulty, type FlowPlan, type PoolBinding, type Route, type SkillSelection, type TaskState, type Verdict,
 } from '@decomp/core';
 import { AsyncLocalStorage } from 'node:async_hooks';
@@ -920,7 +920,7 @@ export class RunEngine {
       const out: string[] = [];
       if (before.tiers[i]!.capability !== t.capability) out.push(`capability ${before.tiers[i]!.capability} → ${t.capability}`);
       if (JSON.stringify(a.pool) !== JSON.stringify(b.pool)) out.push('models');
-      if (a.maxAttempts !== b.maxAttempts || a.stuckAfter !== b.stuckAfter) out.push(`attempts ${a.maxAttempts}/${a.stuckAfter} → ${b.maxAttempts}/${b.stuckAfter}`);
+      if (a.maxAttempts !== b.maxAttempts) out.push(`attempts ${a.maxAttempts} → ${b.maxAttempts}`);
       return out.length ? [`${b.label || t.node.id}: ${out.join(', ')}`] : [];
     });
     store.setRunFlow(runId, flow, after.tiers.map((t) => t.capability));
@@ -2640,27 +2640,9 @@ export class RunEngine {
     const attemptsAtDifficulty = task.attemptsAtDifficulty + 1;
     const label = (i: number) => run.plan.tiers[i]!.node.data.label || run.plan.tiers[i]!.node.id;
 
-    // Retry escalation by difficulty: after N failed attempts at a difficulty, promote it
-    // (easy → medium → hard) and move to the tier that serves the new difficulty (never down).
-    if (routing.enabled && attemptsAtDifficulty >= routing.promoteAfterFailures && task.difficulty !== 'hard') {
-      const difficulty = promote(task.difficulty);
-      const to = tierFor(run.plan, difficulty, tierIdx);
-      const moved = to > tierIdx;
-      const stillHere = !moved && attemptsAtTier < limit.maxAttempts && tierNode.retryLoop;
-      if (moved || stillHere) {
-        const settled = this.settle(run, task, leaseId, 'pending', {
-          ...common, difficulty, attemptsAtDifficulty: 0, attemptsTotal, bestExactBytes, cheatStrikes, notBefore: 0,
-          ...(moved ? { tier: to, attemptsAtTier: 0, noImprovementStreak: 0 } : { attemptsAtTier, noImprovementStreak }),
-        }, verdict, moved ? 'escalate' : 'retry');
-        if (settled) events.emit('task.promoted', `promote ${fnLabel}: ${task.difficulty} → ${difficulty} after ${attemptsAtDifficulty} failed attempt(s)${moved ? `; → ${label(to)}` : ` (stays on ${label(tierIdx)})`}: ${summarise(verdict)}`, {
-          runId, taskId: task.id, level: 'info', data: { from: task.difficulty, to: difficulty, tierFrom: tierIdx, tierTo: to },
-        });
-        run.wake.notify();
-        return;
-      }
-    }
-
-    const exhausted = attemptsAtTier >= limit.maxAttempts || noImprovementStreak >= limit.stuckAfter || !tierNode.retryLoop;
+    // One setting decides how long a packet stays on a tier: the flow node's attempts. Neither the
+    // run's old "promote after failures" nor the node's "stuck after" moves it on any earlier.
+    const exhausted = attemptsAtTier >= limit.maxAttempts || !tierNode.retryLoop;
     if (!exhausted) {
       if (this.settle(run, task, leaseId, 'pending', { ...common, attemptsTotal, attemptsAtTier, attemptsAtDifficulty, bestExactBytes, noImprovementStreak, cheatStrikes, notBefore: 0 }, verdict, 'retry')) events.emit('task.retry', `retry ${fnLabel}: ${summarise(verdict)}`, { runId, taskId: task.id, level: 'debug' });
       return;

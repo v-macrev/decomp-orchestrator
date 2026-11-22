@@ -246,3 +246,30 @@ describe('RunEngine', () => {
     s.engine.close();
   }, 60_000);
 });
+
+describe('attempts per tier', () => {
+  it('gives every tier exactly its attempts: the old promote-after and stuck-after rules no longer cut it short', async () => {
+    const never = { latencyMs: [1, 2], skill: 0 };
+    const s = setup(tmpDb(), { accounts: [mockAccount('cheap-a', { tags: ['cheap'], options: never }), mockAccount('strong-a', { tags: ['strong'], options: never })] });
+    const f = flow(2, 2);
+    for (const n of f.nodes) if (n.type === 'worker') n.data = { ...n.data, maxAttempts: n.id === 'worker-cheap' ? 4 : 3, stuckAfter: 1 };
+    // promoteAfterFailures: 1 and stuckAfter: 1 would each have moved a packet on after one failure.
+    const run = s.engine.createRun('attempts', { flowId: 'default', selection: { source: 'synthetic', count: 6, seed: 5 }, routing: { enabled: true, promoteAfterFailures: 1 } }, f);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const dead = s.store.listTasks(run.id, { state: 'dead', limit: 100 });
+    expect(dead.length).toBeGreaterThan(0);
+    const counted = s.store.db.prepare(`SELECT a.tier tier, COUNT(*) n FROM verdicts v JOIN attempts a ON a.id = v.attempt_id
+      WHERE v.task_id = ? AND v.route IN ('retry', 'escalate', 'dead_letter') AND v.findings_json NOT LIKE '%"format"%' GROUP BY a.tier`);
+    for (const t of dead) {
+      const byTier = Object.fromEntries((counted.all(t.id) as Array<{ tier: number; n: number }>).map((r) => [r.tier, r.n]));
+      // Hard packets enter at the strong tier; every tier a packet visits gets exactly its attempts.
+      expect(Object.keys(byTier).length).toBeGreaterThan(0);
+      for (const [tier, n] of Object.entries(byTier)) expect(n).toBe(tier === '0' ? 4 : 3);
+    }
+    const kinds = s.store.db.prepare(`SELECT COUNT(*) n FROM events WHERE run_id = ? AND kind = 'task.promoted'`).get(run.id) as { n: number };
+    expect(kinds.n).toBe(0);
+    s.pool.close();
+    s.engine.close();
+  }, 60_000);
+});
