@@ -10,7 +10,7 @@ import { simIdent, type SimOracle } from '../providers/mock.js';
 import { sleep } from '../util/async.js';
 import { clipMiddle } from './srRepo.js';
 import { hashUnit as hashUnitSim, simDocs, simFeatures, simPack, simSharedHeader, simTrap, simTrapRecipes, type SimTrapInfo } from './simContent.js';
-import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, InventoryEntry, DocSection, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, UpstreamState } from './types.js';
+import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, InventoryEntry, DocSection, PreflightOutcome, PreparedTask, PrStatus, RepoAdapter, StageBatchInput, StageBatchResult, UpstreamState } from './types.js';
 
 export interface SimRepoOptions {
   slots: number;
@@ -54,6 +54,9 @@ export class SimRepo implements RepoAdapter, SimOracle {
   /** Test hooks: what upstream already matched (rva → owner), and files it changed since a batch was built. */
   upstreamMatched = new Map<string, string | null>();
   upstreamChanged = new Set<string>();
+  /** Test hooks: pull requests on GitHub by URL, and the fixes pushed to them. */
+  pullRequests = new Map<string, PrStatus>();
+  prUpdates: Array<{ branch: string; pullRequest: string; files: string[]; tasks: string[]; message: string }> = [];
 
   constructor(private opts: SimRepoOptions) {
     this.realistic = opts.realisticContext ?? true;
@@ -207,6 +210,17 @@ export class SimRepo implements RepoAdapter, SimOracle {
       };
     });
     return { completed: true, allPass: functions.every((f) => f.result === 'pass'), compileError: false, functions, infraError: null };
+  }
+
+  async pullRequestStatus(url: string): Promise<PrStatus> {
+    return this.pullRequests.get(url) ?? { checked: false, error: 'the simulator has no such pull request', state: null, title: null, mergedAt: null, closedAt: null, headSha: null, comments: [] };
+  }
+
+  async updatePullRequest(input: { branch: string; pullRequest: string; files: Array<{ path: string; content: string }>; tasks: Array<{ id: string }>; message: string }) {
+    const pr = this.pullRequests.get(input.pullRequest);
+    if (pr?.state !== 'open') return { ok: false, commit: null, problems: [], error: `the pull request is ${pr?.state ?? 'unknown'}: nothing was pushed` };
+    this.prUpdates.push({ branch: input.branch, pullRequest: input.pullRequest, files: input.files.map((f) => f.path), tasks: input.tasks.map((t) => t.id), message: input.message });
+    return { ok: true, commit: `sim${this.prUpdates.length}`, problems: [], error: null };
   }
 
   async claimCollisions(rvas: string[]): Promise<ClaimCollisionCheck> {

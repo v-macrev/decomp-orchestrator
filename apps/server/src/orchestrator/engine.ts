@@ -25,7 +25,8 @@ import { NoEligibleAccountError, type AccountPool } from '../pool/scheduler.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { ProviderError, costUsd, type PromptBlock } from '../providers/types.js';
 import { TaskQueue, type StealSource, type TaskPatch } from '../queue/taskQueue.js';
-import type { ClaimCollision, DiscoveredFunction, ProgressFn, RepoAdapter, PreparedTask, SubmitBatchInput, SubmitBatchResult } from '../repo/types.js';
+import type { ClaimCollision, DiscoveredFunction, ProgressFn, PrStatus, RepoAdapter, PreparedTask, SubmitBatchInput, SubmitBatchResult } from '../repo/types.js';
+import { EXPLAIN_SCHEMA, EXPLAIN_SYSTEM, ExplainOut, commentsKey, explainPrompt, reviewComments, reviewTargets, type Explanation } from './review.js';
 import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
 import { ContextBuilder } from './context.js';
@@ -136,6 +137,7 @@ export class RunEngine {
   private finishing = new Map<string, Promise<void>>();
   private reaper: NodeJS.Timeout;
   private claimWatch: NodeJS.Timeout;
+  private prWatch: NodeJS.Timeout;
 
   constructor(private deps: EngineDeps, opts: Partial<EngineOptions> = {}) {
     this.opts = { ...DEFAULTS, ...opts };
@@ -155,6 +157,7 @@ export class RunEngine {
     }, Math.max(5_000, this.opts.leaseMs / 2)).unref();
     // Withheld packets go back into staging on their own once their blocking claims lapse.
     this.claimWatch = setInterval(() => this.autoRecheckWithheld(), 5 * 60_000).unref();
+    this.prWatch = setInterval(() => void this.autoRefreshPullRequests(), 10 * 60_000).unref();
   }
 
   // ---------------------------------------------------------------- run lifecycle
@@ -492,11 +495,13 @@ export class RunEngine {
     this.active.clear();
     clearInterval(this.reaper);
     clearInterval(this.claimWatch);
+    clearInterval(this.prWatch);
   }
 
   close() {
     clearInterval(this.reaper);
     clearInterval(this.claimWatch);
+    clearInterval(this.prWatch);
   }
 
   /**
@@ -1258,6 +1263,201 @@ export class RunEngine {
         runId, level: staged.failed ? 'warn' : 'info', data: { from: work.map((w) => w.batch.seq), to: staged.seqs, max },
       });
       return { from: work.map((w) => w.batch.seq), functions: plan.functions, staged };
+    });
+  }
+
+  // ---------------------------------------------------------------- pull requests after submission
+
+  /** Batches that opened a pull request (not the ones that only pushed fixes to another batch's PR). */
+  private prBatches(runId: string) {
+    return this.deps.store.listBatches(runId).filter((b) => {
+      const d = (b.detail ?? {}) as { pr?: string | null; prUpdateOf?: number };
+      return !!d.pr && d.prUpdateOf === undefined;
+    });
+  }
+
+  /**
+   * Read each PR batch's pull request from GitHub (state, comments, reviews) into `detail.prStatus`.
+   * A merged PR is final and is read again only when asked for by batch. Read only on GitHub.
+   */
+  async refreshPullRequests(runId: string, opts: { batchId?: string } = {}) {
+    const { store, repo, events } = this.deps;
+    if (!store.getRun(runId)) throw new Error(`run ${runId} not found`);
+    if (!repo.pullRequestStatus) throw new Error('this repository adapter cannot read pull requests');
+    const batches = this.prBatches(runId).filter((b) => !opts.batchId || b.id === opts.batchId);
+    if (opts.batchId && !batches.length) throw new Error('that batch has no pull request');
+    const out: Array<{ seq: number; state: string | null; comments: number; error: string | null }> = [];
+    for (const b of batches) {
+      const d = (b.detail ?? {}) as { pr: string; prStatus?: PrStatus & { checkedAt?: number } };
+      if (!opts.batchId && d.prStatus?.state === 'merged') {
+        out.push({ seq: b.seq, state: 'merged', comments: reviewComments(d.prStatus).length, error: null });
+        continue;
+      }
+      const st = await repo.pullRequestStatus(d.pr);
+      const now = store.getBatch(b.id)!.detail as Record<string, unknown> | null;
+      if (!st.checked) {
+        store.updateBatch(b.id, { detail: { ...now, prStatus: { ...(d.prStatus ?? {}), error: st.error, checkedAt: Date.now() } } });
+        out.push({ seq: b.seq, state: d.prStatus?.state ?? null, comments: reviewComments(d.prStatus).length, error: st.error });
+        continue;
+      }
+      store.updateBatch(b.id, { detail: { ...now, prStatus: { ...st, checkedAt: Date.now() } } });
+      const before = reviewComments(d.prStatus).length;
+      const after = reviewComments(st).length;
+      if (d.prStatus?.state && d.prStatus.state !== st.state) {
+        events.emit('batch.pr_state', `batch ${b.seq}: pull request ${st.state === 'merged' ? 'merged upstream' : st.state === 'closed' ? 'closed without merging' : 'open again'} (${d.pr})`, { runId, level: st.state === 'closed' ? 'warn' : 'info', data: { seq: b.seq, state: st.state } });
+      }
+      if (after > before) events.emit('batch.pr_comments', `batch ${b.seq}: ${after - before} new review comment(s) on ${d.pr}`, { runId, level: 'warn', data: { seq: b.seq, comments: after } });
+      out.push({ seq: b.seq, state: st.state, comments: after, error: null });
+    }
+    return out;
+  }
+
+  /** Every 10 minutes: read the open pull requests of finished runs again (state and new comments). */
+  private async autoRefreshPullRequests() {
+    if (!this.deps.repo.pullRequestStatus) return;
+    for (const r of this.deps.store.listRuns().filter((x) => x.status === 'completed')) {
+      if (!this.prBatches(r.id).some((b) => ((b.detail as { prStatus?: PrStatus } | null)?.prStatus?.state ?? 'open') === 'open')) continue;
+      await this.refreshPullRequests(r.id).catch((e) => this.deps.events.emit('batch.pr_refresh_failed', `could not read pull requests: ${(e as Error).message}`, { runId: r.id, level: 'warn' }));
+    }
+  }
+
+  /**
+   * Explain a PR's review comments in plain words with one model call (the run's most capable
+   * worker tier). Cached in `detail.prExplain` until the comments change.
+   */
+  async explainPrComments(runId: string, batchId: string) {
+    const { store, pool, providers } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    await this.refreshPullRequests(runId, { batchId });
+    const batch = store.getBatch(batchId)!;
+    const d = (batch.detail ?? {}) as { prStatus?: PrStatus; prExplain?: Explanation & { key: string; at: number; model: string } };
+    if (d.prStatus?.checked === false && !d.prStatus.comments?.length) throw new Error(d.prStatus.error ?? 'GitHub could not be read');
+    const comments = reviewComments(d.prStatus);
+    if (!comments.length) throw new Error('nobody else has commented on this pull request yet');
+    const key = commentsKey(comments);
+    if (d.prExplain?.key === key) return { ...d.prExplain, cached: true };
+    const plan = compileFlowPlan(row.flow);
+    const binding = plan.tiers.at(-1)!.node.data.pool;
+    const functions = batch.taskIds.flatMap((id) => store.getTask(id)?.functions ?? []);
+    const prompt = explainPrompt({ title: d.prStatus?.title ?? null, state: d.prStatus?.state ?? null, functions, comments });
+    const lease = await pool.acquire({ binding, role: 'worker', estInputTokens: Math.ceil(prompt.length / 3.5), estOutputTokens: 2_000 });
+    const t = Date.now();
+    let text: string;
+    try {
+      const r = await providers.complete(lease.account, { system: EXPLAIN_SYSTEM, prompt, model: lease.model, effort: 'low', jsonSchema: EXPLAIN_SCHEMA, maxOutputTokens: 6_000, timeoutMs: 180_000, signal: new AbortController().signal });
+      pool.release(lease, { kind: 'ok', usage: r.usage, latencyMs: Date.now() - t, rateLimit: r.rateLimit });
+      store.addRunUsage(runId, costUsd(lease.model, r.usage), r.usage);
+      text = r.text;
+    } catch (e) {
+      const pe = e instanceof ProviderError ? e : new ProviderError('network', String(e));
+      pool.release(lease, { kind: pe.kind, retryAfterMs: pe.retryAfterMs, message: pe.message });
+      throw new Error(`the model could not be reached (${pe.kind}): try again`);
+    }
+    const parsed = ExplainOut.safeParse(extractJson(text));
+    if (!parsed.success) throw new Error('the model did not answer in the expected form: try again');
+    const explained = { ...parsed.data, key, at: Date.now(), model: lease.model.id };
+    store.updateBatch(batchId, { detail: { ...(store.getBatch(batchId)!.detail as Record<string, unknown> | null), prExplain: explained } });
+    return { ...explained, cached: false };
+  }
+
+  /**
+   * Fix a pull request from its review comments with the run's AI workers. The packets the comments
+   * are about go back to the worker queue with the comments as instructions, and the run goes through
+   * its flow again. An open PR keeps its other packets; when the run finishes its fixed packets form
+   * a batch of their own, pushed to the same PR with `pushReviewFixes`. A closed PR's batch is
+   * replaced: every packet goes back into batching and the result is a new PR.
+   */
+  async fixFromReview(runId: string, batchId: string) {
+    const { store, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (row.status !== 'completed') throw new Error(`run is ${row.status}; fix from a review once the run has finished`);
+    if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
+    if (budgetReached(row)) throw new Error(`run budget $${row.config.budgetUsd} reached ($${row.costUsd.toFixed(2)} spent): raise it before fixing with the agents`);
+    await this.refreshPullRequests(runId, { batchId });
+    const batch = store.getBatch(batchId)!;
+    const d = (batch.detail ?? {}) as { pr: string; prStatus?: PrStatus };
+    const st = d.prStatus;
+    if (!st?.state) throw new Error(st?.error ?? 'the pull request could not be read');
+    if (st.state === 'merged') throw new Error('the pull request is merged: there is nothing to fix');
+    const comments = reviewComments(st);
+    if (!comments.length) throw new Error(`the pull request is ${st.state} and nobody else has commented: there is nothing to fix from`);
+    const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
+    if (tasks.some((t) => t.state !== 'staged')) throw new Error('part of this pull request is already being fixed or changed');
+    const filesOf = new Map(tasks.map((t) => [t.id, batchContent(store, runId, [t]).files.map((f) => f.path)]));
+    const reasons = reviewTargets(tasks, filesOf, comments);
+    const targets = tasks.filter((t) => reasons.has(t.id));
+    const open = st.state === 'open';
+    const r = await this.exclusive(`sending the review of batch ${batch.seq} of ${runId} to the AI agents`, async () => {
+      const at = Date.now();
+      const reviewFix = { at, state: st.state, taskIds: targets.map((t) => t.id), comments: comments.length, key: commentsKey(comments) };
+      let requeued = 0;
+      for (const t of targets) {
+        const fix: BatchFix = { batchId, seq: batch.seq, check: 'review', reasons: reasons.get(t.id)!, at, verdictId: t.lastVerdictId, pr: d.pr, prOpen: open };
+        if (store.requeueForFix(runId, t.id, fix, ['staged'])) requeued++;
+      }
+      if (open) {
+        store.updateBatch(batchId, { detail: { ...(store.getBatch(batchId)!.detail as Record<string, unknown> | null), reviewFix } });
+      } else {
+        // Closed: the rest is batched again with the fixed packets, into a new pull request.
+        const back = store.db.prepare("UPDATE tasks SET state = 'passed', updated_at = ? WHERE id = ? AND run_id = ? AND state = 'staged'");
+        store.tx(() => tasks.filter((t) => !reasons.has(t.id)).forEach((t) => back.run(at, t.id, runId)));
+        store.updateBatch(batchId, { status: 'superseded', detail: { ...(store.getBatch(batchId)!.detail as Record<string, unknown> | null), reviewFix } });
+      }
+      store.setRunStatus(runId, 'running', ['completed']);
+      const fns = targets.reduce((n, t) => n + t.functions.length, 0);
+      events.emit('batch.review_to_agents', `batch ${batch.seq}: ${fns} function(s) in ${requeued} packet(s) sent to the AI agents with ${comments.length} review comment(s) from ${d.pr}; ${open ? 'the fixes go to the same pull request' : 'the pull request was closed, so the result becomes a new one'}`, {
+        runId, level: 'warn', data: { seq: batch.seq, requeued, comments: comments.length, open },
+      });
+      return { requeued, functions: fns, comments: comments.length, open };
+    });
+    await this.start(runId);
+    return { ok: true as const, seq: batch.seq, ...r, status: store.getRun(runId)?.status ?? 'running' };
+  }
+
+  /**
+   * Push a review-fix batch (its packets fixed from an open PR's comments, re-verified) to that PR as
+   * one more commit, after re-verifying every packet of the PR with the fixes. Never a new PR.
+   */
+  async pushReviewFixes(runId: string, batchId: string) {
+    const { store, repo, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    if (row.status !== 'completed') throw new Error(`run is ${row.status}; push once it has completed`);
+    if (!repo.updatePullRequest) throw new Error('this repository adapter cannot update pull requests');
+    const batch = store.getBatch(batchId);
+    if (!batch || batch.runId !== runId) throw new Error('batch not found');
+    const d = (batch.detail ?? {}) as { updatesPr?: { batchId: string; seq: number; pr: string | null } };
+    if (!d.updatesPr) throw new Error(`batch ${batch.seq} holds no fixes for a pull request`);
+    if (batch.status !== 'branch_ready') throw new Error(`batch ${batch.seq} is ${batch.status}: only a re-verified batch can be pushed`);
+    const orig = store.getBatch(d.updatesPr.batchId);
+    const od = (orig?.detail ?? {}) as { pr?: string; prBranch?: string; prUpdates?: unknown[] };
+    if (!orig || orig.status !== 'submitted' || !od.pr || !od.prBranch) throw new Error(`batch ${d.updatesPr.seq}'s pull request is gone`);
+    const fixed = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
+    if (fixed.length !== batch.taskIds.length || fixed.some((t) => t.state !== 'staged')) throw new Error('every packet of the batch must still be staged');
+    // Every packet of the PR, with the fixed ones as they are now: the PR's tree must match them all.
+    const prTasks = [...new Set([...orig.taskIds, ...batch.taskIds])].map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
+    const content = batchContent(store, runId, fixed);
+    const message = [`Address review comments on ${content.fnCount} function(s)`, '', ...content.message.split('\n').slice(2)].join('\n');
+    return this.exclusive(`pushing the review fixes of batch ${batch.seq} to ${od.pr}`, async () => {
+      const r = await repo.updatePullRequest!({
+        branch: od.prBranch!, pullRequest: od.pr!, files: content.files, message, progress: this.progress,
+        tasks: prTasks.map((t) => ({ id: t.id, srTaskId: t.srTaskId, functions: t.functions, task: t })),
+      });
+      if (!r.ok) {
+        events.emit('batch.pr_update_failed', `batch ${batch.seq}: fixes not pushed to ${od.pr}: ${r.error}${r.problems.length ? ` (${r.problems.slice(0, 3).join('; ')})` : ''}`, { runId, level: 'warn' });
+        return r;
+      }
+      const at = Date.now();
+      if (repo.deleteBatchBranch && batch.branch === `decomp/${runId}-b${batch.seq}`) await repo.deleteBatchBranch(batch.branch);
+      store.updateBatch(batchId, { status: 'submitted', branch: null, detail: { ...(batch.detail as unknown as Record<string, unknown>), pr: od.pr, prBranch: od.prBranch, prUpdateOf: orig.seq, commit: r.commit, submittedAt: at } });
+      const now = (store.getBatch(orig.id)!.detail ?? {}) as Record<string, unknown>;
+      const { reviewFix: _done, ...rest } = now;
+      store.updateBatch(orig.id, { detail: { ...rest, prUpdates: [...(od.prUpdates ?? []), { at, commit: r.commit, seq: batch.seq }] } });
+      store.clearFix(fixed.map((t) => t.id));
+      events.emit('batch.pr_updated', `batch ${batch.seq}: review fixes for ${content.fnCount} function(s) pushed to ${od.pr} as ${r.commit?.slice(0, 10)}`, { runId, data: { seq: batch.seq, pr: od.pr, commit: r.commit } });
+      return r;
     });
   }
 

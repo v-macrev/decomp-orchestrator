@@ -309,6 +309,41 @@ export async function buildServer(app: App) {
     }
     return { ok: true, started: true };
   });
+  // Pull requests after submission: state and comments from GitHub, a plain-words explanation of the
+  // comments, fixing from them with the agents, and pushing those fixes to the open PR.
+  f.post('/api/runs/:id/pull-requests/refresh', async (req: FastifyRequest<{ Params: { id: string }; Body: { batchId?: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, pullRequests: await engine.refreshPullRequests(req.params.id, { batchId: req.body?.batchId }) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  f.post('/api/runs/:id/batches/:batchId/explain-review', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.explainPrComments(req.params.id, req.params.batchId)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  f.post('/api/runs/:id/batches/:batchId/fix-review', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return await engine.fixFromReview(req.params.id, req.params.batchId);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  f.post('/api/runs/:id/batches/:batchId/push-review-fixes', async (req: FastifyRequest<{ Params: { id: string; batchId: string }; Body: { confirm?: boolean } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    if (req.body?.confirm !== true) return reply.code(400).send({ ok: false, error: 'pushing to a pull request needs { "confirm": true }' });
+    try {
+      return await engine.pushReviewFixes(req.params.id, req.params.batchId);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   // Regroup the unsubmitted staged batches into as few as fit 60 functions each (GET: the plan only).
   f.get('/api/runs/:id/batches/rebalance', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');

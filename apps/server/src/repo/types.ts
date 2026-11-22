@@ -154,6 +154,43 @@ export interface RepoAdapter {
    * The engine turns it on only while it holds every slot (no run active) and off afterwards.
    */
   useIdleSlots?(on: boolean): void;
+  /** A pull request's state on GitHub and every comment, review and inline review comment on it. Read only. */
+  pullRequestStatus?(url: string): Promise<PrStatus>;
+  /**
+   * Push fixed files to an open batch PR as one more commit on its branch: the branch's local copy
+   * (refused when the fork moved), the files written, every packet of the PR re-verified, committed,
+   * pushed as a fast-forward. Never force-pushes and never opens a new PR.
+   */
+  updatePullRequest?(input: { branch: string; pullRequest: string; files: Array<{ path: string; content: string }>; tasks: SubmitBatchInput['tasks']; message: string; progress?: ProgressFn }): Promise<{ ok: boolean; commit: string | null; problems: string[]; error: string | null }>;
+}
+
+/** One comment on a pull request, from any of GitHub's three places for them. */
+export interface PrComment {
+  id: string;
+  /** 'comment': the conversation; 'review': a review's summary; 'inline': a review comment on a line. */
+  kind: 'comment' | 'review' | 'inline';
+  author: string | null;
+  bot: boolean;
+  /** Written by the operator's own GitHub account. */
+  mine: boolean;
+  body: string;
+  path: string | null;
+  line: number | null;
+  url: string;
+  at: string | null;
+  /** For a review: APPROVED, CHANGES_REQUESTED, COMMENTED… */
+  reviewState: string | null;
+}
+
+export interface PrStatus {
+  checked: boolean;
+  error: string | null;
+  state: 'open' | 'closed' | 'merged' | null;
+  title: string | null;
+  mergedAt: string | null;
+  closedAt: string | null;
+  headSha: string | null;
+  comments: PrComment[];
 }
 
 export interface ClaimCollision {

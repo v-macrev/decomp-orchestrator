@@ -123,6 +123,16 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    **Combine into bigger batches** (next to Prepare all for PR; `POST /api/runs/:id/batches/rebalance`,
    plan at `GET`) regroups the unsubmitted batches into as few as fit 60 functions each, whole units,
    biggest first, and re-verifies them; batches with a PR are never touched.
+   After submission each PR batch shows its pull request as GitHub has it (open, merged, closed),
+   read when the tab opens, every 10 minutes for open PRs, and on **Check GitHub now**
+   (`POST /api/runs/:id/pull-requests/refresh`), with every comment, review and inline comment from
+   other people. **Explain the comments** (`POST .../batches/:batchId/explain-review`) asks the run's
+   most capable model to explain them in plain words, cached until they change. **Fix from the
+   comments** (`POST .../batches/:batchId/fix-review`, open or closed PRs) sends the packets the comments
+   are about back to the AI workers with the comments as instructions; for an open PR the fixed
+   packets come back as their own batch and **Push the fixes** (`POST .../push-review-fixes`) adds one
+   commit to the same PR after re-verifying all of it (never a force-push); a closed PR's packets
+   are batched again for a new PR.
 6. Runs can be edited (`PATCH /api/runs/:id`: name, drafted-by, budget, functions per PR) and
    deleted (`DELETE /api/runs/:id`, which releases the local claims the run still holds). A new
    run can carry the dead functions of earlier runs (`config.carry.fromRuns`). Set

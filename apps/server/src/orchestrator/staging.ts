@@ -50,8 +50,18 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
   for (const t of passed) byUnit.set(t.unit, [...(byUnit.get(t.unit) ?? []), t]);
 
   let batches: TaskRow[][] = [];
+  // Fixes from an open PR's review go back to that PR: each PR's fixed packets are a batch of their own.
+  const forPr = new Map<string, TaskRow[]>();
+  for (const [unit, tasks] of [...byUnit]) {
+    const own = tasks.filter((t) => t.fix?.check === 'review' && t.fix.prOpen);
+    for (const t of own) forPr.set(t.fix!.batchId, [...(forPr.get(t.fix!.batchId) ?? []), t]);
+    const rest = tasks.filter((t) => !own.includes(t));
+    if (rest.length) byUnit.set(unit, rest);
+    else byUnit.delete(unit);
+  }
+  batches.push(...forPr.values());
   if (opts.pack === 'dense') {
-    batches = packUnits([...byUnit].map(([unit, items]) => ({ unit, functions: items.reduce((s, t) => s + t.functions.length, 0), items })), batchSize);
+    batches.push(...packUnits([...byUnit].map(([unit, items]) => ({ unit, functions: items.reduce((s, t) => s + t.functions.length, 0), items })), batchSize));
   } else {
     let cur: TaskRow[] = [];
     let count = 0;
@@ -85,7 +95,9 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
         progress: (_s, detail, done, total) => opts.progress?.(step, detail, done, total),
       });
       const ok = r.verified && !!r.branch;
-      store.updateBatch(id, { status: ok ? 'branch_ready' : 'failed', branch: ok ? r.branch : null, detail: { problems: r.problems, ...(r.failedTaskIds?.length ? { failedTaskIds: r.failedTaskIds } : {}), functions: fnCount, draftedBy, models } });
+      const prFix = tasks[0]!.fix?.check === 'review' && tasks[0]!.fix.prOpen ? tasks[0]!.fix : null;
+      const updatesPr = prFix ? { updatesPr: { batchId: prFix.batchId, seq: prFix.seq, pr: prFix.pr ?? null } } : {};
+      store.updateBatch(id, { status: ok ? 'branch_ready' : 'failed', branch: ok ? r.branch : null, detail: { problems: r.problems, ...(r.failedTaskIds?.length ? { failedTaskIds: r.failedTaskIds } : {}), ...updatesPr, functions: fnCount, draftedBy, models } });
       if (!ok) {
         summary.failed++;
         events.emit('batch.failed', `batch ${seq}: ${fnCount} functions NOT staged, no branch created; packets stay passed and can be staged again: ${r.problems.join('; ') || 'no branch'}`, { runId, level: 'warn', data: { seq, problems: r.problems } });

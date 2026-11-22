@@ -49,10 +49,13 @@ export interface TaskRow extends Task {
 export interface BatchFix {
   batchId: string;
   seq: number;
-  /** 're-verify': the batch's combined tree no longer matched it; 'dry-run': `sr submit --dry-run` blamed its unit. */
-  check: 're-verify' | 'dry-run';
+  /** 're-verify': the batch's combined tree no longer matched it; 'dry-run': `sr submit --dry-run` blamed its unit; 'review': comments on its pull request. */
+  check: 're-verify' | 'dry-run' | 'review';
   reasons: string[];
   at: number;
+  /** For 'review': the pull request, and whether it is still open (the fix is pushed to it, not a new PR). */
+  pr?: string;
+  prOpen?: boolean;
   /** The passing verdict it had: its first fix attempt reads these reasons; later ones the Gate Keeper's. */
   verdictId: string | null;
 }
@@ -424,11 +427,16 @@ export class Store {
    * Send a matched packet back to the worker queue at its tier to be fixed: fresh per-tier counters,
    * the fix reasons kept on the packet. Its accepted attempt stays its last verdict until a new one.
    */
-  requeueForFix(runId: string, taskId: string, fix: BatchFix): boolean {
+  requeueForFix(runId: string, taskId: string, fix: BatchFix, from: Array<'passed' | 'staged'> = ['passed']): boolean {
     return this.db.prepare(`UPDATE tasks SET state = 'pending', attempts_at_tier = 0, attempts_at_difficulty = 0, no_improvement_streak = 0,
         best_exact_bytes = 0, infra_failures = 0, provider_failures = 0, not_before = 0, lease_id = NULL, lease_expires_at = NULL,
         fix_json = ?, updated_at = ?
-      WHERE id = ? AND run_id = ? AND state = 'passed'`).run(j(fix), Date.now(), taskId, runId).changes > 0;
+      WHERE id = ? AND run_id = ? AND state IN (${from.map(() => '?').join(',')})`).run(j(fix), Date.now(), taskId, runId, ...from).changes > 0;
+  }
+  /** Forget why packets were sent back to the workers (their fix has landed). */
+  clearFix(taskIds: string[]) {
+    const clear = this.db.prepare('UPDATE tasks SET fix_json = NULL WHERE id = ?');
+    this.tx(() => taskIds.forEach((id) => clear.run(id)));
   }
   unstageBatch(batch: NonNullable<ReturnType<Store['getBatch']>>, detail: unknown) {
     this.tx(() => {

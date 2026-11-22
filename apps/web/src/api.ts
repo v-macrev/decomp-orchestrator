@@ -231,6 +231,18 @@ export interface Batch {
     supersededBy?: number[];
     /** Units this batch set aside (held out of PRs), with the findings that blocked each. */
     setAside?: { at: number; why: string; taskIds: string[]; units: string[]; reasons: Record<string, string[]> };
+    /** The pull request on GitHub, read after submission (state, comments, reviews). */
+    prStatus?: PrStatus & { checkedAt?: number };
+    /** The review comments explained in plain words (for the comments as they were at `key`). */
+    prExplain?: PrExplanation;
+    /** Packets sent to the AI agents with this PR's review comments. */
+    reviewFix?: { at: number; state: string; taskIds: string[]; comments: number; key: string };
+    /** This batch holds fixes from batch `seq`'s open PR review: it is pushed to that PR, not submitted. */
+    updatesPr?: { batchId: string; seq: number; pr: string | null };
+    /** Pushed to batch `prUpdateOf`'s pull request as commit `commit`. */
+    prUpdateOf?: number;
+    commit?: string | null;
+    prUpdates?: Array<{ at: number; commit: string | null; seq: number }>;
     /** Combined with the run's other unsubmitted batches into fewer, bigger ones. */
     rebalanced?: { at: number; max: number };
     /** Packets whose re-verification failed in the batch's combined tree. */
@@ -252,6 +264,19 @@ export interface ClaimCollision {
 }
 
 interface StageResult { staged: number; failed: number; seqs: number[] }
+
+export interface PrComment {
+  id: string; kind: 'comment' | 'review' | 'inline'; author: string | null; bot: boolean; mine: boolean;
+  body: string; path: string | null; line: number | null; url: string; at: string | null; reviewState: string | null;
+}
+export interface PrStatus {
+  checked: boolean; error: string | null; state: 'open' | 'closed' | 'merged' | null; title: string | null;
+  mergedAt: string | null; closedAt: string | null; headSha: string | null; comments: PrComment[];
+}
+export interface PrExplanation {
+  summary: string; points: Array<{ author: string; about: string; plain: string; action: string }>; nextStep: string;
+  key: string; at: number; model: string; cached?: boolean;
+}
 
 /** What holds the worktree slots right now (staging, a dry run, a claims check). */
 export interface OperationProgress {
@@ -386,6 +411,10 @@ export const api = {
   nextWithheldLapse: (id: string) => req<{ at: number | null }>('GET', `/api/runs/${id}/withheld/next-lapse`),
   restageFailed: (id: string) => req<{ ok: true } & StageResult>('POST', `/api/runs/${id}/batches/restage-failed`, {}),
   prepareAll: (id: string) => req<{ ok: true; started: true }>('POST', `/api/runs/${id}/prepare`, {}),
+  refreshPullRequests: (id: string, batchId?: string) => req<{ ok: true; pullRequests: Array<{ seq: number; state: string | null; comments: number; error: string | null }> }>('POST', `/api/runs/${id}/pull-requests/refresh`, batchId ? { batchId } : {}),
+  explainReview: (id: string, batchId: string) => req<{ ok: true } & PrExplanation>('POST', `/api/runs/${id}/batches/${batchId}/explain-review`, {}),
+  fixFromReview: (id: string, batchId: string) => req<{ ok: true; seq: number; requeued: number; functions: number; comments: number; open: boolean; status: string }>('POST', `/api/runs/${id}/batches/${batchId}/fix-review`, {}),
+  pushReviewFixes: (id: string, batchId: string) => req<{ ok: boolean; commit: string | null; problems: string[]; error: string | null }>('POST', `/api/runs/${id}/batches/${batchId}/push-review-fixes`, { confirm: true }),
   rebalancePlan: (id: string) => req<{ max: number; batches: Array<{ seq: number; functions: number }>; after: number[]; functions: number }>('GET', `/api/runs/${id}/batches/rebalance`),
   rebalanceBatches: (id: string) => req<{ ok: true; from: number[]; functions: number; staged: StageResult }>('POST', `/api/runs/${id}/batches/rebalance`, {}),
   fixBatch: (id: string, batchId: string) => req<{ ok: boolean; seq: number; check: 're-verify' | 'dry-run'; requeued: number; functions: number; kept: number; status: string }>('POST', `/api/runs/${id}/batches/${batchId}/fix`, {}),

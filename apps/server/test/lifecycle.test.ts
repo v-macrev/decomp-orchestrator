@@ -5,12 +5,15 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultFlow, type Flow } from '@decomp/core';
 import { openDatabase } from '../src/db/database.js';
 import { Store } from '../src/db/store.js';
 import { RunEngine } from '../src/orchestrator/engine.js';
 import { packUnits } from '../src/orchestrator/staging.js';
+import type { PrComment, PrStatus } from '../src/repo/types.js';
+import { commentLine, reviewComments, reviewTargets } from '../src/orchestrator/review.js';
+import type { TaskRow } from '../src/db/store.js';
 import { AccountPool } from '../src/pool/scheduler.js';
 import { ProviderRegistry } from '../src/providers/registry.js';
 import { SimRepo } from '../src/repo/simRepo.js';
@@ -64,7 +67,7 @@ function setup() {
     engine.close();
     if (store.db.open) store.db.close();
   });
-  return { store, events, repo, engine };
+  return { store, events, repo, engine, providers };
 }
 
 const createRun = (s: ReturnType<typeof setup>, name: string, count = 12, seed = 3) =>
@@ -900,5 +903,98 @@ describe('combining batches into bigger ones', () => {
     expect(s.store.getBatch(sent.id)!.status).toBe('submitted');
     for (const id of merged.taskIds) expect(s.store.getTask(id)!.state).toBe('staged');
     await expect(s.engine.rebalanceBatches(run.id)).rejects.toThrow(/nothing to regroup/);
+  }, 60_000);
+});
+
+describe('pull requests after submission', () => {
+  const PR = 'https://github.com/o/r/pull/9';
+  const comment = (over: Partial<PrComment>): PrComment => ({ id: `c-${Math.random()}`, kind: 'comment', author: 'reviewer', bot: false, mine: false, body: 'please rename', path: null, line: null, url: `${PR}#c`, at: '2026-11-21T10:00:00Z', reviewState: null, ...over });
+  const status = (state: PrStatus['state'], comments: PrComment[]): PrStatus => ({ checked: true, error: null, state, title: 'Reconstruct things', mergedAt: state === 'merged' ? '2026-11-21T12:00:00Z' : null, closedAt: state === 'open' ? null : '2026-11-21T12:00:00Z', headSha: 'abc', comments });
+  /** A finished run whose first batch was submitted as PR. */
+  const submitted = async (name: string) => {
+    const s = setup();
+    const run = createRun(s, name, 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = s.store.listBatches(run.id).find((b) => b.status === 'branch_ready')!;
+    s.store.updateBatch(batch.id, { status: 'submitted', detail: { ...(batch.detail as unknown as Record<string, unknown>), pr: PR, prBranch: `decomp/${run.id}-b${batch.seq}-pr` } });
+    const tasks = batch.taskIds.map((id) => s.store.getTask(id)!);
+    return { s, run, batch, tasks };
+  };
+
+  it("matches comments to the packets they are about and leaves out the operator's own", async () => {
+    const own = comment({ mine: true, body: 'claim for these' });
+    const general = comment({ body: 'Thanks! One thing:\n  name the locals' });
+    const inline = comment({ kind: 'inline', path: 'reconstruction/a/A.cpp', line: 12, body: 'use the field name' });
+    expect(reviewComments({ comments: [own, general, inline, comment({ body: '  ' })] })).toEqual([general, inline]);
+    expect(commentLine(inline)).toBe('reviewer on reconstruction/a/A.cpp:12: use the field name');
+    const t = (id: string, unit: string) => ({ id, unit }) as unknown as TaskRow;
+    const tasks = [t('a', 'reconstruction/a/A.cpp'), t('b', 'reconstruction/b/B.cpp')];
+    const out = reviewTargets(tasks, new Map([['a', ['reconstruction/a/A.cpp']], ['b', ['reconstruction/b/B.cpp']]]), [general, inline]);
+    expect(out.get('a')).toEqual([commentLine(general), commentLine(inline)]);
+    expect(out.get('b')).toEqual([commentLine(general)]);
+  });
+
+  it('reads the PR state and comments, and explains the comments once until they change', async () => {
+    const { s, run, batch } = await submitted('pr-explain');
+    s.repo.pullRequests.set(PR, status('open', [comment({ mine: true }), comment({ body: 'nit: name this local' })]));
+    const r = await s.engine.refreshPullRequests(run.id);
+    expect(r).toEqual([{ seq: batch.seq, state: 'open', comments: 1, error: null }]);
+    const complete = vi.spyOn(s.providers, 'complete').mockResolvedValue({
+      text: JSON.stringify({ summary: 'One small naming request.', points: [{ author: 'reviewer', about: 'a local variable', plain: 'They want a clearer name.', action: 'Rename it.' }], nextStep: 'Rename and push.' }),
+      usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 }, stopReason: 'end',
+    });
+    const e = await s.engine.explainPrComments(run.id, batch.id);
+    expect(e).toMatchObject({ summary: 'One small naming request.', cached: false });
+    expect(complete.mock.calls[0]![1].prompt).toContain('nit: name this local');
+    expect(complete.mock.calls[0]![1].prompt).not.toContain('please rename');
+    expect((await s.engine.explainPrComments(run.id, batch.id)).cached).toBe(true);
+    expect(complete).toHaveBeenCalledTimes(1);
+    // Merged: the state change is recorded, and nothing is left to fix.
+    s.repo.pullRequests.set(PR, status('merged', [comment({ body: 'nit: name this local' })]));
+    await s.engine.refreshPullRequests(run.id);
+    expect((s.store.getBatch(batch.id)!.detail as unknown as { prStatus: PrStatus }).prStatus.state).toBe('merged');
+    await expect(s.engine.fixFromReview(run.id, batch.id)).rejects.toThrow(/merged/);
+  }, 60_000);
+
+  it('fixes an open PR from its comments with the agents and pushes the fixes to the same PR', async () => {
+    const { s, run, batch, tasks } = await submitted('pr-fix-open');
+    const victim = tasks[0]!;
+    s.repo.pullRequests.set(PR, status('open', [comment({ kind: 'inline', path: victim.unit, line: 3, body: 'name the field' })]));
+    const r = await s.engine.fixFromReview(run.id, batch.id);
+    expect(r).toMatchObject({ ok: true, open: true, comments: 1 });
+    const sameUnit = tasks.filter((t) => t.unit === victim.unit);
+    expect(r.requeued).toBe(sameUnit.length);
+    expect(s.store.getTask(victim.id)!.fix).toMatchObject({ check: 'review', prOpen: true, pr: PR, reasons: [`reviewer on ${victim.unit}:3: name the field`] });
+    expect(s.store.getBatch(batch.id)!.status).toBe('submitted');
+    await s.engine.waitFor(run.id);
+    for (const t of tasks.filter((x) => x.unit !== victim.unit)) expect(s.store.getTask(t.id)!.state).toBe('staged');
+    if (sameUnit.some((t) => s.store.getTask(t.id)!.state === 'dead')) return; // the simulator's agent repeated itself: nothing to push
+    const fixes = s.store.listBatches(run.id).find((b) => (b.detail as unknown as { updatesPr?: unknown } | null)?.updatesPr)!;
+    expect(new Set(fixes.taskIds)).toEqual(new Set(sameUnit.map((t) => t.id)));
+    expect(fixes.status).toBe('branch_ready');
+    const pushed = await s.engine.pushReviewFixes(run.id, fixes.id);
+    expect(pushed.ok).toBe(true);
+    expect(s.repo.prUpdates).toHaveLength(1);
+    expect(s.repo.prUpdates[0]!.tasks.sort()).toEqual([...new Set([...batch.taskIds, ...fixes.taskIds])].sort());
+    expect(s.repo.prUpdates[0]!.message).toMatch(/^Address review comments/);
+    expect(s.store.getBatch(fixes.id)).toMatchObject({ status: 'submitted', detail: expect.objectContaining({ prUpdateOf: batch.seq, pr: PR }) });
+    expect((s.store.getBatch(batch.id)!.detail as unknown as { prUpdates: unknown[] }).prUpdates).toHaveLength(1);
+    expect(s.store.getTask(victim.id)!.fix).toBeNull();
+    // Only the PR's own batch is read from GitHub.
+    expect((await s.engine.refreshPullRequests(run.id)).map((p) => p.seq)).toEqual([batch.seq]);
+  }, 60_000);
+
+  it('fixes a closed PR from its comments into a new batch with the rest of its packets', async () => {
+    const { s, run, batch, tasks } = await submitted('pr-fix-closed');
+    s.repo.pullRequests.set(PR, status('closed', [comment({ body: 'closing: the names are guesses' })]));
+    const r = await s.engine.fixFromReview(run.id, batch.id);
+    expect(r).toMatchObject({ open: false, requeued: tasks.length });
+    expect(s.store.getBatch(batch.id)!.status).toBe('superseded');
+    await s.engine.waitFor(run.id);
+    for (const t of tasks) expect(['staged', 'dead']).toContain(s.store.getTask(t.id)!.state);
+    const next = s.store.listBatches(run.id).filter((b) => b.status === 'branch_ready' && b.taskIds.some((id) => batch.taskIds.includes(id)));
+    expect(next.length).toBeGreaterThan(0);
+    for (const b of next) expect((b.detail as unknown as { updatesPr?: unknown }).updatesPr).toBeUndefined();
   }, 60_000);
 });

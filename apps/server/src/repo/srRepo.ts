@@ -25,7 +25,7 @@ import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
-import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
+import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, PrComment, PrStatus, ProgressFn, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
 import { batchPrText, withClaimLine, type CompareSummary } from './batchPr.js';
 
 interface ProgressInventory {
@@ -1066,6 +1066,100 @@ export class SrRepo implements RepoAdapter {
       return { ok: true, title: pr.title, warnings, claims: claimUrls };
     } catch (e) {
       return fail(`tidying the PR: ${(e as Error).message.slice(0, 300)}`);
+    }
+  }
+
+  private ghLogin: string | null = null;
+
+  /** See RepoAdapter.pullRequestStatus: four `gh api` reads (the PR, its conversation, inline comments, reviews). */
+  async pullRequestStatus(url: string): Promise<PrStatus> {
+    const none = (error: string): PrStatus => ({ checked: false, error, state: null, title: null, mergedAt: null, closedAt: null, headSha: null, comments: [] });
+    const m = /^https:\/\/github\.com\/([\w.-]+)\/([\w.-]+)\/pull\/(\d+)$/.exec(url);
+    if (!m) return none('not a GitHub pull request URL');
+    const repo = `repos/${m[1]}/${m[2]}`;
+    const gh = async (args: string[]) => {
+      const r = await this.host.run('gh', ['api', ...args], { cwd: this.cfg.repoPath, env: { GH_PROMPT_DISABLED: '1' }, timeoutMs: 120_000, maxOutputBytes: 16 * 1024 * 1024 });
+      if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim().slice(0, 200) || `gh api exited ${r.code}`);
+      return r.stdout;
+    };
+    const rows = (text: string) => text.split('\n').filter((l) => l.trim()).map((l) => JSON.parse(l) as Record<string, unknown>);
+    try {
+      if (this.ghLogin === null) this.ghLogin = (await gh(['user', '--jq', '.login'])).trim();
+      const who = '{id, author: .user.login, type: .user.type, body, url: .html_url';
+      const [pr, conversation, inline, reviews] = await Promise.all([
+        gh([`${repo}/pulls/${m[3]}`, '--jq', '{state, merged, merged_at, closed_at, title, head: .head.sha}']),
+        gh(['--paginate', `${repo}/issues/${m[3]}/comments`, '--jq', `.[] | ${who}, at: .updated_at}`]),
+        gh(['--paginate', `${repo}/pulls/${m[3]}/comments`, '--jq', `.[] | ${who}, at: .updated_at, path, line: (.line // .original_line)}`]),
+        gh(['--paginate', `${repo}/pulls/${m[3]}/reviews`, '--jq', `.[] | ${who}, at: .submitted_at, state}`]),
+      ]);
+      const p = JSON.parse(pr) as { state: string; merged: boolean; merged_at: string | null; closed_at: string | null; title: string; head: string };
+      const comment = (kind: PrComment['kind'], r: Record<string, unknown>): PrComment => {
+        const author = typeof r.author === 'string' ? r.author : null;
+        return {
+          id: `${kind}-${String(r.id)}`, kind, author, bot: r.type === 'Bot', mine: !!author && author === this.ghLogin,
+          body: String(r.body ?? '').trim(), path: typeof r.path === 'string' ? r.path : null, line: typeof r.line === 'number' ? r.line : null,
+          url: String(r.url ?? url), at: typeof r.at === 'string' ? r.at : null, reviewState: typeof r.state === 'string' ? r.state : null,
+        };
+      };
+      const comments = [
+        ...rows(conversation).map((r) => comment('comment', r)),
+        ...rows(inline).map((r) => comment('inline', r)),
+        // A review counts when it says something, or asks for changes without words.
+        ...rows(reviews).map((r) => comment('review', r)).filter((c) => c.body || c.reviewState === 'CHANGES_REQUESTED').map((c) => (c.body ? c : { ...c, body: '(requested changes)' })),
+      ].sort((a, b) => (a.at ?? '').localeCompare(b.at ?? ''));
+      return {
+        checked: true, error: null, state: p.merged ? 'merged' : p.state === 'open' ? 'open' : 'closed', title: p.title,
+        mergedAt: p.merged_at, closedAt: p.closed_at, headSha: p.head, comments,
+      };
+    } catch (e) {
+      return none(`GitHub could not be read: ${(e as Error).message}`);
+    }
+  }
+
+  /** See RepoAdapter.updatePullRequest. */
+  async updatePullRequest(input: { branch: string; pullRequest: string; files: Array<{ path: string; content: string }>; tasks: SubmitBatchInput['tasks']; message: string; progress?: ProgressFn }): Promise<{ ok: boolean; commit: string | null; problems: string[]; error: string | null }> {
+    const slot = this.slotCount;
+    const p = this.wt(slot);
+    const fail = (error: string, problems: string[] = []) => ({ ok: false, commit: null, problems, error });
+    if (!/^decomp\/run_[a-z0-9]+-b[1-9]\d*-pr$/.test(input.branch)) return fail('not a batch PR branch');
+    const git = async (args: string[]) => {
+      const r = await this.git(p, args);
+      if (r.code !== 0) throw new Error(`git ${args[0]}: ${(r.stderr || r.stdout).trim().slice(0, 300)}`);
+      return r.stdout.trim();
+    };
+    try {
+      const status = await this.pullRequestStatus(input.pullRequest);
+      if (!status.checked) return fail(status.error ?? 'the pull request could not be read: nothing was pushed');
+      if (status.state !== 'open') return fail(`the pull request is ${status.state}: nothing was pushed`);
+      await this.ensureWorktree(slot);
+      await git(['checkout', '-q', input.branch]);
+      const head = await git(['rev-parse', 'HEAD']);
+      const remote = (await this.git(p, ['config', '--get', `branch.${input.branch}.remote`])).stdout.trim();
+      if (!/^[\w.-]+$/.test(remote)) return fail(`no push remote recorded for ${input.branch}: nothing was pushed`);
+      const env = { GIT_TERMINAL_PROMPT: '0' };
+      const tip = (await this.host.run('git', ['ls-remote', remote, `refs/heads/${input.branch}`], { cwd: p, env, timeoutMs: 120_000 })).stdout.trim().split(/\s+/)[0] ?? '';
+      if (tip !== head || status.headSha !== head) return fail(`the PR branch is at ${(status.headSha ?? tip).slice(0, 10) || 'an unreadable commit'}, not the local ${head.slice(0, 10)}: someone else pushed to it, so nothing was pushed`);
+      await this.writeFiles(slot, input.files);
+      const v = await this.verifyTree(slot, input.tasks, {
+        signal: new AbortController().signal, stagedAt: null, files: input.files,
+        progress: (detail, done, total) => input.progress?.('Re-verifying every packet of the pull request with the fixes', detail, done, total),
+      });
+      if (v.problems.length) return fail('the fixed tree does not match every packet of the PR: nothing was pushed', v.problems);
+      await git(['add', '--', ...new Set(input.files.map((f) => f.path))]);
+      if (!(await this.git(p, ['diff', '--cached', '--quiet'])).code) return fail('the fixes change no file of the pull request: nothing was pushed');
+      await git(['commit', '-q', '-m', input.message]);
+      const commit = await git(['rev-parse', 'HEAD']);
+      input.progress?.('Pushing the fixes to the pull request', `${remote} ${input.branch} (fast-forward)`, null, null);
+      const push = await this.host.run('git', ['push', remote, `HEAD:refs/heads/${input.branch}`], { cwd: p, env, timeoutMs: 300_000 });
+      if (push.code !== 0) {
+        await git(['reset', '-q', '--hard', head]);
+        return fail(`git push: ${(push.stderr || push.stdout).trim().slice(0, 300)}`);
+      }
+      return { ok: true, commit, problems: [], error: null };
+    } catch (e) {
+      return fail((e as Error).message.slice(0, 300));
+    } finally {
+      await this.reset(slot).catch(() => undefined);
     }
   }
 
