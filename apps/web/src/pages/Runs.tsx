@@ -1014,15 +1014,24 @@ function SetAsideList({ batches, locked, busy, putBack }: { batches: Batch[]; lo
  * for PR", which runs every fix-up and dry run in order); submitting stays an explicit click per batch.
  */
 /** While the run goes on: how full the next PR batch is (whole units only), and what still waits on its unit. */
-function RollingMeter({ b, status }: { b: BatchingStatus; status: string }) {
+function RollingMeter({ b, status, locked, busy, onBatchNow }: { b: BatchingStatus; status: string; locked: boolean; busy: boolean; onBatchNow: () => void }) {
   const n = b.fresh.functions;
   const pct = Math.min(100, (n / Math.max(1, b.batchSize)) * 100);
   const full = n >= b.batchSize;
+  const ready = b.ready.functions;
   return (
     <div className={`rolling ${full ? 'full' : ''}`} aria-label="Next PR batch">
       <div className="row">
         <span className="eyebrow grow">{b.rolling ? 'Next PR batch' : 'Ready to batch'}</span>
         {b.batching && <span className="small"><span className="spinner" aria-hidden="true" /> making a batch now…</span>}
+        {/* Only the operator makes a batch under the minimum: never done on its own. */}
+        {ready > 0 && !b.batching && (
+          <ConfirmButton className="" disabled={locked} onConfirm={onBatchNow}
+            confirmLabel={`Make a batch of ${ready} function${ready === 1 ? '' : 's'}?${ready < b.fullAt ? ` (under the ${b.fullAt} minimum)` : ''}`}
+            title={`Batches the ${ready} ready function${ready === 1 ? '' : 's'} (${b.ready.units} finished unit${b.ready.units === 1 ? '' : 's'}) now, even under the ${b.fullAt}-function minimum, and checks the batch in a clean tree beside the workers. Units still being worked on are left out. Nothing is pushed.`}>
+            {busy ? 'Batching…' : `Batch ${ready === 1 ? 'it' : `these ${ready}`} now`}
+          </ConfirmButton>
+        )}
       </div>
       <div className="row">
         <span className="big-n">{fmtCount(n)} of {b.batchSize}</span>
@@ -1466,7 +1475,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
 
   return (
     <div className="stack">
-      {live && batching && <RollingMeter b={batching} status={status} />}
+      {live && batching && <RollingMeter b={batching} status={status} locked={locked} busy={busy === 'stage'} onBatchNow={stage} />}
       {hero}
       {msg && <div className="notice" role="status">{msg}</div>}
       {err && <div className="notice error" role="alert">{err}</div>}
