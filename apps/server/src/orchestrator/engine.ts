@@ -1421,7 +1421,18 @@ export class RunEngine {
     const upstream = new Map<string, string | null>([[task.unit, await repo.readFile(slot, task.unit)], [h, await repo.readFile(slot, h)]]);
     const drop = (task.fix?.dropped ?? []).map((d) => ({ rva: d.rva, name: d.name, size: 0 }));
     const r = spliceUnit({ cpp: task.unit, ours, upstream, keep: task.functions as FunctionTarget[], drop });
-    return { ...r, model: a.model };
+    // The origin statements the accepted attempt made: `sr start` adds a placeholder for the carried
+    // functions, and the header repair fills it from these, as it does from a worker's reply.
+    const statement = (key: string) => (ours.get(task.unit) ?? '').split('\n')
+      .map((l) => new RegExp(`^\\s*//\\s*${key}:\\s*(.+)$`, 'i').exec(l)?.[1]?.trim())
+      .find((x): x is string => !!x && !/SKELETON_TODO|<fill/i.test(x));
+    const codeOrigin = statement('Code origin');
+    const adaptedBodies = statement('Adapted bodies');
+    return {
+      ...r, model: a.model,
+      codeOrigin: codeOrigin && codeOrigin.length >= 8 ? codeOrigin.slice(0, 300) : undefined,
+      adaptedBodies: adaptedBodies && adaptedBodies.length >= 4 ? adaptedBodies.slice(0, 300) : undefined,
+    };
   }
 
   /** Put set-aside units back (all, or these units) and re-verify them into batches. */
@@ -2479,7 +2490,7 @@ export class RunEngine {
       let finisher: string;
       const freeAttempt = !!spliced && task.fix?.verdictId === task.lastVerdictId;
       if (spliced && freeAttempt) {
-        text = JSON.stringify({ files: spliced.files });
+        text = JSON.stringify({ files: spliced.files, ...(spliced.codeOrigin ? { codeOrigin: spliced.codeOrigin } : {}), ...(spliced.adaptedBodies ? { adaptedBodies: spliced.adaptedBodies } : {}) });
         finisher = spliced.model ?? 'decomp-orchestrator';
         store.updateAttempt(attempt.id, { model: 'splice (no model call)', latencyMs: 0 });
         ev('attempt.spliced', `rebuilt on upstream without a model call: ${spliced.notes.join('; ').slice(0, 600)}`, 'info', { notes: spliced.notes });

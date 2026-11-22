@@ -118,16 +118,24 @@ export function repairHeader(path: string, after: string, before: string | null,
     changes.push(`${key}: ${ph ? `replaced the skeleton placeholder with the worker's statement` : ''}${ph && drop.length > ph ? ' and ' : ''}${drop.length > ph ? `removed ${drop.length - ph} duplicate line(s) the worker added` : ''}`);
   }
   // 3. a placeholder origin with no real statement in this file: use the worker's own from its .cpp
+  // `sr start` appends its placeholder to a statement the file already makes ("none.; SKELETON_TODO_ORIGIN
+  // (state it for the added functions)"): that statement covers the functions already there, so it stays
+  // and the new one follows it.
+  const merged = (e: Entry, key: string, hint: string, isNone: boolean) => {
+    const value = e.lines.join(' ').replace(/^\/\/\s*[^:]+:\s*/, '').split(PLACEHOLDER)[0]!.replace(/\s*\/\/\s*/g, ' ').replace(/[\s;,]+$/, '').trim();
+    if (!value) return `// ${key}: ${hint}`;
+    return isNone || value.toLowerCase().includes(hint.toLowerCase()) ? `// ${key}: ${value}` : `// ${key}: ${value}; ${hint}`;
+  };
   const originPh = es.find((e) => e.key === 'Code origin' && e.placeholder);
   if (originPh && opts.originHint && !es.some((e) => e.key === 'Code origin' && !e.placeholder)) {
-    originPh.lines = [`// Code origin: ${opts.originHint}`];
+    originPh.lines = [merged(originPh, 'Code origin', opts.originHint, false)];
     originPh.placeholder = false;
     changes.push(`Code origin: filled the skeleton placeholder with the worker's own statement from its source file`);
   }
   // 3b. the same for the adapted-bodies placeholder, from the worker's own "adaptedBodies" statement
   const adaptedPh = es.find((e) => (e.key === 'Adapted bodies' || e.key === 'Adapted code') && e.placeholder);
   if (adaptedPh && opts.adaptedHint && !es.some((e) => (e.key === 'Adapted bodies' || e.key === 'Adapted code') && !e.placeholder)) {
-    adaptedPh.lines = [`// Adapted bodies: ${opts.adaptedHint}`];
+    adaptedPh.lines = [merged(adaptedPh, adaptedPh.key!, opts.adaptedHint, /^none\b/i.test(opts.adaptedHint))];
     adaptedPh.placeholder = false;
     changes.push(`Adapted bodies: filled the skeleton placeholder with the worker's statement`);
   }

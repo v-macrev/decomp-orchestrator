@@ -113,6 +113,27 @@ describe('header repair', () => {
   });
 });
 
+describe('placeholders sr start appends to an existing statement (rebuild on upstream)', () => {
+  const UP = [
+    '// Source exposure: mixed.',
+    '// Adapted bodies: none. Body synthesized from the bounded leaf template.; SKELETON_TODO_ORIGIN (state it for the added functions)',
+    '// Code origin: SKELETON_TODO_CODE_ORIGIN (state the actual origin and any adaptation)',
+    '// 0x10 A::B',
+    '#include "A.h"',
+    '',
+  ].join('\n');
+  it("keeps upstream's statement and adds ours after it", () => {
+    const r = repairHeader('a.cpp', `${UP}int A::B() { return 0; }\n`, UP, { originHint: 'written for this reconstruction from the listing.', adaptedHint: 'C::D from x/y.cpp@abc, MIT' });
+    expect(r.content).toContain('// Adapted bodies: none. Body synthesized from the bounded leaf template.; C::D from x/y.cpp@abc, MIT\n');
+    expect(r.content).toContain('// Code origin: written for this reconstruction from the listing.\n');
+    expect(r.content).not.toContain('SKELETON_TODO');
+  });
+  it('adds nothing to the statement when ours is none', () => {
+    const r = repairHeader('a.cpp', `${UP}int A::B() { return 0; }\n`, UP, { originHint: 'written here.', adaptedHint: 'none.' });
+    expect(r.content).toContain('// Adapted bodies: none. Body synthesized from the bounded leaf template.\n');
+  });
+});
+
 describe('pre-existing header clutter and files changed by prepare (second real run)', () => {
   // sr start stacked its skeleton on the unit's existing header, which already had an older
   // "Source exposure: ... Drafted by ..." line: still 7 counted lines after the placeholders were filled.
