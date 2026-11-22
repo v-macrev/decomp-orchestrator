@@ -467,6 +467,7 @@ export async function buildServer(app: App) {
     const q = req.query;
     return store.listTasks(req.params.id, { state: q.state as never, limit: Math.min(1000, Number(q.limit ?? 200)), offset: Number(q.offset ?? 0) });
   });
+  f.get('/api/runs/:id/batching', async (req: FastifyRequest<{ Params: { id: string } }>) => engine.batchingStatus(req.params.id));
   f.get('/api/runs/:id/batches', async (req: FastifyRequest<{ Params: { id: string } }>) => engine.listBatches(req.params.id));
   f.get('/api/runs/:id/knowledge', async (req: FastifyRequest<{ Params: { id: string }; Querystring: { limit?: string } }>) =>
     store.listKnowledge(req.params.id, Math.min(1000, Number(req.query.limit ?? 200))));

@@ -57,6 +57,9 @@ export interface EngineOptions {
   infraBackoffMs: number;
 }
 
+/** Run states whose batches the PR pipeline may work on (on the staging worktree while the run goes on). */
+const PIPELINE_STATES = new Set(['completed', 'running', 'paused']);
+
 const DEFAULTS: EngineOptions = {
   leaseMs: 120_000,
   heartbeatMs: 20_000,
@@ -128,6 +131,11 @@ export class RunEngine {
   afterRun: ((runId: string) => void) | null = null;
   /** Held by work that needs the worktree slots outside a run (shadow evaluation). */
   private exclusiveHolder: string | null = null;
+  /** The slot-lock holder also uses the idle worker slots: no run may start until it is done. */
+  private idleBorrowed = false;
+  private slotWaiters: Array<() => void> = [];
+  /** Runs whose ready functions are being batched while they go on. */
+  private rolling = new Set<string>();
   /** What the slot-holding operation is doing right now (batch staging, dry runs, claims checks). */
   private op: OperationProgress | null = null;
   private discovering: string | null = null;
@@ -177,7 +185,7 @@ export class RunEngine {
     if (this.discovering === runId) return;
     if (this.discovering) throw new Error('another run is already discovering its backlog');
     if (this.active.size > 0) throw new Error('another run is active; worktree slots are exclusive to one run at a time');
-    if (this.exclusiveHolder) throw new Error(`worktree slots are busy (${this.exclusiveHolder}); start the run when it finishes`);
+    if (this.idleBorrowed || this.finishing.size) throw new Error(`worktree slots are busy (${this.exclusiveHolder ?? "a run is staging"}); start the run when it finishes`);
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
     if (['completed', 'cancelled'].includes(row.status)) throw new Error(`run is ${row.status}`);
@@ -355,7 +363,7 @@ export class RunEngine {
 
     const active = this.active.get(runId);
     if (!active && this.active.size > 0) return { ok: false, reason: 'another run is active; retry when it finishes' };
-    if (!active && this.exclusiveHolder) return { ok: false, reason: `worktree slots are busy (${this.exclusiveHolder}); retry when they are free` };
+    if (!active && (this.idleBorrowed || this.finishing.size)) return { ok: false, reason: `worktree slots are busy (${this.exclusiveHolder}); retry when they are free` };
 
     const plan = compileFlowPlan(row.flow);
     const fromFast = opts.from === 'fast';
@@ -470,7 +478,7 @@ export class RunEngine {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run can be staged`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can be staged`);
     const batch = store.getBatch(batchId);
     if (!batch || batch.runId !== runId) throw new Error('batch not found');
     if (batch.status !== 'interrupted' && batch.status !== 'failed') throw new Error(`batch ${batch.seq} is ${batch.status}: only an interrupted or failed batch can be re-verified again`);
@@ -480,7 +488,7 @@ export class RunEngine {
       const staged = await stageRun(store, repo, events, runId, row.config.prBatchSize, { only: tasks.map((t) => t.id), progress: this.progress });
       store.updateBatch(batchId, { status: 'superseded', detail: { ...(batch.detail as Record<string, unknown> | null), supersededBy: staged.seqs } });
       return staged;
-    });
+    }, { besideRun: true });
   }
 
   /** For crash simulation and tests: stop all loops without touching task state (like a kill -9). */
@@ -505,23 +513,116 @@ export class RunEngine {
   }
 
   /**
-   * Stage a completed run's packets that are still 'passed' (a batch failed re-verification, or
-   * staging was interrupted), under the slot lock: never alongside a run or another staging.
+   * Stage the run's packets that are still 'passed' (a batch failed re-verification, staging was
+   * interrupted, or the run is still going), under the slot lock. While the run is going, only
+   * units with no packet left to work on are batched: a later packet would rewrite their files.
    */
   async restage(runId: string): Promise<StageSummary> {
     const { store, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run can be staged`);
-    if (!store.listTasks(runId, { state: 'passed', limit: 1 }).length) throw new Error('no passed packets left to stage');
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can be staged`);
+    if (!this.readyTasks(runId).length) throw new Error(store.listTasks(runId, { state: 'passed', limit: 1 }).length ? 'the matched packets left are in units the run is still working on' : 'no passed packets left to stage');
     return this.exclusive(`staging ${runId}`, async () => {
+      const ready = this.readyTasks(runId);
       // A run with staging off gave its claims back when it finished: batching its functions for a
       // PR takes them again, under the run's current draftedBy.
-      if (row.config.staging === 'off') await this.reclaim(runId, store.listTasks(runId, { state: 'passed', limit: 100_000 }));
-      const r = await stageRun(store, this.deps.repo, events, runId, row.config.prBatchSize, { progress: this.progress });
+      if (row.config.staging === 'off' && store.getRun(runId)?.status === 'completed') await this.reclaim(runId, ready);
+      const r = await stageRun(store, this.deps.repo, events, runId, row.config.prBatchSize, { only: ready.map((t) => t.id), progress: this.progress });
       events.emit('run.restaged', `staged: ${r.staged} batch(es) staged, ${r.failed} failed`, { runId, level: r.failed ? 'warn' : 'info', data: { ...r } });
       return r;
-    });
+    }, { besideRun: true });
+  }
+
+  /**
+   * Matched packets that can be batched now: 'passed', in units where no packet of the run is still
+   * pending, leased or being gated (once the run is over, every passed packet). Open-PR review
+   * fixes are left out with `rolling` (they go to their own PR when the run finishes).
+   */
+  readyTasks(runId: string, opts: { rolling?: boolean } = {}): TaskRow[] {
+    const { store } = this.deps;
+    const open = new Set((store.db.prepare(`SELECT DISTINCT unit FROM tasks WHERE run_id = ? AND state IN ('pending','leased','gating')`).all(runId) as Array<{ unit: string }>).map((r) => r.unit));
+    return store.listTasks(runId, { state: 'passed', limit: 100_000 }).filter((t) => !open.has(t.unit) && !(opts.rolling && t.fix?.check === 'review' && t.fix.prOpen));
+  }
+
+  /**
+   * How close the run is to its next batch: matched functions ready to batch (their unit is done),
+   * matched functions still waiting on packets of their unit, and the batch size. Read only.
+   */
+  batchingStatus(runId: string) {
+    const { store } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    const ready = this.readyTasks(runId, { rolling: true });
+    const passed = store.listTasks(runId, { state: 'passed', limit: 100_000 });
+    const fns = (ts: TaskRow[]) => ts.reduce((n, t) => n + t.functions.length, 0);
+    const readyIds = new Set(ready.map((t) => t.id));
+    const waiting = passed.filter((t) => !readyIds.has(t.id));
+    return {
+      batchSize: row.config.prBatchSize,
+      fullAt: readyThreshold(row.config.prBatchSize),
+      rolling: row.config.staging !== 'off',
+      ready: { functions: fns(ready), packets: ready.length, units: new Set(ready.map((t) => t.unit)).size },
+      waiting: { functions: fns(waiting), packets: waiting.length, units: new Set(waiting.map((t) => t.unit)).size },
+      batching: this.rolling.has(runId),
+    };
+  }
+
+  /**
+   * Rolling batches: while a run is going, every time the ready functions fill a PR batch, batch
+   * them at once (re-verified on the staging worktree, beside the workers), so a PR can be opened
+   * before other contributors claim the same functions. Whole units only, packed densely; batches
+   * under `readyThreshold` wait for more (the run's end batches whatever is left).
+   */
+  private stageReadySoon(runId: string) {
+    queueMicrotask(() => this.stageReady(runId));
+  }
+
+  private stageReady(runId: string) {
+    const run = this.active.get(runId);
+    if (!run || run.cancel.signal.aborted || run.row.config.staging === 'off' || this.rolling.has(runId)) return;
+    if (this.exclusiveHolder || this.discovering) return; // tried again when the slot lock is released
+    const size = run.row.config.prBatchSize;
+    if (!this.fullBins(runId, size).length) return;
+    const { store, repo, events } = this.deps;
+    this.rolling.add(runId);
+    void this.exclusive(`batching the ready functions of ${runId}`, async () => {
+      const seqs: number[] = [];
+      let failed = 0;
+      for (let bin = this.fullBins(runId, size)[0]; bin; bin = this.fullBins(runId, size)[0]) {
+        const s = await stageRun(store, repo, events, runId, size, { only: bin.taskIds, pack: 'dense', progress: this.progress });
+        seqs.push(...s.seqs);
+        failed += s.failed;
+      }
+      if (seqs.length) {
+        events.emit('run.batched_early', `${seqs.length} batch(es) of ready functions made while the run goes on (batch ${seqs.join(', ')})${failed ? `; ${failed} failed re-verification` : ''}: they can be dry-run and submitted now`, {
+          runId, level: failed ? 'warn' : 'info', data: { seqs, failed },
+        });
+      }
+    }, { besideRun: true })
+      .catch((e) => events.emit('run.batch_early_failed', `could not batch the ready functions: ${(e as Error).message}`, { runId, level: 'warn' }))
+      .finally(() => {
+        this.rolling.delete(runId);
+        this.stageReadySoon(runId);
+      });
+  }
+
+  /**
+   * Ready units packed into batches of `size` functions; only batches full enough to stage now.
+   * Packets of a batch that failed re-verification wait for the run's end (or Prepare all).
+   */
+  private fullBins(runId: string, size: number) {
+    const { store } = this.deps;
+    const failedUnits = new Set(store.listBatches(runId).filter((b) => b.status === 'failed' || b.status === 'interrupted').flatMap((b) => b.taskIds.map((id) => store.getTask(id)).filter((t) => t?.state === 'passed').map((t) => t!.unit)));
+    const byUnit = new Map<string, TaskRow[]>();
+    for (const t of this.readyTasks(runId, { rolling: true })) if (!failedUnits.has(t.unit)) byUnit.set(t.unit, [...(byUnit.get(t.unit) ?? []), t]);
+    const total = [...byUnit.values()].flat().reduce((n, t) => n + t.functions.length, 0);
+    if (total < size) return [];
+    const bins = packUnits([...byUnit].map(([unit, items]) => ({ unit, functions: items.reduce((n, t) => n + t.functions.length, 0), items })), size);
+    return bins
+      .map((items) => ({ taskIds: items.map((t) => t.id), functions: items.reduce((n, t) => n + t.functions.length, 0) }))
+      .filter((b) => b.functions >= readyThreshold(size))
+      .sort((a, b) => b.functions - a.functions);
   }
 
   /** Re-record each packet's claim and drafter (`sr claim`), with the finishing model and the run's current person. */
@@ -746,7 +847,7 @@ export class RunEngine {
       }
       events.emit(scope === 'batch' ? 'batch.branch_deleted' : 'batch.dry_run_cleared', `batch ${batch.seq}: ${scope === 'batch' ? 'staged branch cleared' : 'dry run cleared'}`, { runId, data: { deleted } });
       return { deleted };
-    });
+    }, { besideRun: true });
   }
 
   /**
@@ -776,7 +877,7 @@ export class RunEngine {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be changed`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run's batches can be changed`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
     if (!repo.claimCollisions) throw new Error('this repository adapter cannot check claims');
     type Detail = Record<string, unknown> & { lastSubmit?: { dryRun: boolean; submissionStarted?: boolean }; pr?: string; link?: string };
@@ -854,7 +955,7 @@ export class RunEngine {
         withheldTasks: results.reduce((n, r) => n + r.withheldTasks, 0),
         withheldFunctions: results.reduce((n, r) => n + r.withheldFunctions, 0),
       };
-    });
+    }, { besideRun: true });
   }
 
   /**
@@ -865,7 +966,7 @@ export class RunEngine {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run can be staged`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can be staged`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
     if (!repo.claimCollisions) throw new Error('this repository adapter cannot check claims');
     const tasks = store.listTasks(runId, { state: 'withheld', limit: 100_000 });
@@ -898,7 +999,7 @@ export class RunEngine {
         }
       }
       return { returnedTasks: ready.length, stillWithheldTasks: still, collisions: check.collisions, staged };
-    });
+    }, { besideRun: true });
   }
 
   /**
@@ -1026,7 +1127,7 @@ export class RunEngine {
     const { store } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be changed`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run's batches can be changed`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
     const [work] = this.changeableBatches(runId, [batchId]);
     const blame = await this.blockingUnits(runId, batchId);
@@ -1038,7 +1139,7 @@ export class RunEngine {
     return this.exclusive(`setting aside blocking units of ${runId} b${work!.batch.seq}`, async () => {
       const r = await this.holdOutUnits(runId, [{ ...work!, reasons: blame.units }], 'blocked the last dry run');
       return { ...r.batches[0]!, staged: r.staged, unattributed: blame.unattributed, claims: blame.claims.length };
-    });
+    }, { besideRun: true });
   }
 
   /**
@@ -1073,7 +1174,7 @@ export class RunEngine {
     const { store } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be changed`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run's batches can be changed`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
     if (!this.deps.repo.upstreamState) throw new Error('this repository adapter cannot read upstream');
     const work = this.changeableBatches(runId, null);
@@ -1090,7 +1191,7 @@ export class RunEngine {
       const clear = plan.filter((p) => !Object.keys(p.reasons).length).map((p) => p.batch.seq);
       if (clear.length) this.deps.events.emit('batch.upstream_clear', `batch ${clear.join(', ')}: upstream has none of their functions and changed none of their files`, { runId });
       return { ...(await this.holdOutUnits(runId, plan.filter((p) => Object.keys(p.reasons).length), 'upstream already has it or changed it')), clear };
-    });
+    }, { besideRun: true });
   }
 
   /** Put set-aside units back (all, or these units) and re-verify them into batches. */
@@ -1098,7 +1199,7 @@ export class RunEngine {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run can be staged`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can be staged`);
     const pick = units?.length ? new Set(units) : null;
     const tasks = store.listTasks(runId, { state: 'set_aside', limit: 100_000 }).filter((t) => !pick || pick.has(t.unit));
     if (!tasks.length) throw new Error('no set-aside packets');
@@ -1108,7 +1209,7 @@ export class RunEngine {
       events.emit('run.set_aside_returned', `${tasks.length} set-aside packet(s) in ${new Set(tasks.map((t) => t.unit)).size} unit(s) put back into staging`, { runId });
       const staged = await stageRun(store, repo, events, runId, row.config.prBatchSize, { only: tasks.map((t) => t.id), progress: this.progress });
       return { returnedTasks: tasks.length, staged };
-    });
+    }, { besideRun: true });
   }
 
   /** Re-verify every failed or interrupted batch's packets that are still passed, as new batches. */
@@ -1116,7 +1217,7 @@ export class RunEngine {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run can be staged`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can be staged`);
     const batches = store.listBatches(runId).filter((b) => b.status === 'failed' || b.status === 'interrupted');
     const tasks = batches.flatMap((b) => b.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t && t.state === 'passed'));
     if (!tasks.length) throw new Error('no failed batch has passed packets left');
@@ -1125,7 +1226,7 @@ export class RunEngine {
       // Every packet is now in a new batch: staged, or in a new failed batch with its current problems.
       for (const b of batches) store.updateBatch(b.id, { status: 'superseded', detail: { ...(b.detail as Record<string, unknown> | null), supersededBy: staged.seqs } });
       return staged;
-    });
+    }, { besideRun: true });
   }
 
   /**
@@ -1174,7 +1275,7 @@ export class RunEngine {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be fixed`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run's batches can be fixed`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
     if (budgetReached(row)) throw new Error(`run budget $${row.config.budgetUsd} reached ($${row.costUsd.toFixed(2)} spent): raise it before fixing with the agents`);
     const batch = store.getBatch(batchId);
@@ -1205,9 +1306,17 @@ export class RunEngine {
         runId, level: 'warn', data: { seq: b.seq, check: plan.check, requeued, functions: fns },
       });
       return { requeued, functions: fns, kept: b.taskIds.length - requeued };
-    });
-    await this.start(runId);
+    }, { besideRun: true });
+    await this.wakeOrStart(runId);
     return { ok: true as const, seq: batch.seq, check: plan.check, ...r, status: store.getRun(runId)?.status ?? 'running' };
+  }
+
+  /** Packets went back to the queue: a loaded run picks them up, otherwise the run starts again. */
+  private async wakeOrStart(runId: string) {
+    const live = this.active.get(runId);
+    if (!live) return this.start(runId);
+    live.capacityStalled = false;
+    live.wake.notify();
   }
 
   /**
@@ -1237,7 +1346,7 @@ export class RunEngine {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be regrouped`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run's batches can be regrouped`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
     if (!Number.isInteger(max) || max < 1 || max > PR_BATCH_MAX) throw new Error(`a batch holds 1 to ${PR_BATCH_MAX} functions`);
     const plan = this.rebalancePlan(runId, max);
@@ -1263,7 +1372,7 @@ export class RunEngine {
         runId, level: staged.failed ? 'warn' : 'info', data: { from: work.map((w) => w.batch.seq), to: staged.seqs, max },
       });
       return { from: work.map((w) => w.batch.seq), functions: plan.functions, staged };
-    });
+    }, { besideRun: true });
   }
 
   // ---------------------------------------------------------------- pull requests after submission
@@ -1315,7 +1424,7 @@ export class RunEngine {
   /** Every 10 minutes: read the open pull requests of finished runs again (state and new comments). */
   private async autoRefreshPullRequests() {
     if (!this.deps.repo.pullRequestStatus) return;
-    for (const r of this.deps.store.listRuns().filter((x) => x.status === 'completed')) {
+    for (const r of this.deps.store.listRuns().filter((x) => PIPELINE_STATES.has(x.status))) {
       if (!this.prBatches(r.id).some((b) => ((b.detail as { prStatus?: PrStatus } | null)?.prStatus?.state ?? 'open') === 'open')) continue;
       await this.refreshPullRequests(r.id).catch((e) => this.deps.events.emit('batch.pr_refresh_failed', `could not read pull requests: ${(e as Error).message}`, { runId: r.id, level: 'warn' }));
     }
@@ -1372,7 +1481,7 @@ export class RunEngine {
     const { store, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; fix from a review once the run has finished`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; fix from a review once the run has finished`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
     if (budgetReached(row)) throw new Error(`run budget $${row.config.budgetUsd} reached ($${row.costUsd.toFixed(2)} spent): raise it before fixing with the agents`);
     await this.refreshPullRequests(runId, { batchId });
@@ -1411,8 +1520,8 @@ export class RunEngine {
         runId, level: 'warn', data: { seq: batch.seq, requeued, comments: comments.length, open },
       });
       return { requeued, functions: fns, comments: comments.length, open };
-    });
-    await this.start(runId);
+    }, { besideRun: true });
+    await this.wakeOrStart(runId);
     return { ok: true as const, seq: batch.seq, ...r, status: store.getRun(runId)?.status ?? 'running' };
   }
 
@@ -1424,7 +1533,7 @@ export class RunEngine {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; push once it has completed`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; push once it has completed`);
     if (!repo.updatePullRequest) throw new Error('this repository adapter cannot update pull requests');
     const batch = store.getBatch(batchId);
     if (!batch || batch.runId !== runId) throw new Error('batch not found');
@@ -1458,7 +1567,7 @@ export class RunEngine {
       store.clearFix(fixed.map((t) => t.id));
       events.emit('batch.pr_updated', `batch ${batch.seq}: review fixes for ${content.fnCount} function(s) pushed to ${od.pr} as ${r.commit?.slice(0, 10)}`, { runId, data: { seq: batch.seq, pr: od.pr, commit: r.commit } });
       return r;
-    });
+    }, { besideRun: true });
   }
 
   /**
@@ -1512,7 +1621,7 @@ export class RunEngine {
     const { store, repo } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; only a completed run's batches can be prepared`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run's batches can be prepared`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
     if (!repo.submitBatch) throw new Error('this repository adapter cannot submit pull requests');
     const steps = 4;
@@ -1543,9 +1652,9 @@ export class RunEngine {
       }
       // Matched packets in no batch yet (staging was off, or a batch was cleared): batch them too.
       const failedNow = new Set(failedLeft().flatMap((b) => b.taskIds));
-      const loose = store.listTasks(runId, { state: 'passed', limit: 100_000 }).filter((t) => !failedNow.has(t.id));
+      const loose = this.readyTasks(runId).filter((t) => !failedNow.has(t.id));
       if (loose.length) {
-        if (row.config.staging === 'off') await this.reclaim(runId, loose);
+        if (row.config.staging === 'off' && store.getRun(runId)?.status === 'completed') await this.reclaim(runId, loose);
         const s = await stageRun(store, repo, this.deps.events, runId, row.config.prBatchSize, { only: loose.map((t) => t.id), progress: this.progress });
         done.push(`batched the matched packets that had no batch: ${s.staged} staged, ${s.failed} failing`);
       }
@@ -1596,7 +1705,7 @@ export class RunEngine {
       for (const w of changeable()) if (!clean(w.batch) && !needsYou.some((n) => n.seq === w.batch.seq)) needsYou.push({ seq: w.batch.seq, why: 'still has no clean dry run' });
       this.deps.events.emit('run.prepared', `prepared for pull requests: ${ready.length} batch(es) ready to submit${needsYou.length ? `, ${needsYou.length} need you` : ''}`, { runId, level: needsYou.length ? 'warn' : 'info', data: { ready, needsYou, done } });
       return { cancelled: false, done, needsYou, ready, durationMs: Date.now() - startedAt };
-    });
+    }, { besideRun: true });
   }
 
   /**
@@ -1607,7 +1716,7 @@ export class RunEngine {
     const { store, events, repo } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
-    if (row.status !== 'completed') throw new Error(`run is ${row.status}; submit once it has completed`);
+    if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; submit once it has completed`);
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish before submitting');
     const batch = store.getBatch(batchId);
     if (!batch || batch.runId !== runId) throw new Error('batch not found');
@@ -1715,7 +1824,7 @@ export class RunEngine {
         events.emit(opts.dryRun ? 'batch.submit_dry_run' : 'batch.submit_failed', `batch ${batch.seq}: ${opts.dryRun ? `dry run ${r.cancelled ? 'cancelled' : r.ok ? 'clean' : 'found problems'}` : 'NOT submitted'}${why ? ` — ${why}` : ''}`, { runId, level: r.ok ? 'info' : 'warn', data: { blockers: r.blockers, problems: r.problems } });
       }
       return r;
-    }).finally(() => {
+    }, { besideRun: true }).finally(() => {
       if (dryRun && this.dryRuns.get(batchId) === dryRun) this.dryRuns.delete(batchId);
     });
   }
@@ -1747,25 +1856,44 @@ export class RunEngine {
       if (r.ok) store.updateBatch(batchId, { detail: { ...d, prTitle: r.title, claims: r.claims?.length ? r.claims : d.claims ?? [], tidiedAt: Date.now() } });
       events.emit(r.ok ? 'batch.pr_tidied' : 'batch.pr_tidy_failed', `batch ${batch.seq}: ${r.ok ? `pull request is one commit titled "${r.title}"` : `pull request not rewritten: ${r.error}`}`, { runId, level: r.ok ? 'info' : 'warn', data: { pr: d.pr, warnings: r.warnings } });
       return r;
-    });
+    }, { besideRun: true });
   }
 
-  /** Run `fn` with exclusive use of the worktree slots (refused while a run is active). */
-  async exclusive<T>(label: string, fn: () => Promise<T>): Promise<T> {
+  /**
+   * Run `fn` holding the slot lock. With no run loaded it may also borrow the idle worker slots
+   * (and no run can start meanwhile). `besideRun` steps use only the dedicated staging worktree,
+   * so they may also run while a run's workers are busy; other steps are refused then.
+   */
+  async exclusive<T>(label: string, fn: () => Promise<T>, opts: { besideRun?: boolean } = {}): Promise<T> {
     // A step of an operation that already holds the slots (Prepare all for PR) runs inside it.
     if (this.slotsHeld.getStore() === this) return fn();
-    if (this.active.size || this.discovering) throw new Error('a run is active; wait for it to finish before using the worktree slots');
+    if (this.discovering || (this.active.size && !opts.besideRun)) throw new Error('a run is active; wait for it to finish before using the worktree slots');
     if (this.exclusiveHolder) throw new Error(`worktree slots are busy (${this.exclusiveHolder})`);
+    const borrow = this.active.size === 0;
     this.exclusiveHolder = label;
+    this.idleBorrowed = borrow;
     this.beginOperation(label);
-    this.deps.repo.useIdleSlots?.(true);
+    if (borrow) this.deps.repo.useIdleSlots?.(true);
     try {
       return await this.slotsHeld.run(this, fn);
     } finally {
-      this.deps.repo.useIdleSlots?.(false);
+      if (borrow) this.deps.repo.useIdleSlots?.(false);
       this.exclusiveHolder = null;
+      this.idleBorrowed = false;
       this.op = null;
+      this.releaseSlotLock();
     }
+  }
+
+  /** Whoever waits for the slot lock (a finishing run) goes first; then rolling batches get a turn. */
+  private releaseSlotLock() {
+    const waiters = this.slotWaiters.splice(0);
+    for (const w of waiters) w();
+    if (!waiters.length) for (const id of this.active.keys()) this.stageReadySoon(id);
+  }
+
+  private slotLockFree(): Promise<void> {
+    return new Promise((resolve) => this.slotWaiters.push(resolve));
   }
 
   private slotsHeld = new AsyncLocalStorage<RunEngine>();
@@ -2284,6 +2412,8 @@ export class RunEngine {
       store.insertVerdict({ ...verdict, route: ok ? route : 'stale' });
       return ok;
     });
+    // A packet left the queue for good: its unit may be done, and the ready functions may fill a batch.
+    if (moved && to !== 'pending') this.stageReadySoon(run.row.id);
     if (!moved) {
       events.emit('task.stale', `lease lost before routing ${task.functions.map((f) => f.name ?? f.rva).join(', ')}: verdict (${verdict.decision}) kept as stale, task not moved`, {
         runId: run.row.id, taskId: task.id, level: 'warn', data: { decision: verdict.decision, wanted: route },
@@ -2402,6 +2532,15 @@ export class RunEngine {
       this.active.delete(runId);
       return; // cancelled, or paused/hard-stopped with work left
     }
+    // A PR step beside the run (or a rolling batch) may hold the staging worktree: wait for it,
+    // still loaded, so no other run starts in between.
+    while (this.exclusiveHolder) await this.slotLockFree();
+    if (!run.cancel.signal.aborted && this.queue.hasOpenWork(runId)) {
+      // That step sent packets back to the agents (a fix): the run goes on instead of finishing.
+      this.active.delete(runId);
+      await this.start(runId);
+      return this.waitFor(runId);
+    }
     this.exclusiveHolder = `finishing ${runId}`;
     this.beginOperation(`staging the finished run ${runId}`);
     const staging = this.finishStaging(run);
@@ -2413,6 +2552,7 @@ export class RunEngine {
       this.finishing.delete(runId);
       this.exclusiveHolder = null;
       this.op = null;
+      this.releaseSlotLock();
     }
     // Curation runs shadow evaluations on the slots: only once the slot lock is released.
     if (store.getRun(runId)?.status === 'completed' && run.row.config.skills.enabled && run.row.config.skills.autoCurate) queueMicrotask(() => this.afterRun?.(runId));
@@ -2439,6 +2579,11 @@ export class RunEngine {
 }
 
 // ---------------------------------------------------------------- helpers
+
+/** A rolling batch is made once its ready units fill this much of a PR batch (90%, at least one function). */
+export function readyThreshold(batchSize: number) {
+  return Math.max(1, Math.ceil(batchSize * 0.9));
+}
 
 export function partition(found: Array<{ rva: string; name: string | null; size: number; nameOrigin?: string | null; unit: string; readiness?: number }>, maxPerPacket: number) {
   const byUnit = new Map<string, typeof found>();
