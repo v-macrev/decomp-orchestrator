@@ -38,7 +38,16 @@ export interface GateInput {
   signal: AbortSignal;
   /** Unit files accepted earlier in this run: their functions are protected like base-matched ones. */
   carried?: Map<string, string>;
+  /**
+   * The RVAs whose compare results count: the packet's own and those of packets of this unit
+   * accepted earlier in the run. `sr start` keeps one task per class and adds to it, so its
+   * compare also checks functions of dead packets and of functions a rebuild dropped; nothing in
+   * this packet can make those pass. Unset: every result counts.
+   */
+  compared?: Set<string>;
 }
+
+const rvaKey = (rva: string) => Number.parseInt(rva, 16);
 
 export interface GateResult {
   verdict: Verdict;
@@ -152,7 +161,10 @@ export class GateKeeper {
       const release = await this.compareSlots.acquire(signal);
       try {
         const r = await this.repo.compare(input.slot, task, input.prepared, { signal, timeoutMs: input.compareTimeoutMs });
-        compare = r.functions;
+        const counted = input.compared ? new Set([...input.compared].map(rvaKey)) : null;
+        if (counted) for (const f of task.functions) counted.add(rvaKey(f.rva));
+        compare = counted ? r.functions.filter((fn) => counted.has(rvaKey(fn.rva))) : r.functions;
+        r.functions = compare;
         if (r.infraError) {
           infra = true;
           return [{ stage: 'compare', code: 'INFRA_COMPARE', severity: 'block', message: r.infraError }];

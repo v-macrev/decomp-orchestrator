@@ -1427,7 +1427,9 @@ export class RunEngine {
       .map((l) => new RegExp(`^\\s*//\\s*${key}:\\s*(.+)$`, 'i').exec(l)?.[1]?.trim())
       .find((x): x is string => !!x && !/SKELETON_TODO|<fill/i.test(x));
     const codeOrigin = statement('Code origin');
-    const adaptedBodies = statement('Adapted bodies');
+    // No statement at all: the accepted attempt adapted nothing (it passed the origin check without
+    // naming an adapted body), so "none", which leaves upstream's own statement as it is.
+    const adaptedBodies = statement('Adapted bodies') ?? statement('Adapted code') ?? 'none';
     return {
       ...r, model: a.model,
       codeOrigin: codeOrigin && codeOrigin.length >= 8 ? codeOrigin.slice(0, 300) : undefined,
@@ -2614,7 +2616,7 @@ export class RunEngine {
       const carriedMap = new Map(carried.map((c) => [c.path, c.content]));
       const gate = await run.gate.evaluate({
         task, attemptId: attempt.id, slot, prepared, files: mat.files, checks: mergeGateChecks(run.plan),
-        compareTimeoutMs: cfg.compareTimeoutMs, signal, carried: carriedMap,
+        compareTimeoutMs: cfg.compareTimeoutMs, signal, carried: carriedMap, compared: this.comparedRvas(run.row.id, task),
       });
       if (signal.aborted) throw new AbortedError();
       const written = gate.written.length ? gate.written : mat.files;
@@ -2801,6 +2803,15 @@ export class RunEngine {
     // A packet sent back from a failed batch check: its first fix attempt reads what the check reported.
     const fix = task.fix && task.fix.verdictId === task.lastVerdictId ? task.fix : undefined;
     return verdict && attempt ? { verdict, attempt, history, ...(fix ? { fix } : {}) } : null;
+  }
+
+  /** The packet's RVAs and those of packets of its unit this run accepted (the carried functions). */
+  private comparedRvas(runId: string, task: TaskRow): Set<string> {
+    const rows = this.deps.store.db
+      .prepare(`SELECT json_extract(f.value, '$.rva') rva FROM tasks t, json_each(t.functions_json) f
+        WHERE t.run_id = ? AND t.unit = ? AND t.state IN ('passed','staged')`)
+      .all(runId, task.unit) as Array<{ rva: string }>;
+    return new Set([...task.functions.map((f) => f.rva), ...rows.map((r) => r.rva)]);
   }
 
   /** Latest accepted files per path for packets of the same unit in this run. */

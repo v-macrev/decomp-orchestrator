@@ -192,6 +192,28 @@ describe('GateKeeper pipeline', () => {
     expect(mismatch.verdict.decision).toBe('reject');
     expect(mismatch.verdict.stages.find((s) => s.name === 'review')).toBeUndefined();
   });
+
+  it("counts only the packet's and the carried functions' compare results when told which", async () => {
+    // sr start keeps one task per class: its compare also reports a dead packet's function 0x4497c0.
+    const repo = new SimRepo({ slots: 1 });
+    const inner = repo.compare.bind(repo);
+    repo.compare = async (...args: Parameters<SimRepo['compare']>) => {
+      const r = await inner(...args);
+      return { ...r, allPass: false, functions: [...r.functions, { rva: '0x4497c0', name: 'Class0::Gone', result: 'fail', reason: 'function-symbol-missing' } as (typeof r.functions)[number]] };
+    };
+    const t = task();
+    const prepared = await repo.prepare(0, t);
+    const files = [{ path: t.unit, content: unit(repo, t) }];
+    const sig = new AbortController().signal;
+    const gk = new GateKeeper(repo, new Semaphore(1));
+    const all = await gk.evaluate({ task: t, attemptId: 'a', slot: 0, prepared, files, checks: CHECKS, compareTimeoutMs: 1000, signal: sig });
+    expect(all.verdict.findings.map((f) => f.code)).toContain('COMPARE_FUNCTION_SYMBOL_MISSING');
+    const focused = await gk.evaluate({ task: t, attemptId: 'a', slot: 0, prepared, files, checks: CHECKS, compareTimeoutMs: 1000, signal: sig, compared: new Set(['0x100010']) });
+    expect(focused.verdict.decision).toBe('pass');
+    expect(focused.verdict.compare?.map((c) => c.rva)).toEqual(['0x100010']);
+    const carried = await gk.evaluate({ task: t, attemptId: 'a', slot: 0, prepared, files, checks: CHECKS, compareTimeoutMs: 1000, signal: sig, compared: new Set(['0x4497C0']) });
+    expect(carried.verdict.decision).toBe('reject');
+  });
 });
 
 describe('symbol-missing feedback', () => {
