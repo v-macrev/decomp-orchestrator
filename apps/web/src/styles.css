@@ -315,3 +315,26 @@ button.pkt-stat.active { box-shadow: var(--inset-sm); outline: 2px solid var(--a
 .rolling .meter .fill { background: var(--accent); transition: width .4s ease; }
 .rolling .meter .mark { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--muted); opacity: .6; }
 .rolling.full .meter .fill { background: var(--ok); }
+
+/* Packets table: click a header to sort; the funnel shows on hover and filters on that column */
+.pkt-table th { white-space: nowrap; }
+.th-cell { display: inline-flex; align-items: center; gap: 2px; }
+.th-sort { background: none; box-shadow: none; border-radius: 6px; padding: 2px 4px; margin-left: -4px; font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; display: inline-flex; align-items: center; gap: 4px; }
+.th-sort:active:not(:disabled) { box-shadow: none; transform: none; }
+.th-sort .arrow { font-size: 9px; opacity: .35; }
+.th-sort.on { color: var(--text); }
+.th-sort.on .arrow { opacity: 1; color: var(--accent); }
+.th-filter { background: none; box-shadow: none; padding: 3px; border-radius: 6px; line-height: 0; color: var(--muted); opacity: 0; transition: opacity .12s ease; }
+.th-filter:active:not(:disabled) { box-shadow: var(--inset-sm); transform: none; }
+th:hover .th-filter, .th-filter:focus-visible, .th-filter.open, .th-filter.on { opacity: 1; }
+.th-filter.on { color: var(--accent); }
+.th-filter.open { box-shadow: var(--inset-sm); }
+@media (hover: none) { .th-filter { opacity: .6; } }
+.col-pop { position: fixed; z-index: 60; width: 260px; max-width: calc(100vw - 16px); display: grid; gap: 8px; padding: 12px; border-radius: 14px; background: var(--panel); box-shadow: var(--raise); text-transform: none; letter-spacing: 0; font-size: 13px; color: var(--text); }
+.col-pop-list { display: grid; gap: 2px; max-height: 260px; overflow-y: auto; padding: 2px; }
+.col-pop-item { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 8px; cursor: pointer; }
+.col-pop-item:hover { background: var(--panel-2); }
+.col-pop label.small { display: grid; gap: 4px; }
+.pkt-filters { flex-wrap: wrap; gap: 6px; margin: 4px 0; }
+.chip.pkt-filter { color: var(--text); gap: 4px; padding-right: 4px; }
+.chip.pkt-filter .link { padding: 0 4px; font-size: 13px; line-height: 1; }

@@ -27,6 +27,52 @@ export interface RunRow {
   outputTokens: number;
 }
 
+/** The Packets table's sort columns. */
+export const PACKET_SORTS = ['unit', 'functions', 'difficulty', 'state', 'tier', 'worker', 'attempts', 'bytes'] as const;
+export type PacketSort = (typeof PACKET_SORTS)[number];
+/** Value-list filters: a packet shows when its value is one of the ticked ones (none ticked: no filter). */
+export const PACKET_FACETS = ['state', 'difficulty', 'tier', 'worker', 'attempts'] as const;
+export type PacketFacet = (typeof PACKET_FACETS)[number];
+export interface PacketQuery {
+  sort?: PacketSort;
+  dir?: 'asc' | 'desc';
+  /** Per column, the values to keep. A worker of '' is a packet no worker has taken. */
+  values?: Partial<Record<PacketFacet, Array<string | number>>>;
+  /** Contains, case-insensitive: the unit path, and the function names or addresses. */
+  unit?: string;
+  fn?: string;
+  bytesMin?: number;
+  bytesMax?: number;
+  limit?: number;
+  offset?: number;
+}
+export interface PacketPage {
+  rows: Task[];
+  /** Packets and functions the filters keep, over every page. */
+  total: number;
+  functions: number;
+  /** Per value-list column, its values and packet counts under every other column's filter. */
+  facets: Record<PacketFacet, Array<{ value: string | number; n: number }>>;
+}
+/** The SQL behind each column: what it sorts by and what its value list holds. */
+const PACKET_COL: Record<PacketSort, string> = {
+  unit: 'unit',
+  functions: 'json_array_length(functions_json)',
+  difficulty: "CASE COALESCE(difficulty, 'medium') WHEN 'easy' THEN 0 WHEN 'medium' THEN 1 WHEN 'hard' THEN 2 ELSE 3 END",
+  state: "CASE state WHEN 'pending' THEN 0 WHEN 'leased' THEN 1 WHEN 'gating' THEN 2 WHEN 'passed' THEN 3 WHEN 'staged' THEN 4 WHEN 'withheld' THEN 5 WHEN 'set_aside' THEN 6 WHEN 'dead' THEN 7 WHEN 'quarantined' THEN 8 ELSE 9 END",
+  tier: 'tier',
+  worker: "COALESCE(assigned_worker, '')",
+  attempts: 'attempts_total',
+  bytes: 'best_exact_bytes',
+};
+const FACET_COL: Record<PacketFacet, string> = {
+  state: 'state', difficulty: "COALESCE(difficulty, 'medium')", tier: 'tier', worker: "COALESCE(assigned_worker, '')", attempts: 'attempts_total',
+};
+const FACET_ORDER: Record<PacketFacet, string> = {
+  state: PACKET_COL.state, difficulty: PACKET_COL.difficulty, tier: 'tier', worker: "COALESCE(assigned_worker, '')", attempts: 'attempts_total',
+};
+const likeArg = (s: string) => `%${s.replace(/[!%_]/g, (c) => `!${c}`)}%`;
+
 export interface LessonRow {
   id: string;
   source: string;
@@ -256,6 +302,41 @@ export class Store {
       .prepare(`SELECT * FROM tasks WHERE run_id = @runId ${where} ORDER BY priority DESC, rowid LIMIT @limit OFFSET @offset`)
       .all({ runId, state: opts.state, limit: opts.limit ?? 200, offset: opts.offset ?? 0 })
       .map((r) => toTask(r as Raw));
+  }
+  /**
+   * One page of the Packets table: sorted on any column, filtered per column, with the totals the
+   * pager needs and each value-list column's values (counted under the other columns' filters).
+   */
+  queryTasks(runId: string, q: PacketQuery = {}): PacketPage {
+    const params: Record<string, unknown> = { runId };
+    let n = 0;
+    const arg = (v: unknown) => {
+      const k = `p${n++}`;
+      params[k] = v;
+      return `@${k}`;
+    };
+    // Each filter's SQL, keyed by its column so a facet can leave its own out.
+    const conds: Array<[string, string]> = [];
+    for (const f of PACKET_FACETS) {
+      const vals = q.values?.[f];
+      if (vals?.length) conds.push([f, `${FACET_COL[f]} IN (${vals.map((v) => arg(v)).join(', ')})`]);
+    }
+    if (q.unit?.trim()) conds.push(['unit', `unit LIKE ${arg(likeArg(q.unit.trim()))} ESCAPE '!'`]);
+    if (q.fn?.trim()) conds.push(['fn', `functions_json LIKE ${arg(likeArg(q.fn.trim()))} ESCAPE '!'`]);
+    if (Number.isFinite(q.bytesMin)) conds.push(['bytes', `best_exact_bytes >= ${arg(q.bytesMin)}`]);
+    if (Number.isFinite(q.bytesMax)) conds.push(['bytes', `best_exact_bytes <= ${arg(q.bytesMax)}`]);
+    const where = (skip?: string) => ['run_id = @runId', ...conds.filter(([c]) => c !== skip).map(([, s]) => s)].join(' AND ');
+    const sort = q.sort && PACKET_SORTS.includes(q.sort) ? q.sort : null;
+    const dir = q.dir === 'desc' ? 'DESC' : 'ASC';
+    const order = sort ? `${PACKET_COL[sort]} ${dir}, priority DESC, rowid` : 'priority DESC, rowid';
+    const limit = Math.max(1, Math.min(1000, Math.floor(q.limit ?? 200)));
+    const offset = Math.max(0, Math.floor(q.offset ?? 0));
+    const rows = this.db.prepare(`SELECT * FROM tasks WHERE ${where()} ORDER BY ${order} LIMIT ${limit} OFFSET ${offset}`).all(params).map((r) => toTask(r as Raw));
+    const tot = this.db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(json_array_length(functions_json)), 0) f FROM tasks WHERE ${where()}`).get(params) as { n: number; f: number };
+    const facets = Object.fromEntries(PACKET_FACETS.map((f) => [f, this.db.prepare(
+      `SELECT ${FACET_COL[f]} value, COUNT(*) n FROM tasks WHERE ${where(f)} GROUP BY 1 ORDER BY MIN(${FACET_ORDER[f]})`,
+    ).all(params) as Array<{ value: string | number; n: number }>])) as PacketPage['facets'];
+    return { rows, total: tot.n, functions: tot.f, facets };
   }
   taskCounts(runId: string): Record<string, number> {
     const rows = this.db.prepare('SELECT state, COUNT(*) n FROM tasks WHERE run_id = ? GROUP BY state').all(runId) as Raw[];

@@ -133,7 +133,10 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    the run's end waits for a step in progress. The PR batches tab shows **Next PR batch: N of 40**
    (`GET /api/runs/:id/batching`: functions ready, those waiting on their unit, the batch size).
    The Packets tab pages through packets (50 to 500 per page) and counts functions, not only
-   packets, for every state.
+   packets, for every state. Click a column header to sort on it (ascending, descending, off); the
+   funnel that shows when you hover a header filters on that column: tick values (state,
+   difficulty, tier, worker, attempts), type part of a unit path or function name, or give a byte
+   range (`GET /api/runs/:id/packets?q=<json>`: rows, totals and each column's values).
    **AI account outages**: when every account the run's workers can use is down (disabled, out of
    quota or daily budget, circuit open, or rate limited for over a minute), the run pauses on its
    own and resumes on its own as soon as one is back, even after a restart. Calls that fail during

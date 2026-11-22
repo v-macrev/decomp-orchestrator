@@ -14,6 +14,7 @@ import type { App } from '../app.js';
 import { fromRoot } from '../config.js';
 import { ingestGithubReviews, seedRepoLessons } from '../orchestrator/lessons.js';
 import { runMetrics } from '../telemetry/metrics.js';
+import { PACKET_FACETS, PACKET_SORTS } from '../db/store.js';
 import { flowAssignments } from '../pool/assignments.js';
 import { readCodexUsage } from '../providers/codexUsage.js';
 
@@ -466,6 +467,29 @@ export async function buildServer(app: App) {
   f.get('/api/runs/:id/tasks', async (req: FastifyRequest<{ Params: { id: string }; Querystring: { state?: string; limit?: string; offset?: string } }>) => {
     const q = req.query;
     return store.listTasks(req.params.id, { state: q.state as never, limit: Math.min(1000, Number(q.limit ?? 200)), offset: Number(q.offset ?? 0) });
+  });
+  // The Packets table: `q` is the JSON of a PacketQuery (sort, per-column filters, page).
+  const PacketQuery = z.object({
+    sort: z.enum(PACKET_SORTS).optional(),
+    dir: z.enum(['asc', 'desc']).optional(),
+    values: z.object(Object.fromEntries(PACKET_FACETS.map((k) => [k, z.array(z.union([z.string().max(200), z.number()])).max(500).optional()]))).partial().optional(),
+    unit: z.string().max(200).optional(),
+    fn: z.string().max(200).optional(),
+    bytesMin: z.number().optional(),
+    bytesMax: z.number().optional(),
+    limit: z.number().int().min(1).max(1000).optional(),
+    offset: z.number().int().min(0).optional(),
+  });
+  f.get('/api/runs/:id/packets', async (req: FastifyRequest<{ Params: { id: string }; Querystring: { q?: string } }>, reply) => {
+    let raw: unknown = {};
+    try {
+      raw = req.query.q ? JSON.parse(req.query.q) : {};
+    } catch {
+      return reply.code(400).send({ error: 'q is not JSON' });
+    }
+    const q = PacketQuery.safeParse(raw);
+    if (!q.success) return reply.code(400).send({ error: q.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ') });
+    return store.queryTasks(req.params.id, q.data as never);
   });
   f.get('/api/runs/:id/batching', async (req: FastifyRequest<{ Params: { id: string } }>) => engine.batchingStatus(req.params.id));
   f.get('/api/runs/:id/batches', async (req: FastifyRequest<{ Params: { id: string } }>) => engine.listBatches(req.params.id));

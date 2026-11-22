@@ -2,10 +2,11 @@
 // Runs: a list of runs, a guided view of one run (progress, what to do next), its PR batches,
 // packets and telemetry. Each screen leads with the one next step; details sit one click away.
 import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from 'react';
-import type { Flow, Task, TelemetryEvent } from '@decomp/core';
-import { api, stream, type AccountView, type Batch, type BatchingStatus, type RunOutage, type CapacityPlan, type ClaimCollision, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
+import type { Flow, TelemetryEvent } from '@decomp/core';
+import { api, stream, type AccountView, type Batch, type BatchingStatus, type RunOutage, type CapacityPlan, type ClaimCollision, type PacketFacet, type PacketFilters, type PacketPage, type PacketSort, type OperationProgress, type GatherPreview, type Metrics, type RoutingMetrics, type RunSkillMetrics, type RunSummary, type WorkerQuota } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 import { TaskDrawer } from '../components/TaskDrawer';
+import { PACKET_COLS, PacketHead, clearCol, colFiltered } from '../components/PacketHead';
 
 const STATE_COLORS: Record<string, string> = {
   staged: 'var(--ok)', passed: 'var(--ok)', gating: 'var(--info)', leased: 'var(--accent)', pending: 'var(--muted)',
@@ -280,7 +281,6 @@ function Ring({ value, label }: { value: number; label: string }) {
 type RunTab = 'overview' | 'batches' | 'packets' | 'details';
 
 const PAGE_SIZES = [50, 100, 200, 500];
-const PACKET_STATES = ['pending', 'leased', 'gating', 'passed', 'staged', 'withheld', 'set_aside', 'dead', 'quarantined', 'cancelled'];
 /** The Packets tab's summary: functions (and packets) per group of states; a one-state group filters. */
 const PACKET_GROUPS: Array<[string, string[], string]> = [
   ['matched', ['passed', 'staged', 'withheld', 'set_aside'], 'ok'],
@@ -311,12 +311,33 @@ function Pager({ page, pages, total, pageSize, onPage, onPageSize }: { page: num
   );
 }
 
+/** A filter chip's text: the ticked values, the text searched, or the byte range. */
+function filterText(key: PacketSort, f: PacketFilters, text: (facet: PacketFacet, v: string | number) => string): string {
+  const k = PACKET_COLS.find((c) => c.key === key)!.filter;
+  if (k.kind === 'values') {
+    const vs = (f.values?.[k.facet] ?? []).map((v) => text(k.facet, v));
+    return vs.length > 3 ? `${vs.slice(0, 3).join(', ')} +${vs.length - 3}` : vs.join(', ');
+  }
+  if (k.kind === 'text') return `“${f[k.field]}”`;
+  if (f.bytesMin !== undefined && f.bytesMax !== undefined) return `${f.bytesMin}–${f.bytesMax}`;
+  return f.bytesMin !== undefined ? `≥ ${f.bytesMin}` : `≤ ${f.bytesMax}`;
+}
+
 function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: () => void; onDeleted: () => void }) {
   const [m, setM] = useState<Metrics | null>(null);
   const [events, setEvents] = useState<TelemetryEvent[]>([]);
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [pkts, setPkts] = useState<PacketPage | null>(null);
   const [batches, setBatches] = useState<Batch[]>([]);
-  const [filter, setFilter] = useState('');
+  const [filters, setFiltersRaw] = useState<PacketFilters>({});
+  const [sort, setSortRaw] = useState<{ key: PacketSort | null; dir: 'asc' | 'desc' }>(() => {
+    try {
+      const s = JSON.parse(localStorage.getItem('packetsSort') ?? 'null') as { key: PacketSort | null; dir: 'asc' | 'desc' } | null;
+      return s && (s.key === null || PACKET_COLS.some((c) => c.key === s.key)) ? s : { key: null, dir: 'asc' };
+    } catch {
+      return { key: null, dir: 'asc' };
+    }
+  });
+  const pktSeq = useRef(0);
   const [task, setTask] = useState<string | null>(null);
   const [tab, setTab] = useState<RunTab | null>(null);
   const [retryingFailed, setRetryingFailed] = useState(false);
@@ -333,6 +354,21 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
       return 100;
     }
   });
+  // A new filter or sort starts from the first page.
+  const setFilters = (f: PacketFilters) => {
+    setFiltersRaw(f);
+    setPage(0);
+  };
+  const setSort = (key: PacketSort | null, dir: 'asc' | 'desc') => {
+    setSortRaw({ key, dir });
+    setPage(0);
+    try {
+      localStorage.setItem('packetsSort', JSON.stringify({ key, dir }));
+    } catch {
+      /* private window: for this visit only */
+    }
+  };
+  const filterKey = JSON.stringify(filters);
   const choosePageSize = (n: number) => {
     setPageSize(n);
     setPage(0);
@@ -353,14 +389,17 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
   }, [runId]);
   useEffect(() => {
     const load = () => {
-      api.tasks(runId, filter || undefined, page * pageSize, pageSize).then(setTasks).catch(() => undefined);
+      // Only the newest answer shows: an older one landing late would undo a filter just set.
+      const seq = ++pktSeq.current;
+      api.packets(runId, { ...(JSON.parse(filterKey) as PacketFilters), sort: sort.key ?? undefined, dir: sort.dir, offset: page * pageSize, limit: pageSize })
+        .then((p) => { if (seq === pktSeq.current) setPkts(p); }).catch(() => undefined);
       api.batches(runId).then(setBatches).catch(() => undefined);
       api.batching(runId).then(setBatching).catch(() => undefined);
     };
     load();
     const t = setInterval(load, 4_000);
     return () => clearInterval(t);
-  }, [runId, filter, page, pageSize]);
+  }, [runId, filterKey, sort.key, sort.dir, page, pageSize]);
 
   if (!m) return <div className="panel muted">Loading the run…</div>;
   const f = m.functions;
@@ -420,9 +459,30 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
   const packetTotal = Object.values(m.tasks).reduce((a, b) => a + b, 0);
   const fnTotal = Object.values(f).reduce((a, b) => a + b, 0);
   // The pager counts what the filter shows; a page past the end (packets moved on) goes to the last one.
-  const shownTotal = filter ? m.tasks[filter] ?? 0 : packetTotal;
+  const shownTotal = pkts?.total ?? 0;
+  const stateOnly = filters.values?.state?.length === 1 ? String(filters.values.state[0]) : null;
+  const filtered = PACKET_COLS.filter((c) => colFiltered(c, filters));
   const pages = Math.max(1, Math.ceil(shownTotal / pageSize));
   if (page >= pages) setPage(pages - 1);
+  const tierName = (v: number) => m.routing?.tiers[v];
+  const valueText = (fc: PacketFacet, v: string | number): string => {
+    if (fc === 'worker') return v === '' ? 'none yet' : String(v);
+    if (fc === 'tier') {
+      const t = tierName(Number(v));
+      return t ? `${t.capability} ${v}` : String(v);
+    }
+    if (fc === 'state') return String(v).replace('_', ' ');
+    return String(v);
+  };
+  const valueLabel = (fc: PacketFacet, v: string | number): ReactNode => {
+    if (fc === 'state') return <span className={`chip ${v}`}>{String(v)}</span>;
+    if (fc === 'tier') {
+      const t = tierName(Number(v));
+      return t ? <><span className={`cap ${t.capability}`}>{t.capability}</span> <span className="muted">{v}</span></> : String(v);
+    }
+    if (fc === 'worker') return v === '' ? <span className="muted">none yet</span> : <span className="mono" style={{ fontSize: 11 }}>{String(v)}</span>;
+    return valueText(fc, v);
+  };
   const sentence = (() => {
     switch (status) {
       case 'running': return `Working on it: ${inFlight} function(s) in progress, ${m.queueDepth} waiting${m.throughput.etaMinutes !== null ? `, about ${m.throughput.etaMinutes} min left` : ''}.`;
@@ -526,10 +586,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
         <div className="panel">
           <div className="row" style={{ marginBottom: 8 }}>
             <h2 className="grow" style={{ margin: 0 }}>Packets</h2>
-            <select value={filter} onChange={(e) => { setFilter(e.target.value); setPage(0); }} aria-label="Filter by state">
-              <option value="">all states ({fmtCount(packetTotal)} packets · {fmtCount(fnTotal)} functions)</option>
-              {PACKET_STATES.map((s) => <option key={s} value={s}>{s} ({fmtCount(m.tasks[s] ?? 0)} packets · {fmtCount(f[s] ?? 0)} functions)</option>)}
-            </select>
+            {filtered.length > 0 && pkts && <span className="muted small">{fmtCount(pkts.total)} of {fmtCount(packetTotal)} packets · {fmtCount(pkts.functions)} of {fmtCount(fnTotal)} functions</span>}
           </div>
           <div className="pkt-sum" aria-label="Functions by state">
             {PACKET_GROUPS.map(([label, states, tone]) => {
@@ -538,20 +595,32 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
               const body = <><b>{fmtCount(fns)}</b><span>{label}</span><span className="muted small">{fmtCount(pk)} packet{pk === 1 ? '' : 's'}</span></>;
               const title = `${fmtCount(fns)} function(s) in ${fmtCount(pk)} packet(s)`;
               if (states.length > 1) return <div key={label} className={`pkt-stat ${tone}`} title={`${title}: ${states.join(', ')}`}>{body}</div>;
-              const on = filter === states[0];
+              const on = stateOnly === states[0];
               return (
-                <button key={label} className={`pkt-stat ${tone} ${on ? 'active' : ''}`} disabled={!pk && !on} aria-pressed={on} onClick={() => { setFilter(on ? '' : states[0]!); setPage(0); }} title={`${title}; click to ${on ? 'show every state' : 'show only these'}`}>
+                <button key={label} className={`pkt-stat ${tone} ${on ? 'active' : ''}`} disabled={!pk && !on} aria-pressed={on} onClick={() => setFilters({ ...filters, values: { ...filters.values, state: on ? [] : [states[0]!] } })} title={`${title}; click to ${on ? 'show every state' : 'show only these'}`}>
                   {body}
                 </button>
               );
             })}
           </div>
+          {filtered.length > 0 && (
+            <div className="row pkt-filters" aria-label="Filters">
+              <span className="muted small">Filtered by</span>
+              {filtered.map((c) => (
+                <span key={c.key} className="chip pkt-filter">
+                  {c.label}: {filterText(c.key, filters, valueText)}
+                  <button className="link" aria-label={`Remove the ${c.label.toLowerCase()} filter`} onClick={() => setFilters(clearCol(c, filters))}>×</button>
+                </span>
+              ))}
+              <button className="link small" onClick={() => setFilters({})}>Clear all</button>
+            </div>
+          )}
           <Pager page={page} pages={pages} total={shownTotal} pageSize={pageSize} onPage={setPage} onPageSize={choosePageSize} />
           <div style={{ overflowX: 'auto' }}>
-            <table>
-              <thead><tr><th>Unit</th><th>Functions</th><th>Difficulty</th><th>State</th><th>Tier</th><th>Worker</th><th>Attempts</th><th>Best bytes</th></tr></thead>
+            <table className="pkt-table">
+              <PacketHead sort={sort.key} dir={sort.dir} onSort={setSort} filters={filters} onFilters={setFilters} facets={pkts?.facets ?? null} valueLabel={valueLabel} />
               <tbody>
-                {tasks.map((t) => {
+                {(pkts?.rows ?? []).map((t) => {
                   const tier = m.routing?.tiers[t.tier];
                   return (
                     <tr key={t.id} className="click" onClick={() => setTask(t.id)}>
@@ -565,7 +634,7 @@ function RunDetail({ runId, onChange, onDeleted }: { runId: string; onChange: ()
                     </tr>
                   );
                 })}
-                {tasks.length === 0 && <tr><td colSpan={8} className="muted">No packets in this state.</td></tr>}
+                {pkts && pkts.rows.length === 0 && <tr><td colSpan={8} className="muted">{filtered.length ? <>No packets match these filters. <button className="link" onClick={() => setFilters({})}>Clear all</button></> : 'No packets yet.'}</td></tr>}
               </tbody>
             </table>
           </div>

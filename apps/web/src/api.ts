@@ -29,6 +29,29 @@ async function req<T>(method: string, path: string, body?: unknown): Promise<T> 
   return data as T;
 }
 
+export type PacketSort = 'unit' | 'functions' | 'difficulty' | 'state' | 'tier' | 'worker' | 'attempts' | 'bytes';
+export type PacketFacet = 'state' | 'difficulty' | 'tier' | 'worker' | 'attempts';
+/** The Packets table's sort and per-column filters (a worker of '' is a packet no worker has taken). */
+export interface PacketFilters {
+  values?: Partial<Record<PacketFacet, Array<string | number>>>;
+  unit?: string;
+  fn?: string;
+  bytesMin?: number;
+  bytesMax?: number;
+}
+export interface PacketQuery extends PacketFilters {
+  sort?: PacketSort;
+  dir?: 'asc' | 'desc';
+  limit?: number;
+  offset?: number;
+}
+export interface PacketPage {
+  rows: Task[];
+  total: number;
+  functions: number;
+  facets: Record<PacketFacet, Array<{ value: string | number; n: number }>>;
+}
+
 export interface AccountView {
   accountId: string;
   label: string;
@@ -423,6 +446,7 @@ export const api = {
   metrics: (id: string) => req<Metrics>('GET', `/api/runs/${id}/metrics`),
   runAction: (id: string, action: 'pause' | 'resume' | 'cancel', body?: unknown) => req('POST', `/api/runs/${id}/${action}`, body ?? {}),
   tasks: (id: string, state?: string, offset = 0, limit = 200) => req<Task[]>('GET', `/api/runs/${id}/tasks?limit=${limit}&offset=${offset}${state ? `&state=${state}` : ''}`),
+  packets: (id: string, q: PacketQuery) => req<PacketPage>('GET', `/api/runs/${id}/packets?q=${encodeURIComponent(JSON.stringify(q))}`),
   batching: (id: string) => req<BatchingStatus>('GET', `/api/runs/${id}/batching`),
   batches: (id: string) => req<Batch[]>('GET', `/api/runs/${id}/batches`),
   applyRunFlow: (id: string) => req<RunSummary>('POST', `/api/runs/${id}/flow`, {}),
