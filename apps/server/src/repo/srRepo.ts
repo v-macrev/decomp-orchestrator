@@ -641,14 +641,14 @@ export class SrRepo implements RepoAdapter {
    * the target-hash shards and offered with a class in contributor-targets.json, at the base revision.
    */
   private async claimTimeRvas(buildId: string | null): Promise<Set<number>> {
-    if (!buildId || !/^[w.-]+$/.test(buildId)) return new Set();
+    if (!buildId || !/^[\w.-]+$/.test(buildId)) return new Set();
     const out = new Set<number>();
     try {
       const offered = JSON.parse((await this.baseFile('data/target-hashes/contributor-targets.json')) ?? '{}') as { functions?: Array<{ rva?: unknown; class?: unknown }> };
       const manifest = JSON.parse((await this.baseFile(`data/target-hashes/${buildId}.json`)) ?? '{}') as { shards?: Array<{ path?: unknown }> };
       const published = new Set<number>();
       for (const shard of manifest.shards ?? []) {
-        if (typeof shard.path !== 'string' || !/^[w./-]+$/.test(shard.path)) continue;
+        if (typeof shard.path !== 'string' || !/^[\w./-]+$/.test(shard.path)) continue;
         const rows = (JSON.parse((await this.baseFile(shard.path)) ?? '{}') as { functions?: Array<{ rva?: unknown }> }).functions ?? [];
         for (const r of rows) if (typeof r.rva === 'number') published.add(r.rva);
       }
