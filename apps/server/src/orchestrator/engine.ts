@@ -1171,6 +1171,44 @@ export class RunEngine {
     // Findings in files the batch does not write (reached because they include a header it
     // changes): the line is wrong upstream, so no change to these packets fixes it.
     const outside: string[] = [];
+    // Includes of a file, from the batch's version where it writes it, else the base's.
+    const content = new Map(batchContent(store, runId, tasks).files.map((f) => [f.path, f.content]));
+    const includesOf = new Map<string, string[]>();
+    const includes = async (path: string) => {
+      if (!includesOf.has(path)) {
+        const text = content.get(path) ?? (await repo.baseFile(path).catch(() => null)) ?? '';
+        includesOf.set(path, [...text.matchAll(/^\s*#\s*include\s*[<"]([^>"]+)[>"]/gm)].map((m) => m[1]!.replace(/\\/g, '/')));
+      }
+      return includesOf.get(path)!;
+    };
+    const resolves = (from: string, inc: string, to: string) => {
+      const dir = from.includes('/') ? from.slice(0, from.lastIndexOf('/')) : '';
+      return posix.normalize(dir ? `${dir}/${inc}` : inc) === to || to.endsWith(`/${posix.normalize(inc)}`);
+    };
+    // Whether `from` reaches `target` through its includes (a few levels, a bounded number of files).
+    const reaches = async (from: string, target: string) => {
+      const seen = new Set([from]);
+      let frontier = [from];
+      for (let depth = 0; depth < 6 && frontier.length && seen.size < 400; depth++) {
+        const next: string[] = [];
+        for (const f of frontier) {
+          for (const inc of await includes(f)) {
+            if (resolves(f, inc, target)) return true;
+            const dir = f.includes('/') ? f.slice(0, f.lastIndexOf('/')) : '';
+            const local = posix.normalize(dir ? `${dir}/${inc}` : inc);
+            const root = f.match(/^([^/]+)\//)?.[1];
+            for (const cand of [local, ...(root ? [`${root}/${posix.normalize(inc)}`] : [])]) {
+              if (!seen.has(cand) && !cand.startsWith('..') && /\.(h|hpp|hh|inl)$/i.test(cand)) {
+                seen.add(cand);
+                next.push(cand);
+              }
+            }
+          }
+        }
+        frontier = next;
+      }
+      return false;
+    };
     for (const b of d.lastSubmit?.blockers ?? []) {
       if (/another open claim or pull request/i.test(b)) {
         claims.push(b);
@@ -1180,12 +1218,14 @@ export class RunEngine {
       let hit = path ? owners(path) : [];
       if (path && !hit.length) {
         outside.push(b);
-        const text = (await repo.baseFile(path).catch(() => null)) ?? '';
-        const dir = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
-        const includes = [...text.matchAll(/^\s*#\s*include\s*[<"]([^>"]+)[>"]/gm)].map((m) => m[1]!.replace(/\\/g, '/'));
+        // The file includes a header the batch changes, or a file the batch writes includes it
+        // (directly or through other headers) and the screen followed that include.
         const all = [...new Set([...filesOf.values()].flat())];
-        const included = all.filter((f) => includes.some((inc) => posix.normalize(dir ? `${dir}/${inc}` : inc) === f || f.endsWith(`/${inc}`)));
-        hit = tasks.filter((t) => filesOf.get(t.id)!.some((f) => included.includes(f)));
+        const own = await includes(path);
+        const included = all.filter((f) => own.some((inc) => resolves(path, inc, f)));
+        const reaching: string[] = [];
+        if (!included.length) for (const f of all) if (await reaches(f, path)) reaching.push(f);
+        hit = tasks.filter((t) => filesOf.get(t.id)!.some((f) => included.includes(f) || reaching.includes(f)));
       }
       if (!hit.length) {
         unattributed.push(b);
@@ -1200,7 +1240,19 @@ export class RunEngine {
       if (!hit.length) unattributed.push(p);
       for (const u of new Set(hit.map((t) => t.unit))) reasons.set(u, [...(reasons.get(u) ?? []), p]);
     }
-    return { units: Object.fromEntries(reasons), unattributed, claims, outside };
+    // Upstream may have fixed a file the batch does not write after this server pinned its base:
+    // then the finding is stale, and setting packets aside would hold back work for nothing.
+    const outsideFiles = [...new Set(outside.map((b) => findingPath(b)!))];
+    const drift = outsideFiles.length && repo.baseDrift ? await repo.baseDrift(outsideFiles).catch(() => null) : null;
+    const fixedUpstream = drift?.behind ? outside.filter((b) => drift.changed.includes(findingPath(b)!)) : [];
+    return { units: Object.fromEntries(reasons), unattributed, claims, outside, fixedUpstream, drift: drift?.behind ? drift : null };
+  }
+
+  /** Why a batch's dry-run findings are stale: upstream changed those files after the server pinned its base. */
+  private staleBaseMessage(blame: { fixedUpstream: string[]; drift: { pinned: string; upstream: string; behind: number } | null }) {
+    if (!blame.drift || !blame.fixedUpstream.length) return null;
+    const files = [...new Set(blame.fixedUpstream.map((b) => findingPath(b)!))];
+    return `upstream changed ${files.join(', ')} after this server pinned its base (${blame.drift.pinned.slice(0, 10)}, ${blame.drift.behind} commit(s) behind upstream ${blame.drift.upstream.slice(0, 10)}), so the dry run checked an old version. Nothing in this batch needs setting aside for it: restart the server (it pins the current upstream when it starts) and run the dry run again`;
   }
 
   /** Batches whose packets may still be changed: staged, never submitted (a dry run is fine). */
@@ -1284,6 +1336,15 @@ export class RunEngine {
     if (this.editingAttribution.has(runId)) throw new Error('wait for claim attribution to finish first');
     const [work] = this.changeableBatches(runId, [batchId]);
     const blame = await this.blockingUnits(runId, batchId);
+    // Every blocker in a file upstream changed since the pin: a restart, not a set-aside.
+    const stale = this.staleBaseMessage(blame);
+    const live = (d: string[] | undefined) => (d ?? []).filter((b) => !blame.fixedUpstream.includes(b));
+    for (const u of Object.keys(blame.units)) {
+      const rs = live(blame.units[u]);
+      if (rs.length) blame.units[u] = rs;
+      else delete blame.units[u];
+    }
+    if (stale && !Object.keys(blame.units).length) throw new Error(stale);
     if (!Object.keys(blame.units).length) {
       throw new Error(blame.claims.length && !blame.unattributed.length
         ? 'the last dry run only found other contributors\' claims: use "Drop colliding packets"'
@@ -1603,7 +1664,9 @@ export class RunEngine {
     const units = new Map(Object.entries(blame.units).map(([u, rs]) => [u, rs.filter((r) => !/upstream/i.test(r) && !notOurs.has(r))] as const).filter(([, rs]) => rs.length));
     const targets = work!.tasks.filter((t) => units.has(t.unit)).map((task) => ({ task, reasons: units.get(task.unit)! }));
     const outsideFiles = [...new Set(blame.outside.map((b) => findingPath(b)!))];
+    const stale = this.staleBaseMessage(blame);
     const why = targets.length ? null
+      : stale && blame.fixedUpstream.length === blame.outside.length ? stale
       : outsideFiles.length ? `the dry run blames ${outsideFiles.join(', ')}, which this batch does not write: ${outsideFiles.length === 1 ? 'it includes' : 'they include'} a header the batch changes, and the line is wrong upstream. No change to these packets fixes that: set aside the units that change the header (they come back once upstream fixes the file)`
       : Object.keys(blame.units).length ? 'upstream already has or changed what the dry run blamed: set those units aside'
       : blame.claims.length ? 'only other contributors\' claims block it, and no code change fixes that'
@@ -2043,7 +2106,11 @@ export class RunEngine {
             continue;
           }
           const blame = await this.blockingUnits(runId, w.batch.id);
-          if (Object.keys(blame.units).length) {
+          const stale = this.staleBaseMessage(blame);
+          const live = Object.values(blame.units).some((rs) => rs.some((b) => !blame.fixedUpstream.includes(b)));
+          if (stale && !live) {
+            needsYou.push({ seq: w.batch.seq, why: stale.slice(0, 400) });
+          } else if (live) {
             phase(3, `setting aside what blocked batch ${w.batch.seq}`);
             const s = await this.setAsideBlocking(runId, w.batch.id);
             done.push(`batch ${w.batch.seq}: set aside ${s.setAsideFunctions} function(s) its dry run blamed`);

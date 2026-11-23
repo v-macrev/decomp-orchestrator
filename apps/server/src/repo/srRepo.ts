@@ -161,7 +161,12 @@ export class SrRepo implements RepoAdapter {
     const repo = this.cfg.repoPath;
     if (!this.host.exists(this.p.join(repo, 'tools', 'contrib.py'))) throw new Error(`${repo} is not a skyrim_decomp checkout (tools/contrib.py missing)`);
     if (!this.host.exists(this.cfg.localDir)) throw new Error(`SR_LOCAL_DIR ${this.cfg.localDir} does not exist; run ./sr setup first`);
-    const rev = await this.git(repo, ['rev-parse', '--verify', `${this.cfg.baseRef}^{commit}`]);
+    // Pin the upstream branch as it is now, not as the checkout last fetched it: otherwise the
+    // base (and every "what upstream has" check) stays wherever the last manual fetch left it.
+    // Offline, the last fetched state is pinned as before.
+    const base = await this.baseRemote().catch(() => null);
+    if (base) await this.git(repo, ['fetch', '--no-tags', '--no-recurse-submodules', '--', base.remote, `+refs/heads/${base.branch}:refs/remotes/${base.tracking}`], 120_000);
+    const rev =await this.git(repo, ['rev-parse', '--verify', `${this.cfg.baseRef}^{commit}`]);
     if (rev.code !== 0) throw new Error(`cannot resolve base ref ${this.cfg.baseRef}: ${rev.stderr.trim()}`);
     this.sha = rev.stdout.trim();
     const mk = await this.host.run('mkdir', ['-p', this.cfg.worktreeRoot], { cwd: repo, timeoutMs: 30_000 });
@@ -256,25 +261,51 @@ export class SrRepo implements RepoAdapter {
     return this.wt(0);
   }
 
-  /** Fetch the configured upstream branch into an app-owned ref, leaving the compiler base pinned. */
-  private async syncedInventory() {
-    const { repoPath, baseRef } = this.cfg;
-    const tracking = baseRef.replace(/^refs\/remotes\//, '');
-    const remotes = await this.git(repoPath, ['remote']);
+  /** The remote and branch the base ref tracks (`origin/main` → origin, main), or null for a plain ref. */
+  private async baseRemote() {
+    const tracking = this.cfg.baseRef.replace(/^refs\/remotes\//, '');
+    const remotes = await this.git(this.cfg.repoPath, ['remote']);
     if (remotes.code !== 0) throw new InfraError('could not read the repository remotes');
     const remote = remotes.stdout.trim().split(/\r?\n/).filter(Boolean)
       .sort((a, b) => b.length - a.length).find((name) => tracking.startsWith(`${name}/`));
-    let revision = this.sha;
-    if (remote) {
-      const branch = tracking.slice(remote.length + 1);
-      const ref = `refs/decomp/claim-base/${tracking}`;
-      const fetched = await this.git(repoPath, ['fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--refmap=', '--', remote, `+refs/heads/${branch}:${ref}`], 120_000);
-      if (fetched.code !== 0) throw new InfraError(`could not sync ${tracking}: ${fetched.stderr.trim().slice(0, 300)}`);
-      const head = await this.git(repoPath, ['rev-parse', '--verify', `${ref}^{commit}`]);
-      if (head.code !== 0) throw new InfraError(`could not resolve synced ${tracking}`);
-      revision = head.stdout.trim();
-    }
-    const result = await this.git(repoPath, ['show', `${revision}:data/progress.json`]);
+    return remote ? { remote, branch: tracking.slice(remote.length + 1), tracking } : null;
+  }
+
+  /** Fetch the configured upstream branch into an app-owned ref and return its head; the compiler base stays pinned. */
+  private async syncedHead() {
+    const base = await this.baseRemote();
+    if (!base) return this.sha;
+    const ref = `refs/decomp/claim-base/${base.tracking}`;
+    const fetched = await this.git(this.cfg.repoPath, ['fetch', '--no-tags', '--no-recurse-submodules', '--no-write-fetch-head', '--refmap=', '--', base.remote, `+refs/heads/${base.branch}:${ref}`], 120_000);
+    if (fetched.code !== 0) throw new InfraError(`could not sync ${base.tracking}: ${fetched.stderr.trim().slice(0, 300)}`);
+    const head = await this.git(this.cfg.repoPath, ['rev-parse', '--verify', `${ref}^{commit}`]);
+    if (head.code !== 0) throw new InfraError(`could not resolve synced ${base.tracking}`);
+    return head.stdout.trim();
+  }
+
+  /**
+   * How far the pinned base is behind the upstream branch now, and which of these files upstream
+   * changed since: a finding in such a file may already be fixed upstream, and a server restart
+   * (which fetches and pins the current upstream) is the remedy, not setting packets aside.
+   */
+  async baseDrift(files: string[]): Promise<{ pinned: string; upstream: string; behind: number; changed: string[] } | null> {
+    const upstream = await this.srMutex.run('claim-sync', () => this.syncedHead()).catch(() => null);
+    if (!upstream) return null;
+    if (upstream === this.sha) return { pinned: this.sha, upstream, behind: 0, changed: [] };
+    const count = await this.git(this.cfg.repoPath, ['rev-list', '--count', `${this.sha}..${upstream}`]);
+    const plain = [...new Set(files)].filter((f) => /^[\w./-]+$/.test(f));
+    const d = plain.length ? await this.git(this.cfg.repoPath, ['diff', '--name-only', this.sha, upstream, '--', ...plain]) : null;
+    return {
+      pinned: this.sha,
+      upstream,
+      behind: count.code === 0 ? Number(count.stdout.trim()) || 0 : 0,
+      changed: d?.code === 0 ? d.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [],
+    };
+  }
+
+  private async syncedInventory() {
+    const revision = await this.syncedHead();
+    const result = await this.git(this.cfg.repoPath, ['show', `${revision}:data/progress.json`]);
     if (result.code !== 0) throw new InfraError('could not read the synced progress inventory');
     const progress = parseJsonOutput(result.stdout) as ProgressInventory | null;
     if (!Array.isArray(progress?.functions)) throw new InfraError('the synced progress inventory is invalid');

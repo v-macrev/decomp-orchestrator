@@ -727,6 +727,34 @@ describe('handling what blocks a batch', () => {
     expect(s.store.getTask(victim.id)!.state).toBe('set_aside');
   }, 60_000);
 
+  it('blames a file the batch reaches through its includes, and refuses to set aside for a file upstream changed since the pin', async () => {
+    const s = setup();
+    const run = createRun(s, 'stale-pin', 12, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const batch = batchOf(s, run.id);
+    const tasks = batch.taskIds.map((id) => s.store.getTask(id)!);
+    const victim = tasks[0]!;
+    const dir = victim.unit.includes('/') ? victim.unit.slice(0, victim.unit.lastIndexOf('/')) : '';
+    const deep = `${dir}/Deep.h`;
+    // The unit includes Sim.h, which includes Deep.h: the screen followed the includes to Deep.h.
+    s.repo.baseFile = async (p: string) => (p === `${dir}/Sim.h` ? '#pragma once\n#include "Deep.h"\n' : p === deep ? '#pragma once\n#include "../../x/Y.h"\n' : null);
+    const finding = `${deep}:2: deterministic screen: include-outside-roots; fix: use a reconstruction-root header path`;
+    s.store.updateBatch(batch.id, { detail: { ...(batch.detail as unknown as Record<string, unknown>), lastSubmit: { dryRun: true, ok: false, blockers: [finding], problems: [] } } });
+    const blame = await s.engine.blockingUnits(run.id, batch.id);
+    expect(Object.keys(blame.units)).toContain(victim.unit);
+    expect(blame.unattributed).toEqual([]);
+    expect(blame.fixedUpstream).toEqual([]);
+
+    // Upstream fixed Deep.h after the server pinned its base: a restart is the remedy, not a set-aside.
+    (s.repo as RepoAdapter).baseDrift = async (files) => ({ pinned: 'a'.repeat(40), upstream: 'b'.repeat(40), behind: 34, changed: files.filter((f) => f === deep) });
+    const stale = await s.engine.blockingUnits(run.id, batch.id);
+    expect(stale.fixedUpstream).toEqual([finding]);
+    await expect(s.engine.setAsideBlocking(run.id, batch.id)).rejects.toThrow(/after this server pinned its base \(aaaaaaaaaa, 34 commit\(s\) behind.*restart the server/);
+    expect((await s.engine.fixPlan(run.id, batch.id)).why).toMatch(/restart the server/);
+    for (const t of tasks) expect(s.store.getTask(t.id)!.state).toBe('staged');
+  }, 60_000);
+
   it('blames an upstream file the lint reaches through a header the batch changes', async () => {
     const s = setup();
     const run = createRun(s, 'lint-blame', 12, 3);

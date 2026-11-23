@@ -154,6 +154,11 @@ export interface RepoAdapter {
   /** Read only: what the base already has of these functions and files (`branch` = the batch's staged branch, for its base). */
   upstreamState?(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState>;
   /**
+   * Read only: how many commits the pinned base is behind the upstream branch now, and which of
+   * these files upstream changed since (null when upstream cannot be reached).
+   */
+  baseDrift?(files: string[]): Promise<{ pinned: string; upstream: string; behind: number; changed: string[] } | null>;
+  /**
    * While on, staging and dry runs may also use the worker slots to re-compare packets side by side.
    * The engine turns it on only while it holds every slot (no run active) and off afterwards.
    */
