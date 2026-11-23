@@ -97,7 +97,7 @@ describe('submitting a batch of several units', () => {
       const repo = new SrRepo({ repoPath: root, baseRef: 'main', worktreeRoot: root, localDir: root, python: 'python', slots: 1, sandbox: { mode: 'local' } });
       vi.spyOn(repo.host, 'exists').mockReturnValue(true);
       vi.spyOn(repo, 'reset').mockResolvedValue();
-      vi.spyOn(repo, 'writeFiles').mockResolvedValue();
+      vi.spyOn(repo, 'writeFiles').mockResolvedValue([]);
       vi.spyOn(repo, 'compare').mockResolvedValue({ completed: true, allPass: true, compileError: false, functions: [], infraError: null, durationMs: 1 });
       const gitCalls: string[][] = [];
       let unitDuringSubmit: string[] = [];

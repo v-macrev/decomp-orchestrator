@@ -46,7 +46,7 @@ describe('submission claims probes', () => {
       });
       vi.spyOn(repo.host, 'exists').mockReturnValue(true);
       vi.spyOn(repo, 'reset').mockResolvedValue();
-      vi.spyOn(repo, 'writeFiles').mockResolvedValue();
+      vi.spyOn(repo, 'writeFiles').mockResolvedValue([]);
       vi.spyOn(repo, 'compare').mockResolvedValue({
         completed: true, allPass: true, compileError: false, functions: [], infraError: null, durationMs: 1,
       });
@@ -136,7 +136,7 @@ describe('fast re-verification', () => {
       const repo = new SrRepo({ repoPath: root, baseRef: 'main', worktreeRoot: root, localDir: root, python: 'python', slots: 1, sandbox: { mode: 'local' } });
       vi.spyOn(repo.host, 'exists').mockReturnValue(true);
       vi.spyOn(repo, 'reset').mockResolvedValue();
-      vi.spyOn(repo, 'writeFiles').mockResolvedValue();
+      vi.spyOn(repo, 'writeFiles').mockResolvedValue([]);
       const compare = vi.spyOn(repo, 'compare').mockResolvedValue({ completed: true, allPass: true, compileError: false, functions: [], infraError: null, durationMs: 1 });
       let fresh = '{}';
       vi.spyOn(repo.host, 'run').mockImplementation(async (cmd, args) => (cmd === 'git' ? run('') : args[1] === FRESH_COMPARES_PY ? run(fresh) : run('{}')));
@@ -170,7 +170,7 @@ describe('fast re-verification', () => {
       const repo = new SrRepo({ repoPath: root, baseRef: 'main', worktreeRoot: root, localDir: root, python: 'python', slots: 3, sandbox: { mode: 'local' } });
       vi.spyOn(repo.host, 'exists').mockReturnValue(true);
       const reset = vi.spyOn(repo, 'reset').mockResolvedValue();
-      const writes = vi.spyOn(repo, 'writeFiles').mockResolvedValue();
+      const writes = vi.spyOn(repo, 'writeFiles').mockResolvedValue([]);
       let live = 0;
       let peak = 0;
       const slots = new Set<number>();

@@ -28,6 +28,7 @@ import { LocalHost, WslHost, type Host } from './host.js';
 import type { Backlog, BaseDrift, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, PrComment, PrStatus, ProgressFn, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
 import { batchPrText, withClaimLine, type CompareSummary } from './batchPr.js';
 import { autoBindHints, bindHintsPath, unboundNames, type AlignPair, type PackInstruction, type PackReference } from './binding.js';
+import { withRootIncludeRecipe } from './rootIncludes.js';
 
 interface ProgressInventory {
   target_build_id?: string;
@@ -487,12 +488,51 @@ export class SrRepo implements RepoAdapter {
     }
   }
 
-  async writeFiles(slot: number, files: Array<{ path: string; content: string }>) {
+  /**
+   * Write files into a slot's worktree. A unit source whose includes need the reconstruction root
+   * (upstream rewrote a header it includes to root-relative spelling) is pointed at the matching
+   * `-root-includes` recipe as it is written (see rootIncludes.ts), so attempts, staging, dry runs
+   * and pushes all compile and commit the same unit. Returns what was changed that way.
+   */
+  async writeFiles(slot: number, files: Array<{ path: string; content: string }>): Promise<string[]> {
     for (const f of files) {
       const abs = this.host.fsPath(await this.safePath(slot, f.path));
       mkdirSync(fsDirname(abs), { recursive: true });
       writeFileSync(abs, f.content, 'utf8');
     }
+    const changes: string[] = [];
+    for (const f of files.filter((x) => x.path.endsWith('.cpp'))) {
+      const r = await withRootIncludeRecipe(f.path, f.content, (p) => this.readFile(slot, p), this.taskRecipe(f.path)).catch(() => null);
+      if (!r) continue;
+      writeFileSync(this.host.fsPath(await this.safePath(slot, f.path)), r.content, 'utf8');
+      changes.push(`${f.path}: ${r.change}`);
+    }
+    return changes;
+  }
+
+  /** The recipe `sr start` recorded for the task compiling this unit (its fallback when the source names none). */
+  private taskRecipes = new Map<string, string>();
+  private taskRecipesAt = 0;
+  private taskRecipe(compiled: string): string | null {
+    if (!this.taskRecipes.has(compiled) && Date.now() - this.taskRecipesAt > 30_000) {
+      this.taskRecipesAt = Date.now();
+      const dir = this.host.fsPath(this.p.join(this.cfg.localDir, 'contrib', 'tasks'));
+      let names: string[] = [];
+      try {
+        names = readdirSync(dir);
+      } catch {
+        names = [];
+      }
+      for (const n of names) {
+        try {
+          const t = JSON.parse(readFileSync(this.host.fsPath(this.p.join(this.cfg.localDir, 'contrib', 'tasks', n, 'task.json')), 'utf8')) as { compiled?: unknown; recipe?: unknown };
+          if (typeof t.compiled === 'string' && typeof t.recipe === 'string') this.taskRecipes.set(t.compiled.replace(/\\/g, '/'), t.recipe.replace(/\\/g, '/'));
+        } catch {
+          // not a task directory
+        }
+      }
+    }
+    return this.taskRecipes.get(compiled) ?? null;
   }
 
   async changedPaths(slot: number) {

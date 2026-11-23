@@ -281,6 +281,19 @@ the same way (`focusTasks`). Packets that died or were quarantined before this, 
 candidate matched all their functions, go back with `POST /api/runs/:id/regate-matched`: each
 becomes a `regate` fix whose first attempt submits that candidate again, with no model call.
 
+### Units that need the reconstruction include root
+
+Upstream spells repository includes from the reconstruction root (`#include "skyrim_shared/x/Y.h"`, since
+#912), which resolves only under a `-root-includes` recipe (`/Ireconstruction`). A unit whose own
+code is fine stops compiling when a header it includes is rewritten that way. `SrRepo.writeFiles`
+therefore walks each written unit's include closure with the compiler's quoted-include search (the
+including file's directory, then its includers' directories); when an include resolves only from
+the root and the unit's recipe (the one it names, else the one `sr start` recorded) has a
+`-root-includes` variant, it names that variant: it replaces the recipe path the source names,
+or adds `// Recipe: …` after the leading includes (outside the header, whose lint budget it
+would count toward; CI takes the first recipe path anywhere in the source). Attempts, staging,
+dry runs and pushes all write through it, so they compile and commit the same unit; no model call.
+
 ### Throughput for the hardest packets
 
 | Problem seen | Fix |

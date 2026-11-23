@@ -87,7 +87,8 @@ export interface RepoAdapter {
   baseFile(path: string): Promise<string | null>;
   /** Current content in the slot's worktree (after prepare: includes the skeleton). */
   readFile(slot: number, path: string): Promise<string | null>;
-  writeFiles(slot: number, files: Array<{ path: string; content: string }>): Promise<void>;
+  /** Returns notes on deterministic build fixes made while writing (e.g. a root-includes recipe), if any. */
+  writeFiles(slot: number, files: Array<{ path: string; content: string }>): Promise<void | string[]>;
   /** Every path that differs from the base revision, including untracked and ignored files. */
   changedPaths(slot: number): Promise<string[]>;
   /** Content hashes of protected inputs (tooling, target pin, recipes) for tamper detection. */
