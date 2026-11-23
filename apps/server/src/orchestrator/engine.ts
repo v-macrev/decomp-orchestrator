@@ -25,7 +25,7 @@ import { NoEligibleAccountError, type AccountPool } from '../pool/scheduler.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { ProviderError, costUsd, type PromptBlock } from '../providers/types.js';
 import { TaskQueue, type StealSource, type TaskPatch } from '../queue/taskQueue.js';
-import type { ClaimCollision, DiscoveredFunction, ProgressFn, PrStatus, RepoAdapter, PreparedTask, SubmitBatchInput, SubmitBatchResult } from '../repo/types.js';
+import type { BaseDrift, ClaimCollision, DiscoveredFunction, ProgressFn, PrStatus, RepoAdapter, PreparedTask, SubmitBatchInput, SubmitBatchResult } from '../repo/types.js';
 import { EXPLAIN_SCHEMA, EXPLAIN_SYSTEM, ExplainOut, commentsKey, explainPrompt, reviewComments, reviewTargets, type Explanation } from './review.js';
 import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
@@ -1161,7 +1161,7 @@ export class RunEngine {
     const { store, repo } = this.deps;
     const batch = store.getBatch(batchId);
     if (!batch || batch.runId !== runId) throw new Error('batch not found');
-    const d = (batch.detail ?? {}) as { lastSubmit?: { blockers?: string[]; problems?: string[] } };
+    const d = (batch.detail ?? {}) as { lastSubmit?: { blockers?: string[]; problems?: string[]; base?: string | null } };
     const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
     const filesOf = new Map(tasks.map((t) => [t.id, batchContent(store, runId, [t]).files.map((f) => f.path)]));
     const owners = (path: string) => tasks.filter((t) => t.unit === path || filesOf.get(t.id)!.includes(path));
@@ -1240,19 +1240,24 @@ export class RunEngine {
       if (!hit.length) unattributed.push(p);
       for (const u of new Set(hit.map((t) => t.unit))) reasons.set(u, [...(reasons.get(u) ?? []), p]);
     }
-    // Upstream may have fixed a file the batch does not write after this server pinned its base:
-    // then the finding is stale, and setting packets aside would hold back work for nothing.
+    // Upstream may have changed (fixed) a file the batch does not write after the base the dry run
+    // checked (recorded on newer dry runs; else the staged branch's base): then the finding is
+    // stale, and setting packets aside would hold back work for nothing.
     const outsideFiles = [...new Set(outside.map((b) => findingPath(b)!))];
-    const drift = outsideFiles.length && repo.baseDrift ? await repo.baseDrift(outsideFiles).catch(() => null) : null;
-    const fixedUpstream = drift?.behind ? outside.filter((b) => drift.changed.includes(findingPath(b)!)) : [];
-    return { units: Object.fromEntries(reasons), unattributed, claims, outside, fixedUpstream, drift: drift?.behind ? drift : null };
+    let since = d.lastSubmit?.base ?? null;
+    if (!since && outsideFiles.length && repo.upstreamState) since = (await repo.upstreamState({ rvas: [], files: [], branch: batch.branch }).catch(() => null))?.builtOn ?? null;
+    const drift = outsideFiles.length && repo.baseDrift ? await repo.baseDrift(outsideFiles, since).catch(() => null) : null;
+    const fixedUpstream = drift?.changed.length ? outside.filter((b) => drift.changed.includes(findingPath(b)!)) : [];
+    return { units: Object.fromEntries(reasons), unattributed, claims, outside, fixedUpstream, drift: fixedUpstream.length ? drift : null };
   }
 
-  /** Why a batch's dry-run findings are stale: upstream changed those files after the server pinned its base. */
-  private staleBaseMessage(blame: { fixedUpstream: string[]; drift: { pinned: string; upstream: string; behind: number } | null }) {
-    if (!blame.drift || !blame.fixedUpstream.length) return null;
+  /** Why a batch's dry-run findings are stale: upstream changed those files after the base the dry run checked. */
+  private staleBaseMessage(blame: { fixedUpstream: string[]; drift: BaseDrift | null }) {
+    const drift = blame.drift;
+    if (!drift || !blame.fixedUpstream.length) return null;
     const files = [...new Set(blame.fixedUpstream.map((b) => findingPath(b)!))];
-    return `upstream changed ${files.join(', ')} after this server pinned its base (${blame.drift.pinned.slice(0, 10)}, ${blame.drift.behind} commit(s) behind upstream ${blame.drift.upstream.slice(0, 10)}), so the dry run checked an old version. Nothing in this batch needs setting aside for it: restart the server (it pins the current upstream when it starts) and run the dry run again`;
+    const atPin = files.every((f) => drift.changedAtPin.includes(f));
+    return `upstream changed ${files.join(', ')} after the base the last dry run checked (${drift.since.slice(0, 10)}; upstream is ${drift.behind} commit(s) ahead of it), so the finding may already be fixed. Nothing in this batch needs setting aside for it: ${atPin ? 'the server already works on that newer base, so run the dry run again' : 'restart the server (it pins the current upstream when it starts) and run the dry run again'}`;
   }
 
   /** Batches whose packets may still be changed: staged, never submitted (a dry run is fine). */
@@ -2241,7 +2246,7 @@ export class RunEngine {
         at: Date.now(), dryRun: opts.dryRun, ok: r.ok, cancelled: r.cancelled ?? false, problems: r.problems, blockers: r.blockers,
         uncheckedClaims: r.uncheckedClaims ?? [], allowUncheckedClaims: input.allowUncheckedClaims, submissionStarted: r.submissionStarted,
         compared: r.compared ?? null, reused: r.reused ?? null, durationMs: Date.now() - startedAt,
-        warnings: r.warnings, plan: r.plan, error: r.error, branch,
+        warnings: r.warnings, plan: r.plan, error: r.error, branch, base: repo.baseSha ?? null,
       } };
       if (r.ok && !opts.dryRun) {
         store.updateBatch(batchId, { status: 'submitted', detail: { ...detail, pr: r.pullRequest, link: r.link, prBranch: branch, prTitle: r.title ?? null, claims: r.claims ?? [], submittedAt: Date.now() } });

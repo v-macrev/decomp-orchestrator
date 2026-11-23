@@ -25,7 +25,7 @@ import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
-import type { Backlog, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, PrComment, PrStatus, ProgressFn, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
+import type { Backlog, BaseDrift, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, PrComment, PrStatus, ProgressFn, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
 import { batchPrText, withClaimLine, type CompareSummary } from './batchPr.js';
 import { autoBindHints, bindHintsPath, unboundNames, type AlignPair, type PackInstruction, type PackReference } from './binding.js';
 
@@ -284,22 +284,29 @@ export class SrRepo implements RepoAdapter {
   }
 
   /**
-   * How far the pinned base is behind the upstream branch now, and which of these files upstream
-   * changed since: a finding in such a file may already be fixed upstream, and a server restart
-   * (which fetches and pins the current upstream) is the remedy, not setting packets aside.
+   * Which of these files upstream changed since `since` (a dry run's base; default the pinned base),
+   * both on the upstream branch now and at the pinned base: a finding in such a file may already be
+   * fixed upstream, and a fresh dry run (after a restart, when only the branch has the change) is
+   * the remedy, not setting packets aside.
    */
-  async baseDrift(files: string[]): Promise<{ pinned: string; upstream: string; behind: number; changed: string[] } | null> {
+  async baseDrift(files: string[], since?: string | null): Promise<BaseDrift | null> {
+    const from = since && /^[0-9a-f]{40}$/.test(since) ? since : this.sha;
     const upstream = await this.srMutex.run('claim-sync', () => this.syncedHead()).catch(() => null);
     if (!upstream) return null;
-    if (upstream === this.sha) return { pinned: this.sha, upstream, behind: 0, changed: [] };
-    const count = await this.git(this.cfg.repoPath, ['rev-list', '--count', `${this.sha}..${upstream}`]);
     const plain = [...new Set(files)].filter((f) => /^[\w./-]+$/.test(f));
-    const d = plain.length ? await this.git(this.cfg.repoPath, ['diff', '--name-only', this.sha, upstream, '--', ...plain]) : null;
+    const diff = async (a: string, b: string) => {
+      if (a === b || !plain.length) return [];
+      const d = await this.git(this.cfg.repoPath, ['diff', '--name-only', a, b, '--', ...plain]);
+      return d.code === 0 ? d.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [];
+    };
+    const count = from === upstream ? null : await this.git(this.cfg.repoPath, ['rev-list', '--count', `${from}..${upstream}`]);
     return {
+      since: from,
       pinned: this.sha,
       upstream,
-      behind: count.code === 0 ? Number(count.stdout.trim()) || 0 : 0,
-      changed: d?.code === 0 ? d.stdout.split('\n').map((s) => s.trim()).filter(Boolean) : [],
+      behind: count?.code === 0 ? Number(count.stdout.trim()) || 0 : 0,
+      changed: await diff(from, upstream),
+      changedAtPin: await diff(from, this.sha),
     };
   }
 

@@ -154,10 +154,10 @@ export interface RepoAdapter {
   /** Read only: what the base already has of these functions and files (`branch` = the batch's staged branch, for its base). */
   upstreamState?(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState>;
   /**
-   * Read only: how many commits the pinned base is behind the upstream branch now, and which of
-   * these files upstream changed since (null when upstream cannot be reached).
+   * Read only: which of these files upstream changed since `since` (a dry run's base; default the
+   * pinned base), on the upstream branch now and at the pinned base (null when upstream cannot be reached).
    */
-  baseDrift?(files: string[]): Promise<{ pinned: string; upstream: string; behind: number; changed: string[] } | null>;
+  baseDrift?(files: string[], since?: string | null): Promise<BaseDrift | null>;
   /**
    * While on, staging and dry runs may also use the worker slots to re-compare packets side by side.
    * The engine turns it on only while it holds every slot (no run active) and off afterwards.
@@ -268,6 +268,20 @@ export interface SubmitBatchResult {
 }
 
 /** What upstream (the pinned base) already has of a batch: matched functions, untracked ones, files it changed since the batch was built. */
+export interface BaseDrift {
+  /** The base the files are compared from. */
+  since: string;
+  pinned: string;
+  /** The upstream branch's head now. */
+  upstream: string;
+  /** Commits from `since` to `upstream`. */
+  behind: number;
+  /** Files upstream changed from `since` to its head now. */
+  changed: string[];
+  /** Files changed from `since` to the pinned base (a dry run now already sees these). */
+  changedAtPin: string[];
+}
+
 export interface UpstreamState {
   checked: boolean;
   /** rva → the owner upstream records for it. */

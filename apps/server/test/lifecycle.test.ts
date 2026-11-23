@@ -746,12 +746,24 @@ describe('handling what blocks a batch', () => {
     expect(blame.unattributed).toEqual([]);
     expect(blame.fixedUpstream).toEqual([]);
 
-    // Upstream fixed Deep.h after the server pinned its base: a restart is the remedy, not a set-aside.
-    (s.repo as RepoAdapter).baseDrift = async (files) => ({ pinned: 'a'.repeat(40), upstream: 'b'.repeat(40), behind: 34, changed: files.filter((f) => f === deep) });
+    // Upstream fixed Deep.h after the base the dry run checked: a fresh dry run is the remedy, not a set-aside.
+    let atPin = false;
+    let since: string | null | undefined;
+    (s.repo as RepoAdapter).baseDrift = async (files, from) => {
+      since = from;
+      const changed = files.filter((f) => f === deep);
+      return { since: from ?? 'a'.repeat(40), pinned: 'c'.repeat(40), upstream: 'b'.repeat(40), behind: 34, changed, changedAtPin: atPin ? changed : [] };
+    };
+    s.store.updateBatch(batch.id, { detail: { ...(s.store.getBatch(batch.id)!.detail as unknown as Record<string, unknown>), lastSubmit: { dryRun: true, ok: false, blockers: [finding], problems: [], base: 'a'.repeat(40) } } });
     const stale = await s.engine.blockingUnits(run.id, batch.id);
+    expect(since).toBe('a'.repeat(40));
     expect(stale.fixedUpstream).toEqual([finding]);
-    await expect(s.engine.setAsideBlocking(run.id, batch.id)).rejects.toThrow(/after this server pinned its base \(aaaaaaaaaa, 34 commit\(s\) behind.*restart the server/);
+    // Only the upstream branch has the change: restart, then dry-run.
+    await expect(s.engine.setAsideBlocking(run.id, batch.id)).rejects.toThrow(/after the base the last dry run checked \(aaaaaaaaaa; upstream is 34 commit\(s\) ahead.*restart the server/);
     expect((await s.engine.fixPlan(run.id, batch.id)).why).toMatch(/restart the server/);
+    // The pinned base already has it: just dry-run again.
+    atPin = true;
+    await expect(s.engine.setAsideBlocking(run.id, batch.id)).rejects.toThrow(/already works on that newer base, so run the dry run again/);
     for (const t of tasks) expect(s.store.getTask(t.id)!.state).toBe('staged');
   }, 60_000);
 
