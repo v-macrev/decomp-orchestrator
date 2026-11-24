@@ -70,7 +70,7 @@ export class GateKeeper {
     private reviewer: Reviewer | null = null,
     opts: Partial<GateOptions> = {},
   ) {
-    this.opts = { quarantineAfterStrikes: 2, scopeLimits: DEFAULT_SCOPE_LIMITS, preflightTimeoutMs: 120_000, ...opts };
+    this.opts = { quarantineAfterStrikes: 2, scopeLimits: DEFAULT_SCOPE_LIMITS, preflightTimeoutMs: 600_000, ...opts };
   }
 
   async evaluate(input: GateInput): Promise<GateResult> {

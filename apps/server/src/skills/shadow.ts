@@ -22,6 +22,7 @@ import { GateKeeper } from '../gatekeeper/gatekeeper.js';
 import { extractJson } from '../gatekeeper/review.js';
 import type { RunEngine } from '../orchestrator/engine.js';
 import type { RunSkills, TaskContextBuilder } from '../orchestrator/contextBuilder.js';
+import { declareMembers } from '../orchestrator/classDecls.js';
 import { materialise } from '../orchestrator/edits.js';
 import { failureSignals } from '../orchestrator/lessons.js';
 import { WORKER_OUTPUT_SCHEMA_V2, renderBundle, type Feedback } from '../orchestrator/prompts.js';
@@ -303,8 +304,9 @@ export class ShadowEvaluator {
       }
       const parsed = WorkerOutput.safeParse(extractJson(text));
       if (!parsed.success) return res; // a contract failure is a fail, not an error
-      const mat = await materialise(parsed.data, (p) => repo.readFile(slot, p));
+      const mat = await materialise(parsed.data, (p) => repo.readFile(slot, p), bundle.elisions);
       if (mat.problems.length) return res;
+      mat.files = (await declareMembers(mat.files, prepared.allowedPaths, (p) => repo.readFile(slot, p))).files;
       const g = await gate.evaluate({
         task, attemptId: newId('shadow'), slot, prepared, files: mat.files, compareTimeoutMs: c.compareTimeoutMs, signal, carried: new Map(),
         checks: { scope: true, leak: true, cheat: true, integrity: true, repoCompare: true, repoPreflight: true, llmReview: false },

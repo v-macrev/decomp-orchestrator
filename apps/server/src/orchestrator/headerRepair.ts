@@ -22,6 +22,7 @@
 
 import { documentsAdaptation, headerStatements, lostProvenance, statementText } from '../gatekeeper/provenance.js';
 import { setDraftedBy } from './attribution.js';
+import { repairLabels } from './labelRepair.js';
 
 const SINGLE_KEYS = ['Source exposure', 'Code origin', 'Adapted bodies', 'Adapted code', 'Licence', 'License', 'Recipe'];
 /** Lines the repo's header lint asks contributors to drop. */
@@ -250,8 +251,9 @@ export async function repairAnswer(
   for (const f of order) {
     const before = await current(f.path);
     const r = repairHeader(f.path, out.get(f.path)!, before, { originHint: hint ?? originStatement(f.content), adaptedHint: adapted, base: opts.base ? await opts.base(f.path) : null, own: opts.own });
-    out.set(f.path, r.content);
-    changes.push(...r.changes.map((c) => `${f.path}: ${c}`));
+    const l = repairLabels(f.path, r.content, opts.base ? await opts.base(f.path) : before);
+    out.set(f.path, l.content);
+    changes.push(...[...r.changes, ...l.changes].map((c) => `${f.path}: ${c}`));
     hint ??= originStatement(r.content);
     if (opts.attribution && f.path.endsWith('.cpp')) {
       const d = setDraftedBy(out.get(f.path)!, opts.attribution.person, opts.attribution.model);

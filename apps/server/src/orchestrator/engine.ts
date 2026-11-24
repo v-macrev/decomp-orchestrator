@@ -31,7 +31,9 @@ import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
 import { ContextBuilder } from './context.js';
 import { TaskContextBuilder, shouldCacheTaskPrefix } from './contextBuilder.js';
+import { declareMembers, memberDefs } from './classDecls.js';
 import { materialise } from './edits.js';
+import type { Elision } from './unitView.js';
 import { repairAnswer } from './headerRepair.js';
 import { buildHistory, findRepeat, progressScore, type HistoryEntry } from './history.js';
 import { draftedByText, personOf } from './attribution.js';
@@ -1487,9 +1489,11 @@ export class RunEngine {
    * still worth sending and goes back to the queue as a 'rebuild' fix: its first attempt splices
    * its accepted definitions into upstream's current file, with no model call, and the Gate Keeper
    * checks that; a packet the splice does not get through goes on to the workers from there.
-   * Units given by name are rebuilt even when nothing in them was dropped.
+   * Units given by name are rebuilt even when nothing in them was dropped. A function that already
+   * has a unit upstream is dropped too: a second one is refused as a duplicate.
+   * `free`: only the splice; a packet it does not get through is set aside again, as it was.
    */
-  async rebuildOnUpstream(runId: string, units?: string[]) {
+  async rebuildOnUpstream(runId: string, units?: string[], opts: { free?: boolean } = {}) {
     const { store, repo, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
@@ -1501,19 +1505,27 @@ export class RunEngine {
     if (!tasks.length) throw new Error('no set-aside packets');
     const st = await repo.upstreamState({ rvas: tasks.flatMap((t) => t.functions.map((f) => f.rva)), files: [], branch: null });
     if (!st.checked) throw new Error('upstream data/progress.json could not be read');
-    const why = (rva: string) => (Object.hasOwn(st.matched, rva) ? `matched upstream${st.matched[rva] ? ` (${st.matched[rva]})` : ''}` : st.untracked.includes(rva) ? 'no longer published upstream' : null);
+    const why = (rva: string, unit: string, name: string | null | undefined) => {
+      if (Object.hasOwn(st.matched, rva)) return `matched upstream${st.matched[rva] ? ` (${st.matched[rva]})` : ''}`;
+      if (st.untracked.includes(rva)) return 'no longer published upstream';
+      const at = st.marked?.[rva] ?? [];
+      const other = at.find((m) => m.unit !== unit);
+      if (other) return `already in ${other.unit} upstream`;
+      const renamed = at.find((m) => m.unit === unit && m.name && name && m.name !== name);
+      return renamed ? `already in this unit upstream as ${renamed.name}` : null;
+    };
     const byUnit = new Map<string, TaskRow[]>();
     for (const t of tasks) byUnit.set(t.unit, [...(byUnit.get(t.unit) ?? []), t]);
     const plan: Array<{ task: TaskRow; keep: FunctionTarget[]; dropped: NonNullable<BatchFix['dropped']> }> = [];
     let unitsDone = 0;
     for (const [unit, ts] of byUnit) {
-      const dropsAny = ts.some((t) => t.functions.some((f) => why(f.rva)));
+      const dropsAny = ts.some((t) => t.functions.some((f) => why(f.rva, unit, f.name)));
       if (!dropsAny && !pick?.has(unit)) continue;
       let any = false;
       for (const t of ts) {
-        const keep = t.functions.filter((f) => !why(f.rva));
+        const keep = t.functions.filter((f) => !why(f.rva, unit, f.name));
         if (!keep.length) continue;
-        plan.push({ task: t, keep, dropped: t.functions.filter((f) => why(f.rva)).map((f) => ({ rva: f.rva, name: f.name ?? null, why: why(f.rva)! })) });
+        plan.push({ task: t, keep, dropped: t.functions.flatMap((f) => { const w = why(f.rva, unit, f.name); return w ? [{ rva: f.rva, name: f.name ?? null, why: w }] : []; }) });
         any = true;
       }
       if (any) unitsDone++;
@@ -1526,6 +1538,7 @@ export class RunEngine {
       for (const p of plan) {
         const fix: BatchFix = {
           batchId: '', seq: 0, check: 'rebuild', at, verdictId: p.task.lastVerdictId, dropped: p.dropped,
+          ...(opts.free ? { freeOnly: true } : {}),
           reasons: [`rebuild on upstream's current ${p.task.unit}${p.dropped.length ? `; left out: ${p.dropped.map((d) => `${d.rva} (${d.why})`).join(', ')}` : ''}`],
         };
         store.tx(() => {
@@ -1556,18 +1569,11 @@ export class RunEngine {
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
     if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can re-gate packets`);
-    const key = (rva: string) => Number.parseInt(rva, 16);
     const plan: Array<{ task: TaskRow; verdictId: string }> = [];
-    const waiting = store.listTasks(runId, { state: 'pending', limit: 100_000 }).filter((t) => t.fix?.check === 'regate');
+    const waiting = store.listTasks(runId, { state: 'pending', limit: 100_000 }).filter((t) => t.fix?.check === 'regate'
+      || (!t.fix && store.verdictsForTask(t.id).some((v) => v.findings.some((f) => f.code.startsWith('INFRA')) && this.matchedButBlocked(t, v))));
     for (const t of [...store.listTasks(runId, { state: 'dead', limit: 100_000 }), ...store.listTasks(runId, { state: 'quarantined', limit: 100_000 }), ...waiting]) {
-      const own = new Set(t.functions.map((f) => key(f.rva)));
-      const found = store.verdictsForTask(t.id).find((v) => {
-        const mine = (v.compare ?? []).filter((c) => own.has(key(c.rva)));
-        if (mine.length !== own.size || !mine.every((c) => c.result === 'pass')) return false;
-        // Every blocking finding is a compare result for a function outside the packet.
-        return v.findings.filter((f) => f.severity === 'block').every((f) => f.code.startsWith('COMPARE_') && f.code !== 'COMPARE_COMPILE_ERROR'
-          && /^0x[0-9a-f]+\b/i.test(f.message) && !own.has(key(f.message.split(/\s/)[0]!)));
-      });
+      const found = store.verdictsForTask(t.id).find((v) => this.matchedButBlocked(t, v) && store.getAttempt(v.attemptId)?.files?.length);
       if (found) plan.push({ task: t, verdictId: found.id });
     }
     const partial = opts.partial ? this.partialPlan(runId, new Set(plan.map((p) => p.task.id))) : [];
@@ -1644,6 +1650,16 @@ export class RunEngine {
     }, { besideRun: true });
     if (requeued) await this.wakeOrStart(runId);
     return { packets: requeued, functions, rebuilt, status: store.getRun(runId)?.status ?? "running" };
+  }
+
+  /** Every function of the packet matched; only results for other functions, or checks that could not be run, block it. */
+  private matchedButBlocked(task: TaskRow, v: Verdict): boolean {
+    const key = (rva: string) => Number.parseInt(rva, 16);
+    const own = new Set(task.functions.map((f) => key(f.rva)));
+    const mine = (v.compare ?? []).filter((c) => own.has(key(c.rva)));
+    if (mine.length !== own.size || !mine.every((c) => c.result === 'pass')) return false;
+    return v.findings.filter((f) => f.severity === 'block').every((f) => f.code.startsWith('INFRA')
+      || (f.code.startsWith('COMPARE_') && f.code !== 'COMPARE_COMPILE_ERROR' && /^0x[0-9a-f]+\b/i.test(f.message) && !own.has(key(f.message.split(/\s/)[0]!))));
   }
 
   /** Dead packets some of whose functions matched in a candidate only the others' compare results blocked: the best such candidate. */
@@ -2827,8 +2843,10 @@ export class RunEngine {
       const spliced = task.fix?.check === 'rebuild' ? await this.spliceForRebuild(task, slot) : task.fix?.check === 'regate' ? await this.storedCandidate(task, slot) : null;
       if (spliced) await repo.writeFiles(slot, spliced.files);
       if (task.fix?.freeOnly && !(spliced && task.fix.verdictId === task.lastVerdictId)) {
-        this.queue.transition(task.id, leaseId, ['leased'], 'dead');
-        ev('task.dead', 'its stored candidate is gone: dead again without a model call', 'warn');
+        // Accepted work whose rebuild cannot start stays what it was: matched, set aside.
+        const back = task.fix.check === 'rebuild' ? 'set_aside' : 'dead';
+        this.queue.transition(task.id, leaseId, ['leased'], back);
+        ev(back === 'dead' ? 'task.dead' : 'task.held', back === 'dead' ? 'its stored candidate is gone: dead again without a model call' : 'its accepted candidate cannot be spliced: set aside again without a model call', 'warn');
         return;
       }
 
@@ -2869,6 +2887,7 @@ export class RunEngine {
       let contextRawTokens: number;
       let outputMode: 'files' | 'edits' | 'either' = 'files';
       let elided: string[] = [];
+      let elisions: Elision[] = [];
       let selections: SkillSelection[] = [];
       if (cfg.context.mode === 'legacy') {
         const bundle = await this.context.build(task, prepared, slot, { runId, exposureConsent: cfg.exposureConsent, carried });
@@ -2888,6 +2907,7 @@ export class RunEngine {
         contextRawTokens = bundle.tokens.raw;
         outputMode = bundle.outputMode;
         elided = bundle.elidedFunctions;
+        elisions = bundle.elisions;
       }
       attempt = {
         id: newId('att'), taskId: task.id, runId, n, tier: tierIdx, nodeId: node.id, accountId: null, model: null, status: 'running',
@@ -2996,11 +3016,20 @@ export class RunEngine {
         store.updateAttempt(attempt.id, { status: 'parse_error', error: 'returned complete files in edits mode', finishedAt: Date.now() });
         return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_MODE', `accepted bodies were elided (${elided.length} function(s)); return "edits" with only the functions you add or change, never complete files`), { infra: false, strike: false }, tierIdx);
       }
-      const mat = await materialise(parsed.data, (p) => repo.readFile(slot, p));
+      const mat = await materialise(parsed.data, (p) => repo.readFile(slot, p), freeAttempt ? [] : elisions);
       if (mat.problems.length) {
         store.updateAttempt(attempt.id, { status: 'parse_error', error: mat.problems.join('; ').slice(0, 500), files: mat.files, finishedAt: Date.now() });
         return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_EDIT', mat.problems.join('; ').slice(0, 1_000)), { infra: false, strike: false }, tierIdx);
       }
+      // A member function the packet defines must be in its class: the declaration follows from the definition.
+      const had = new Map<string, Set<string>>();
+      const key = (d: { cls: string; name: string }) => `${d.cls}::${d.name}`;
+      const declared = await declareMembers(mat.files, prepared.allowedPaths, (p) => repo.readFile(slot, p), async (p, d) => {
+        if (!had.has(p)) had.set(p, new Set(memberDefs((await repo.baseFile(p)) ?? '').map(key)));
+        return !had.get(p)!.has(key(d));
+      });
+      mat.files = declared.files;
+      if (declared.changes.length) ev('attempt.declared', `declared in their classes: ${declared.changes.join('; ').slice(0, 600)}`, 'debug', { changes: declared.changes });
       // Deterministic header repair (skeleton placeholders, duplicate keys, banned lines, origin in .h).
       const untouched = await Promise.all(prepared.allowedPaths.filter((p) => !mat.files.some((f) => f.path === p)).map(async (p) => ({ path: p, current: await repo.readFile(slot, p), base: await repo.baseFile(p) })));
       const fixed = await repairAnswer(mat.files, (p) => repo.readFile(slot, p), { codeOrigin: parsed.data.codeOrigin, adaptedBodies: parsed.data.adaptedBodies }, {
@@ -3204,9 +3233,19 @@ export class RunEngine {
     const n = opts.slotFault ? task.infraFailures : task.infraFailures + 1;
     const runId = run.row.id;
     const dead = !opts.slotFault && n >= this.opts.maxInfraFailures;
+    // Every function matched and only the machinery failed (a preflight that timed out): the next
+    // attempt gates that candidate again instead of paying a worker for the same code.
+    const keep = verdict && (!task.fix || task.fix.check === 'regate') && this.matchedButBlocked(task, verdict) && store.getAttempt(verdict.attemptId)?.files?.length;
     const moved = store.tx(() => {
       const ok = this.queue.transition(task.id, leaseId, ['leased', 'gating'], dead ? 'dead' : 'pending', dead ? { infraFailures: n } : { infraFailures: n, notBefore: Date.now() + this.opts.infraBackoffMs * Math.max(1, n) });
       if (verdict) store.insertVerdict({ ...verdict, route: ok ? (dead ? 'dead_letter' : 'retry') : 'stale' });
+      if (ok && keep) {
+        const fix: BatchFix = {
+          ...task.fix, batchId: '', seq: 0, check: 'regate', at: Date.now(), verdictId: verdict.id,
+          reasons: [`its functions all matched, but a check could not be run (${msg.slice(0, 200)}); that candidate goes to the Gate Keeper again`],
+        };
+        store.db.prepare('UPDATE tasks SET fix_json = ?, last_verdict_id = ? WHERE id = ?').run(JSON.stringify(fix), verdict.id, task.id);
+      }
       return ok;
     });
     if (!moved) {
@@ -3295,6 +3334,16 @@ export class RunEngine {
       return;
     }
     // A packet put back only to try its stored candidate again: no model call follows.
+    if (task.fix?.freeOnly && task.fix.check === 'rebuild') {
+      // Accepted work: it keeps the verdict it passed with, and why the splice did not pass.
+      const { lastVerdictId: _reject, ...rest } = common;
+      if (this.settle(run, task, leaseId, 'set_aside', { ...rest, attemptsTotal }, verdict, 'hold')) {
+        const problems = verdict.findings.filter((x) => x.severity === 'block').map((x) => ({ file: x.file ?? null, line: x.line ?? null, message: x.message }));
+        store.setHold([task.id], { verdictId: verdict.id, at: Date.now(), problems });
+        events.emit('task.held', `HELD ${fnLabel}: its splice into upstream's current file does not pass (${summarise(verdict)}); set aside again, no model call was made`, { runId, taskId: task.id, level: 'warn', data: { problems } });
+      }
+      return;
+    }
     if (task.fix?.freeOnly) {
       if (this.settle(run, task, leaseId, 'dead', { ...common, attemptsTotal, attemptsAtTier, bestExactBytes }, verdict, 'dead_letter')) events.emit('task.dead', `DEAD ${fnLabel}: the stored candidate does not pass on its own (${summarise(verdict)}); no model call was made`, { runId, taskId: task.id, level: 'warn' });
       return;

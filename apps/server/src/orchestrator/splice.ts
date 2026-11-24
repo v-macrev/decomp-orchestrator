@@ -39,18 +39,104 @@ function insertLines(src: string, lines: string[], after: RegExp, before?: RegEx
   return rows.join('\n');
 }
 
-/** Lines of `ours` at file scope that are single-line declarations the definitions may need. */
-function fileScopeDecls(ours: string): string[] {
-  const code = lex(ours).code.split('\n');
-  const raw = ours.split('\n');
-  const out: string[] = [];
+export interface Chunk {
+  start: number;
+  end: number;
+  text: string;
+  /** What it declares; empty for a member definition (`A::B(...) {...}`). */
+  names: string[];
+  /** One line, no body: a declaration. */
+  single: boolean;
+}
+
+const KEYWORDS = /^(?:const|constexpr|static|extern|inline|volatile|unsigned|signed|class|struct|union|enum|typename|return|if|else|for|while|using|typedef|namespace|template|public|private|protected|virtual|this|void|bool|char|short|int|long|float|double|auto)$/;
+const idents = (code: string) => (code.match(/[A-Za-z_]\w*/g) ?? []).filter((w) => !KEYWORDS.test(w));
+
+/** What one file-scope statement declares. */
+function declared(code: string): string[] {
+  const t = code.replace(/^\s*(?:template\s*<[^{};]*?>\s*)?/, '').trim();
+  const ns = /^(?:inline\s+)?namespace\b[^{]*\{([\s\S]*)\}\s*$/.exec(t);
+  if (ns) return chunksOf(ns[1]!).flatMap((c) => c.names);
+  const type = /^(?:typedef\s+)?(?:class|struct|union|enum(?:\s+class|\s+struct)?)\s+(?:alignas\s*\([^)]*\)\s*|__declspec\s*\([^)]*\)\s*)*([A-Za-z_]\w*)\s*(?:final\s*)?(?::[^;{]*)?[{;]/.exec(t);
+  if (type) return [type[1]!];
+  const using = /^using\s+([A-Za-z_]\w*)\s*=/.exec(t);
+  if (using) return [using[1]!];
+  if (/^(?:using|friend|static_assert)\b/.test(t)) return [];
+  const head = t.split(/[{;=]/)[0]!;
+  const call = /([A-Za-z_~][\w:~]*)\s*\(/.exec(head.replace(/__declspec\s*\([^)]*\)/g, ''));
+  if (call) return call[1]!.includes('::') ? [] : [call[1]!];
+  const v = /([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*$/.exec(head.trim());
+  return v && !KEYWORDS.test(v[1]!) && !new RegExp(`::\\s*${v[1]}\\s*(?:\\[|$)`).test(head.trim()) ? [v[1]!] : [];
+}
+
+/** The file-scope statements of a source: types, declarations, variables, definitions. Preprocessor lines are not statements. */
+export function chunksOf(src: string): Chunk[] {
+  const code = lex(src).code.replace(/^[ \t]*#.*$/gm, (l) => ' '.repeat(l.length));
+  const out: Chunk[] = [];
   let depth = 0;
-  code.forEach((l, i) => {
-    const t = l.trim();
-    if (depth === 0 && t && !t.startsWith('#') && /;\s*$/.test(t) && !/[{}]/.test(t) && /^(extern|using|class|struct|enum|typedef|static|constexpr|inline|namespace)\b/.test(t)) out.push(raw[i]!);
-    for (const ch of l) depth += ch === '{' ? 1 : ch === '}' ? -1 : 0;
-  });
+  let start = -1;
+  const close = (end: number) => {
+    const text = src.slice(start, end);
+    const body = code.slice(start, end);
+    out.push({ start, end, text, names: declared(body), single: !text.includes('\n') && !/[{}]/.test(body) });
+    start = -1;
+  };
+  for (let k = 0; k < code.length; k++) {
+    const ch = code[k]!;
+    if (start < 0) {
+      if (/\s/.test(ch) || ch === ';') continue;
+      start = k;
+    }
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      if (depth > 0) continue;
+      depth = 0;
+      // A body ends its statement; a type or an initialiser runs on to its `;`.
+      const head = code.slice(start, code.indexOf('{', start));
+      if (/^\s*(?:template\s*<[^{}]*>\s*)?(?:typedef\s+)?(?:class|struct|union|enum)\b[^()]*$/.test(head) || /=\s*$/.test(head)) continue;
+      close(k + 1);
+    } else if (ch === ';' && depth === 0) close(k + 1);
+  }
   return out;
+}
+
+/** Class `cls` of a header: its base list and its data members (null: a shape this does not read). */
+function classOf(header: string, cls: string): { bases: string; members: Array<{ text: string; names: string[] }> | null } | null {
+  const code = lex(header).code;
+  const m = new RegExp(`\\b(?:class|struct)\\s+${cls}\\b([^;{]*)\\{`).exec(code);
+  if (!m) return null;
+  let k = m.index + m[0].length;
+  let depth = 1;
+  let start = k;
+  let simple = true;
+  const members: Array<{ text: string; names: string[] }> = [];
+  for (; k < code.length && depth > 0; k++) {
+    const ch = code[k];
+    if (ch === '{') depth++;
+    else if (ch === '}') {
+      depth--;
+      // An inline method ends here; a nested type or an initialiser runs on to its `;`.
+      if (depth === 1 && code.slice(start, k).split('{')[0]!.includes('(')) start = k + 1;
+    } else if (ch === ';' && depth === 1) {
+      const stmt = code.slice(start, k).replace(/\b(?:public|protected|private)\s*:(?!:)/g, (x) => ' '.repeat(x.length));
+      const from = start + (stmt.length - stmt.trimStart().length);
+      const t = stmt.trim();
+      start = k + 1;
+      if (!t || /^(?:using|typedef|friend|static|static_assert|enum)\b/.test(t) || /^(?:class|struct|union)\s+\w+\s*(?:\{[\s\S]*\})?$/.test(t)) continue;
+      if (/[{}]/.test(t)) {
+        simple = false;
+        continue;
+      }
+      if (t.includes('(')) {
+        if (/\(\s*(?:\w+::)*\*/.test(t)) simple = false; // a function pointer member, or a method taking one
+        continue;
+      }
+      const names = t.split('=')[0]!.split(',').map((x) => /([A-Za-z_]\w*)\s*(?:\[[^\]]*\]\s*)*(?::\s*\d+\s*)?$/.exec(x.trim())?.[1]).filter((x): x is string => !!x);
+      members.push({ text: `${header.slice(from, k).replace(/\s+/g, ' ').trim()};`, names });
+    }
+  }
+  return { bases: m[1]!.replace(/\s+/g, ' ').trim(), members: simple ? members : null };
 }
 
 /** The declaration of `name` in `header` as one statement ("int Foo();"), or null. */
@@ -82,7 +168,8 @@ function addToClass(header: string, cls: string, decl: string): string | null {
   const close = k - 1;
   const lineStart = header.lastIndexOf('\n', close) + 1;
   const onOwnLine = header.slice(lineStart, close).trim() === '';
-  const access = m[1] === 'class' ? 'public: ' : '';
+  const last = [...code.slice(m.index + m[0].length, close).matchAll(/\b(public|protected|private)\s*:(?!:)/g)].at(-1)?.[1];
+  const access = (last ?? (m[1] === 'class' ? 'private' : 'public')) === 'public' ? '' : 'public: ';
   return onOwnLine
     ? `${header.slice(0, lineStart)}${access ? 'public:\n' : ''}    ${decl}\n${header.slice(lineStart)}`
     : `${header.slice(0, close)} ${access}${decl} ${header.slice(close)}`;
@@ -188,8 +275,6 @@ export function spliceUnit(input: {
     rvaLines.push(oursCpp.split('\n').find((l) => l.trim().startsWith('//') && rvaRe(fn.rva).test(l)) ?? `// ${fn.rva} ${fn.name ?? ''}`.trimEnd());
   }
   upCpp = insertLines(upCpp, rvaLines, /^\s*\/\/\s*0x[0-9a-f]+\s/i, /^\s*#\s*include/);
-  const have = new Set(upCpp.split('\n').map(normalise));
-  const decls = fileScopeDecls(oursCpp).filter((l) => !have.has(normalise(l)));
   const bodies: string[] = [];
   for (const fn of keep) {
     if (findDef(upCpp, fn)) {
@@ -204,6 +289,47 @@ export function spliceUnit(input: {
     bodies.push(oursCpp.slice(d.start, d.close + 1));
     notes.push(`${fn.rva} ${fn.name}: definition carried over`);
   }
+  // What those definitions use: helper types, declarations and variables of our files that upstream's
+  // do not declare, and our data members where upstream's class has none yet (two layouts are never
+  // merged: such a packet does not compile, and goes on to the workers).
+  const need = new Set(bodies.flatMap((b) => idents(lex(b).code)));
+  const carriedMembers = new Map<string, string[]>();
+  const carriedNames = new Set<string>();
+  const owners = new Set(keep.map((fn) => owner(fn.name ?? '')).filter((x): x is string => !!x));
+  if (upH !== null && oursH !== null && bodies.length) {
+    for (const cls of owners) {
+      const mine = classOf(oursH, cls);
+      const theirs = classOf(upH, cls);
+      if (!mine?.members?.length || !theirs?.members || theirs.members.length || mine.bases !== theirs.bases) continue;
+      if (!mine.members.some((m) => m.names.some((n) => need.has(n)))) continue;
+      carriedMembers.set(cls, mine.members.map((m) => m.text));
+      for (const m of mine.members) {
+        m.names.forEach((n) => carriedNames.add(n));
+        idents(m.text).forEach((w) => need.add(w));
+      }
+      notes.push(`${cls}: ${mine.members.length} data member(s) carried over`);
+    }
+  }
+  const theirNames = new Set([...chunksOf(upCpp), ...(upH === null ? [] : chunksOf(upH))].flatMap((c) => c.names));
+  const have = new Set(upCpp.split('\n').map(normalise));
+  const pool = (src: string | null) => (src === null ? [] : chunksOf(src).filter((c) => c.names.length && !c.names.some((n) => theirNames.has(n) || owners.has(n))));
+  const cppPool = pool(oursCpp);
+  const hPool = pool(upH === null ? null : oursH);
+  const taken = new Set<Chunk>(cppPool.filter((c) => c.single && /^(extern|using|class|struct|enum|typedef|static|constexpr|inline)\b/.test(c.text) && !have.has(normalise(c.text))));
+  for (const c of taken) idents(lex(c.text).code).forEach((w) => need.add(w));
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const c of [...hPool, ...cppPool]) {
+      if (taken.has(c) || !c.names.some((n) => need.has(n))) continue;
+      taken.add(c);
+      idents(lex(c.text).code).forEach((w) => need.add(w));
+      grew = true;
+    }
+  }
+  const decls = cppPool.filter((c) => taken.has(c)).map((c) => c.text);
+  const headerDecls = hPool.filter((c) => taken.has(c));
+  headerDecls.forEach((c) => c.names.forEach((n) => carriedNames.add(n)));
+  if (decls.length || headerDecls.length) notes.push(`carried over with them: ${[...hPool, ...cppPool].filter((c) => taken.has(c)).flatMap((c) => c.names).join(', ')}`);
   const tail = [...(decls.length ? ['', ...decls] : []), ...bodies.flatMap((b) => ['', b])];
   out.push({ path: cpp, content: `${upCpp.replace(/\s*$/, '')}\n${tail.join('\n')}\n` });
 
@@ -227,6 +353,22 @@ export function spliceUnit(input: {
       if (label && !header.split('\n').some((l) => LABEL.exec(l)?.[1]!.split(',').map((s) => s.trim()).includes(b))) {
         header = insertLines(header, [`// ${b}: ${label[2]!.trim()}`], LABEL, new RegExp(`\\b(class|struct)\\s+${cls}\\b`));
       }
+    }
+    for (const [cls, members] of carriedMembers) {
+      for (const m of members) header = addToClass(header, cls, m) ?? header;
+    }
+    if (headerDecls.length) {
+      const before = new RegExp(`^\\s*(?:class|struct)\\s+(?:${[...owners].join('|')})\\b[^;]*$`);
+      header = insertLines(header, [...headerDecls.map((c) => c.text), ''], /(?!)/, before);
+    }
+    // Their labels, for the names carried (a statement about other names stays out).
+    const labelled = new Set(header.split('\n').flatMap((l) => LABEL.exec(l)?.[1]!.split(',').map((x) => x.trim()) ?? []));
+    for (const l of oursHeader.split('\n')) {
+      const m = LABEL.exec(l);
+      const names = m ? m[1]!.split(',').map((x) => x.trim()).filter((n) => carriedNames.has(n) && !labelled.has(n)) : [];
+      if (!names.length) continue;
+      names.forEach((n) => labelled.add(n));
+      header = insertLines(header, [`// ${names.join(', ')}: ${m![2]!.trim()}`], /^\s*#pragma once/, /^\s*(?:class|struct)\b/);
     }
     out.push({ path: h, content: header });
   } else if (upH === null && oursH !== null) {

@@ -5,6 +5,8 @@
 // before — scope, cheat (incl. matched-body protection), leak, compare, preflight.
 import type { UnitEdit, WorkerOutput } from '@decomp/core';
 import { extractFunctions, lex, normalise } from '../gatekeeper/cpp.js';
+import { addMembers, classSpan } from './classDecls.js';
+import { expandElisions, type Elision } from './unitView.js';
 
 /** Placeholder the context builder puts in elided bodies; never valid inside an edit. */
 export const ELIDED_MARKER = 'accepted — kept verbatim by the orchestrator';
@@ -16,10 +18,14 @@ export interface Materialised {
   mode: 'files' | 'edits' | 'mixed';
 }
 
-export async function materialise(out: WorkerOutput, current: (path: string) => Promise<string | null>): Promise<Materialised> {
+export async function materialise(out: WorkerOutput, current: (path: string) => Promise<string | null>, elisions: Elision[] = []): Promise<Materialised> {
   const files = new Map<string, string>();
   const problems: string[] = [];
-  for (const f of out.files ?? []) files.set(f.path, expandPlaceholderSlots(f.content));
+  for (const f of out.files ?? []) {
+    const r = expandElisions(f.path, expandPlaceholderSlots(f.content), elisions);
+    if (r.missing.length) problems.push(`${f.path}: the returned file lost declarations that were elided from your view (${r.missing.slice(0, 8).join(', ')}): change this file with "edits" (members, replace, declarations), or keep every "// [elided #N: …]" line`);
+    files.set(f.path, r.content);
+  }
   for (const e of out.edits ?? []) {
     const base = files.get(e.path) ?? (await current(e.path)) ?? '';
     const r = applyEdit(base, e);
@@ -66,6 +72,35 @@ export function applyEdit(src: string, e: UnitEdit): { content: string; problems
     }
   }
 
+  for (const r of e.replace ?? []) {
+    const find = expandPlaceholderSlots(r.find.replace(/\r\n/g, '\n'));
+    const put = expandPlaceholderSlots(r.with.replace(/\r\n/g, '\n'));
+    const at = findOnce(out, find);
+    if (at === null) {
+      // Already what was asked for (the same text twice in one answer, a retry on the edited file).
+      if (put.trim().length > 12 && normalise(out).includes(normalise(put))) continue;
+      problems.push(`replace: ${out.includes(find) || findOnce(out, find, true) ? 'the text occurs more than once; give more of the lines around it' : 'the text to find is not in the file; copy it exactly from <unit>'}: "${find.trim().slice(0, 120)}"`);
+      continue;
+    }
+    out = `${out.slice(0, at[0])}${put}${out.slice(at[1])}`;
+  }
+
+  for (const m of e.members ?? []) {
+    const cls = m.class.split('::').pop()!.replace(/^(?:class|struct)\s+/, '').trim();
+    const span = classSpan(lex(out).code, cls);
+    if (!span) {
+      problems.push(`members: class ${cls} is not defined in this file; edit the file that defines it, or declare it in "declarations"`);
+      continue;
+    }
+    // A member the class already has is not added again.
+    const body = normalise(lex(out).code.slice(span.open + 1, span.close));
+    const fresh = m.code.replace(/\r\n/g, '\n').split('\n').filter((l) => {
+      const c = normalise(lex(l).code);
+      return !c || /^(?:public|protected|private):$/.test(c) || !body.includes(c);
+    });
+    if (fresh.some((l) => normalise(lex(l).code).replace(/^(?:public|protected|private):$/, ''))) out = addMembers(out, cls, fresh.join('\n')) ?? out;
+  }
+
   for (const fe of e.functions) {
     const code = fe.code.replace(/\r\n/g, '\n').trim();
     if (code.includes(ELIDED_MARKER)) {
@@ -85,6 +120,17 @@ export function applyEdit(src: string, e: UnitEdit): { content: string; problems
   }
   if (!out.endsWith('\n')) out += '\n';
   return { content: out, problems };
+}
+
+/** Where `find` occurs in `src`, exactly or with other spacing; null unless it occurs exactly once (`many`: at least once). */
+function findOnce(src: string, find: string, many = false): [number, number] | null {
+  const first = src.indexOf(find);
+  if (first >= 0) return many || src.indexOf(find, first + 1) < 0 ? [first, first + find.length] : null;
+  const tokens = find.trim().split(/\s+/);
+  if (!tokens[0]) return null;
+  const re = new RegExp(tokens.map((t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+'), 'g');
+  const hits = [...src.matchAll(re)];
+  return hits.length === 1 || (many && hits.length) ? [hits[0]!.index, hits[0]!.index + hits[0]![0].length] : null;
 }
 
 // Stand-in classes keep compared virtual slots at the right vtable offsets with runs of

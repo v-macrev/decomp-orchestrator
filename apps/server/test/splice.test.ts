@@ -91,7 +91,7 @@ describe('rebuild on upstream', () => {
 
   it('declares the function in the class and labels it', () => {
     expect(h).toContain('    int Width() const;');
-    expect(h).toMatch(/public:\n {4}int Height\(\) const;\n};/);
+    expect(h).toMatch(/public:\n {4}int Width\(\) const;\n {4}int w;\n {4}int Height\(\) const;\n};/);
     expect(h).toContain('// Height: GUESS(low)');
     expect(h).not.toContain('Gone');
   });
@@ -102,6 +102,31 @@ describe('rebuild on upstream', () => {
     expect(c).toContain('Widget::Height() const');
     expect(c).not.toContain('Widget::Gone');
     expect(c).not.toContain('0x140');
+  });
+
+  it('carries the members, types and helpers the bodies use, and nothing else', () => {
+    const ours = [
+      '#include "T.h"', '', 'void Tail(void* a, Topic* self);', 'struct Single { int pad[4]; void* value; };', 'static Single** g_single;',
+      'struct Unused', '{', '    int x;', '};', 'void Topic::A(void* v)', '{', '    ptr38 = v;', '    return Tail((*g_single)->value, this);', '}',
+      'void Topic::B()', '{', '    other = 0;', '}', '',
+    ].join('\n');
+    const oursH = [
+      '// Topic: EXE_RTTI', '// ptr38, Holder: GUESS(low); invented', '#pragma once', '#include <cstdint>', 'class Holder', '{', 'public:', '    virtual int Get();', '};', 'class Spare;',
+      'class Topic', '{', 'public:', '    virtual int GetType() const;', '    void A(void* v);', '    void B();', 'private:', '    std::uint8_t unk08[0x30];', '    void* ptr38;', '    Holder* other;', '};', '',
+    ].join('\n');
+    const upCpp = ['// 0x1 Topic::GetType', '#include "T.h"', 'int Topic::GetType() const', '{', '    return 1;', '}', ''].join('\n');
+    const upH = ['// Topic: EXE_RTTI', '#pragma once', '#include <cstdint>', 'class Topic', '{', 'public:', '    virtual int GetType() const;', '};', ''].join('\n');
+    const go = (header: string) => spliceUnit({ cpp: 'T.cpp', ours: new Map([['T.cpp', ours], ['T.h', oursH]]), upstream: new Map([['T.cpp', upCpp], ['T.h', header]]), keep: [fn('0x2', 'Topic::A')], drop: [fn('0x3', 'Topic::B')] }).files;
+    const [c, hh] = go(upH).map((f) => f.content) as [string, string];
+    expect(c).toContain('void Tail(void* a, Topic* self);\nstruct Single { int pad[4]; void* value; };\nstatic Single** g_single;\n\nvoid Topic::A');
+    expect(c).not.toMatch(/Unused|Topic::B/);
+    expect(hh).toMatch(/class Holder\n\{\npublic:\n {4}virtual int Get\(\);\n\};\n\nclass Topic\n\{\npublic:\n {4}virtual int GetType\(\) const;\n {4}void A\(void\* v\);\n {4}std::uint8_t unk08\[0x30\];\n {4}void\* ptr38;\n {4}Holder\* other;\n\};/);
+    expect(hh).toContain('// ptr38, Holder: GUESS(low); invented');
+    expect(hh).not.toContain('Spare');
+    // A class that has members of its own keeps exactly them.
+    const own = go(upH.replace('() const;\n}', '() const;\n    int mine;\n}'))[1]!.content;
+    expect(own).toContain('    int mine;');
+    expect(own).not.toContain('ptr38;');
   });
 
   it('leaves a function upstream already defines alone', () => {

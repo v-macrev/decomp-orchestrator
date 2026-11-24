@@ -128,7 +128,9 @@ How to work:
 - Write plausible original C++ a programmer could have written. Match control flow, field accesses, call order and store order.
 - Declare (do not define) functions the target calls; the comparator binds them by symbol. A tail jump is \`return Callee(...);\` as the last statement.
 - Prefer the declarations in <run_discoveries> and <local_context>: they are verified against this build.
-- Keep every accepted function exactly as it is. Label names by origin and mark guesses.
+- Keep every accepted function exactly as it is.
+- Every member function you define must be declared in its class. If the class lives in a <unit> file, add the declaration there ("members"; "replace" to change a layout); never redefine a class that exists. If it lives in another header, use what that header declares.
+- Origin labels are whole comment lines, right above what they name: "// <Name>[, <Name>]: GUESS(low)[; note]" (or COMMUNITY(<owner>/<repo>@<rev>, <licence>), OBSERVED, EXE_RTTI, STANDIN plus the origin of its name). Never write a label word without names before the colon, behind code, or inside prose.
 
 - On a retry: never resubmit a candidate in <history>, start from its best one, fix exactly the compiler errors <retry> lists; keep what already matched. Fix the first differing row of <compare_listing> first.
 
@@ -140,11 +142,11 @@ Never (rejected automatically; repeated attempts are quarantined): inline assemb
 
 Reply with ONLY one JSON object.
 When task_spec.outputMode is "edits" or "either", prefer edits — return only the functions you add or change:
-{"edits":[{"path":"<allowed path>","header":"<optional: replacement for the leading // lines>","declarations":"<optional: types/callees/globals to add after the includes>","functions":[{"name":"<Qualified::Name>","code":"<the complete definition>"}]}],"codeOrigin":"<one sentence>","adaptedBodies":"none","notes":"<one short paragraph>"}
-Each function replaces the definition with the same name, or is appended to the file.
+{"edits":[{"path":"<allowed path>","header":"<optional: replacement for the leading // lines>","declarations":"<optional: types/callees/globals to add after the includes>","members":[{"class":"<class defined in this file>","code":"<declarations to add to it>"}],"replace":[{"find":"<text that occurs once in the file>","with":"<new text>"}],"functions":[{"name":"<Qualified::Name>","code":"<the complete definition>"}]}],"codeOrigin":"<one sentence>","adaptedBodies":"none","notes":"<one short paragraph>"}
+Each function replaces the definition with the same name, or is appended to the file. "members" and "replace" are optional: they change a class of the .h (or .cpp) without returning the file. Use one edit per file; "functions" may be empty for a .h. An answer must change code: if nothing needs changing, return the functions as they are.
 When task_spec.outputMode is "files" or "either", you may instead return complete files:
 {"files":[{"path":"<allowed path>","content":"<the complete file>"}],"codeOrigin":"<one sentence>","adaptedBodies":"none","notes":"<one short paragraph>"}
-Never return a complete .cpp when outputMode is "edits" (elided bodies would be lost); a complete .h in "files" is fine in any mode, e.g. to change an #include.`;
+Never return a complete .cpp when outputMode is "edits" (elided bodies would be lost); a complete .h in "files" is fine in any mode if you saw all of it; keep every "// [elided …]" line (it stands for declarations that are kept for you).`;
 
 export const WORKER_OUTPUT_SCHEMA_V2: Record<string, unknown> = {
   type: 'object',
@@ -160,6 +162,8 @@ export const WORKER_OUTPUT_SCHEMA_V2: Record<string, unknown> = {
           path: { type: 'string' },
           header: { type: 'string' },
           declarations: { type: 'string' },
+          members: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['class', 'code'], properties: { class: { type: 'string' }, code: { type: 'string' } } } },
+          replace: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['find', 'with'], properties: { find: { type: 'string' }, with: { type: 'string' } } } },
           functions: {
             type: 'array',
             items: { type: 'object', additionalProperties: false, required: ['name', 'code'], properties: { name: { type: 'string' }, code: { type: 'string' } } },

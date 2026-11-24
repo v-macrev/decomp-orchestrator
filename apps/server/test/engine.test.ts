@@ -305,6 +305,55 @@ describe('re-gating packets only foreign compare results killed', () => {
   }, 60_000);
 });
 
+describe('a check that cannot be run', () => {
+  it('keeps a candidate whose functions all matched: the next attempt gates it again without a model call', async () => {
+    const s = setup(tmpDb(), { slots: 2 });
+    const preflight = s.repo.preflight.bind(s.repo);
+    let failures = 0;
+    const failed = new Set<string>();
+    s.repo.preflight = async (slot, task) => {
+      if (failed.has(task.id)) return preflight(slot, task);
+      failed.add(task.id);
+      failures++;
+      return { completed: false, ok: false, problems: [], infraError: 'preflight failed to run (exit 124)' };
+    };
+    const run = s.engine.createRun('infra', { flowId: 'default', selection: { source: 'synthetic', count: 6, seed: 9 }, routing: { enabled: false } }, flow(4, 2));
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    expect(failures).toBeGreaterThan(0);
+    const done = s.store.listTasks(run.id, { limit: 100 }).filter((t) => failed.has(t.id));
+    for (const t of done) {
+      const attempts = s.store.attemptsForTask(t.id);
+      const k = attempts.findIndex((a) => s.store.verdictsForTask(t.id).some((v) => v.attemptId === a.id && v.findings.some((f) => f.code.startsWith('INFRA'))));
+      expect(attempts[k + 1]!.model).toMatch(/^stored candidate( of .+)? \(no model call\)$/);
+      expect(['passed', 'staged']).toContain(t.state);
+      expect(t.infraFailures).toBe(1);
+    }
+    s.pool.close();
+    s.engine.close();
+  }, 60_000);
+
+  it('a packet such failures killed is re-gated for free', async () => {
+    const s = setup(tmpDb(), { slots: 2 });
+    const preflight = s.repo.preflight.bind(s.repo);
+    let down = true;
+    s.repo.preflight = async (...a) => (down ? { completed: false, ok: false, problems: [], infraError: 'preflight failed to run (exit 124)' } : preflight(...a));
+    const run = s.engine.createRun('infra', { flowId: 'default', selection: { source: 'synthetic', count: 4, seed: 9 }, routing: { enabled: false } }, flow(4, 2));
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const dead = s.store.listTasks(run.id, { state: 'dead', limit: 100 }).filter((t) => s.store.verdictsForTask(t.id).some((v) => v.findings.some((f) => f.code.startsWith('INFRA'))));
+    expect(dead.length).toBeGreaterThan(0);
+    for (const t of dead) expect(s.store.attemptsForTask(t.id).filter((a) => !a.model?.includes('no model call')).length).toBeLessThan(s.store.attemptsForTask(t.id).length);
+    down = false;
+    const r = await s.engine.regateMatched(run.id);
+    expect(r.packets).toBe(dead.length);
+    await s.engine.waitFor(run.id);
+    for (const t of dead) expect(['passed', 'staged']).toContain(s.store.getTask(t.id)!.state);
+    s.pool.close();
+    s.engine.close();
+  }, 60_000);
+});
+
 describe('packets the workers cannot finish', () => {
   it('sets aside, as held, a packet whose functions match but whose file fails the preflight on a line it did not write', async () => {
     // Every unit's base already has the include line; the preflight rejects that line in every file.

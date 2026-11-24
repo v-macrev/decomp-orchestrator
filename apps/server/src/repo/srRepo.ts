@@ -158,8 +158,8 @@ export class SrRepo implements RepoAdapter {
   }
 
   /** Run `python tools/contrib.py --json <args>` in a slot (or the main checkout) under the sandbox. */
-  async sr(cwd: string, args: string[], opts: { timeoutMs: number; signal?: AbortSignal }): Promise<{ run: RunResult; json: any }> {
-    const base = ['tools/contrib.py', '--json', ...args];
+  async sr(cwd: string, args: string[], opts: { timeoutMs: number; signal?: AbortSignal }, launcher?: string): Promise<{ run: RunResult; json: any }> {
+    const base = [...(launcher ? ['-c', launcher] : ['tools/contrib.py']), '--json', ...args];
     let run: RunResult;
     if (this.cfg.sandbox.mode === 'docker') {
       const sb = this.cfg.sandbox;
@@ -669,7 +669,7 @@ export class SrRepo implements RepoAdapter {
   }
 
   async preflight(slot: number, _task: TaskRow, prep: PreparedTask, opts: { signal: AbortSignal; timeoutMs: number }): Promise<PreflightOutcome> {
-    const { run, json } = await this.sr(this.wt(slot), ['preflight', prep.srTaskId ?? ''], opts);
+    const { run, json } = await this.sr(this.wt(slot), ['preflight', prep.srTaskId ?? ''], opts, FAST_PREFLIGHT_PY);
     if (run.timedOut || run.code === 124 || !json) return { completed: false, ok: false, problems: [], infraError: `preflight failed to run (exit ${run.code}): ${(run.stderr || run.stdout).slice(0, 200)}` };
     if (run.code === 0) return { completed: true, ok: true, problems: [], infraError: null };
     // contrib.py preflight returns {problems|blockers, label_findings, origin_findings, warnings, messages}
@@ -1623,6 +1623,102 @@ patch('contrib', 'pdb_names', lambda f: lambda ctx: None)
 patch('pdb_facts', 'brief', lambda f: lambda *a, **k: '')
 if hasattr(contrib.Ctx, 'say'):
     contrib.Ctx.say = lambda self, line: None
+sys.exit(contrib.main(sys.argv[1:]))
+`;
+
+/**
+ * `sr preflight` reads the report of every function accepted so far (tens of thousands, twice) to find
+ * the units a change may touch: over a minute alone, minutes with the other gates running. The list
+ * depends only on the committed reports, so it is read once per base revision and kept in the local
+ * folder; every check still runs, and a step that fails falls back to upstream's own reading. (A real
+ * submit runs the unmodified tool.)
+ */
+export const FAST_PREFLIGHT_PY = `
+import hashlib, json, os, subprocess, sys
+sys.path.insert(0, 'tools')
+import contrib
+
+def git(*args):
+    return subprocess.run(['git', *args], capture_output=True, text=True, check=True, timeout=60).stdout
+
+def cache_file():
+    local = os.environ.get('SR_LOCAL_DIR')
+    paths = ['data/progress.json', 'reports']
+    if not local or git('status', '--porcelain', '--', *paths).strip():
+        return None
+    ids = git('rev-parse', *['HEAD:' + p for p in paths], 'HEAD:tools')
+    return os.path.join(local, 'orchestrator', 'accepted-%s.json' % hashlib.sha256(ids.encode()).hexdigest()[:24])
+
+def read(path):
+    try:
+        with open(path, encoding='utf-8') as f:
+            return [(fn, source) for fn, source in json.load(f)]
+    except (OSError, ValueError, TypeError):
+        return None
+
+def collect(original, root):
+    try:
+        import record_store
+        record_store.CACHE_SHARDS = max(record_store.CACHE_SHARDS, 1 << 20)
+    except (ImportError, AttributeError, TypeError):
+        pass
+    return list(original(root))
+
+def keep(path, rows):
+    part = '%s.%d.part' % (path, os.getpid())
+    with open(part, 'w', encoding='utf-8') as f:
+        json.dump(rows, f)
+    os.replace(part, path)
+    for name in os.listdir(os.path.dirname(path)):
+        if name.startswith('accepted-') and name.endswith('.json') and name != os.path.basename(path):
+            os.remove(os.path.join(os.path.dirname(path), name))
+
+def accepted(original):
+    memo = {}
+    def get(root):
+        if os.path.realpath(str(root)) != os.path.realpath('.'):
+            return original(root)
+        if 'rows' not in memo:
+            memo['rows'] = load(root)
+        return iter(memo['rows'])
+    def load(root):
+        try:
+            path = cache_file()
+        except (OSError, subprocess.SubprocessError):
+            path = None
+        if not path:
+            return collect(original, root)
+        rows = read(path)
+        if rows is not None:
+            return rows
+        lock = None
+        try:
+            import fcntl
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            lock = open(os.path.join(os.path.dirname(path), 'accepted.lock'), 'w')
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            rows = read(path)
+        except (ImportError, OSError):
+            pass
+        try:
+            if rows is None:
+                rows = collect(original, root)
+                try:
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    keep(path, rows)
+                except (OSError, TypeError, ValueError):
+                    pass
+            return rows
+        finally:
+            if lock:
+                lock.close()
+    return get
+
+try:
+    import contrib_validation
+    contrib_validation.accepted_sources = accepted(contrib_validation.accepted_sources)
+except (ImportError, AttributeError):
+    pass
 sys.exit(contrib.main(sys.argv[1:]))
 `;
 

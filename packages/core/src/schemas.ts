@@ -490,6 +490,10 @@ export const UnitEdit = z.object({
   header: z.string().max(4_000).optional(),
   /** Declarations (types, callees, globals) inserted after the includes if not already present. */
   declarations: z.string().max(50_000).optional(),
+  /** Member declarations added (publicly) at the end of a class the file defines. */
+  members: z.array(z.object({ class: z.string().min(1).max(200), code: z.string().min(1).max(20_000) })).max(20).optional(),
+  /** Exact replacements of text that occurs once in the file (a class layout, an include). */
+  replace: z.array(z.object({ find: z.string().min(1).max(20_000), with: z.string().max(40_000) })).max(20).optional(),
   functions: z.array(FunctionEdit).max(60).default([]),
 });
 export type UnitEdit = z.infer<typeof UnitEdit>;
@@ -641,7 +645,7 @@ export type SectionBudget = z.infer<typeof SectionBudget>;
 
 /** Token budgets per section (estimates; ~3.3 chars/token for code). */
 export const ContextBudgets = z.object({
-  static_system_prefix: SectionBudget.default({ min: 800, max: 1_400 }),
+  static_system_prefix: SectionBudget.default({ min: 800, max: 1_800 }),
   function_spec: SectionBudget.default({ min: 150, max: 300 }),
   disassembly_slice: SectionBudget.default({ min: 500, max: 2_500 }),
   minimal_local_context: SectionBudget.default({ min: 400, max: 2_000 }),
@@ -700,6 +704,8 @@ export const TaskContextBundle = z.object({
   outputMode: z.enum(['files', 'edits', 'either']),
   /** Accepted functions whose bodies were hidden from the prompt (must not be returned). */
   elidedFunctions: z.array(z.string()),
+  /** Declarations left out of a unit file that did not fit, by the marker line shown in their place. */
+  elisions: z.array(z.object({ path: z.string(), marker: z.string(), text: z.string(), names: z.array(z.string()) })).default([]),
   /** Detected code patterns used to match lessons (sse, vtable, eh, loop, switch, ...). */
   patterns: z.array(z.string()),
   /** Skills considered for this attempt (injected or held out) — recorded per attempt for lift telemetry. */

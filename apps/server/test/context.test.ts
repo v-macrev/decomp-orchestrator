@@ -151,7 +151,8 @@ describe('budgeted bundle', () => {
     expect(new Set(bundles.map((x) => x.staticPrefixHash)).size).toBe(1);
     expect(new Set(bundles.map((x) => x.sections[0]!.content)).size).toBe(1);
     for (const x of bundles) {
-      for (const s of x.sections) expect(s.tokens).toBeLessThanOrEqual(s.budgetTokens + 60);
+      // (The packet's own class is shown even beyond the unit budget, up to twice of it.)
+      for (const s of x.sections) expect(s.tokens / (s.kind === 'unit_files' ? 2 : 1)).toBeLessThanOrEqual(s.budgetTokens + 60);
       expect(x.tokens.sent).toBeLessThan(x.tokens.raw * 0.5);
       expect(x.containsPrivate).toBe(true);
       expect(x.sections.map((s) => s.kind)[0]).toBe('static_system_prefix');

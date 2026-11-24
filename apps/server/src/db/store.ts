@@ -121,7 +121,7 @@ export interface BatchFix {
   dropped?: Array<{ rva: string; name: string | null; why: string }>;
   /** For 'regate': functions of the stored candidate that are not this packet's; taken out of it before it is submitted. */
   without?: Array<{ rva: string; name: string | null; why: string }>;
-  /** Only the free attempt: when it fails, the packet is dead again without a model call. */
+  /** Only the free attempt: when it fails, the packet is dead again (a 'rebuild': set aside again) without a model call. */
   freeOnly?: boolean;
 }
 

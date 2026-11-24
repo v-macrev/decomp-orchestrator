@@ -1385,6 +1385,36 @@ describe('accepting functions one by one', () => {
     expect(Object.values(s.store.functionCounts(run.id)).reduce((a, b) => a + b, 0)).toBe(12);
   }, 60_000);
 
+  it('a free rebuild of a set-aside unit that does not pass is set aside again as it was, with no model call', async () => {
+    const s = setup({ cheatRate: 0, skill: 1 });
+    const run = whole(s, 'rebuild');
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const t = s.store.listTasks(run.id, { state: 'staged', limit: 100 }).find((x) => x.functions.length > 1)!;
+    s.store.db.prepare("UPDATE tasks SET state = 'set_aside' WHERE id = ?").run(t.id);
+    const gone = t.functions[0]!;
+    // Upstream now has one of its functions in a unit of its own.
+    const state = s.repo.upstreamState.bind(s.repo);
+    s.repo.upstreamState = async (i) => ({ ...(await state(i)), marked: { [gone.rva]: [{ unit: 'reconstruction/other.cpp', name: null }] } });
+    const compare = s.repo.compare.bind(s.repo);
+    s.repo.compare = async (...args: Parameters<SimRepo['compare']>) => {
+      const r = await compare(...args);
+      return { ...r, allPass: false, functions: r.functions.map((f) => ({ ...f, result: 'fail' as const, reason: 'code-mismatch', exactBytes: 1 })) };
+    };
+    const spent = () => s.store.listTasks(run.id, { limit: 1000 }).flatMap((x) => s.store.attemptsForTask(x.id)).reduce((n, a) => n + (a.costUsd ?? 0), 0);
+    const cost = spent();
+    const r = await s.engine.rebuildOnUpstream(run.id, [t.unit], { free: true });
+    expect(r.dropped.map((d) => [d.rva, d.why])).toEqual([[gone.rva, 'already in reconstruction/other.cpp upstream']]);
+    await s.engine.waitFor(run.id);
+    const now = s.store.getTask(t.id)!;
+    expect(now.state).toBe('set_aside');
+    expect(s.store.attemptsForTask(t.id).at(-1)!.model).toMatch(/^splice of .+ [(]no model call[)]$/);
+    expect(now.lastVerdictId).toBe(t.lastVerdictId);
+    expect(now.functions.map((f) => f.rva)).toEqual(t.functions.slice(1).map((f) => f.rva));
+    expect(spent()).toBe(cost);
+    expect(finishingModel(s.store, now)).toBe(finishingModel(s.store, t));
+  }, 60_000);
+
   it('salvages matched functions of packets that died before, without a model call; the preview changes nothing', async () => {
     const s = setup({ cheatRate: 0, skill: 1 });
     const { unit, bad, good } = await stubborn(s);

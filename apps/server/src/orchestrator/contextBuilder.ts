@@ -33,7 +33,8 @@ import { identifiersOf } from '../intel/knowledge.js';
 import { distillRules, type DistilledRules } from '../intel/ruleDistiller.js';
 import type { PreparedTask, RepoAdapter } from '../repo/types.js';
 import { charsFor, clipToTokens, estimateTokens } from '../util/tokens.js';
-import { collapsePlaceholderSlots, elideBodies } from './edits.js';
+import { collapsePlaceholderSlots, elideBodies, expandPlaceholderSlots } from './edits.js';
+import { focusFile, type Elision } from './unitView.js';
 import { FINDING_GUIDANCE, failureCategory, failureSignals } from './lessons.js';
 import { bestScore, renderHistory } from './history.js';
 import { WORKER_CONTRACT_V2, buildStaticPrefix, fixSummary, type Feedback } from './prompts.js';
@@ -167,20 +168,38 @@ export class TaskContextBuilder {
     const mustElide = opts.context.outputMode === 'edits' || unitTokens > B.unit_files.max;
     const elided: string[] = [];
     const unitParts: string[] = [];
-    for (const [p, text] of unitTexts) {
-      if (text === null) {
-        unitParts.push(`<unit title="Current ${p}" source="${p}" state="new file"></unit>`);
-        continue;
-      }
+    const elisions: Elision[] = [];
+    const budget = Math.max(B.unit_files.max, 400);
+    const owners = new Set(task.functions.flatMap((f) => (f.name ?? '').split('::').slice(0, -1)));
+    const wanted = new Set(task.functions.flatMap((f) => (f.name ? identifiersOf(f.name) : [])));
+    const views = [...unitTexts].map(([p, text]) => {
+      if (text === null) return { p, text: null };
       let shown = collapsePlaceholderSlots(text);
       if (mustElide && p.endsWith('.cpp')) {
         const e = elideBodies(shown, isTarget);
         shown = e.text;
         elided.push(...e.elided);
       }
+      return { p, text: shown };
+    });
+    const shownTokens = views.reduce((n, v) => n + estimateTokens(v.text ?? ''), 0);
+    for (const v of views) {
+      if (v.text === null || shownTokens <= budget) continue;
+      // Each file gets its share of the budget; the packet's classes are shown even beyond it.
+      const f = focusFile(v.p, v.text, Math.max(400, Math.floor((budget * estimateTokens(v.text)) / shownTokens)), owners, wanted);
+      v.text = f.text;
+      elisions.push(...f.elisions.map((e) => ({ ...e, text: expandPlaceholderSlots(e.text) })));
+    }
+    for (const { p, text } of views) {
+      if (text === null) {
+        unitParts.push(`<unit title="Current ${p}" source="${p}" state="new file"></unit>`);
+        continue;
+      }
+      const shown = text;
       unitParts.push(`<unit title="Current ${p}" source="${p}"${mustElide ? ' accepted_bodies="elided"' : ''}>\n${shown}\n</unit>`);
     }
-    const unitClip = clipToTokens(unitParts.join('\n'), Math.max(B.unit_files.max, 400));
+    // A class of the packet larger than the budget is still shown; only this hard limit cuts the end off.
+    const unitClip = clipToTokens(unitParts.join('\n'), budget * 2);
     const outputMode: TaskContextBundle['outputMode'] = mustElide ? 'edits' : opts.context.outputMode === 'files' ? 'files' : 'either';
     if (opts.carried.length) unitClip.text += `\n(Functions accepted earlier in this run are already in these files: ${opts.carried.map((c) => c.path).join(', ')}.)`;
     add('unit_files', 'Packet files', unitClip.text, unitTokens, prepared.allowedPaths, unitClip.truncated);
@@ -329,7 +348,7 @@ export class TaskContextBuilder {
     const bundle: TaskContextBundle = {
       version: 2, hash, taskId: task.id, difficulty: task.difficulty, allowedPaths: prepared.allowedPaths, staticPrefixHash: prefix.hash,
       sections, tokens: { sent, raw, staticPrefix: sections[0]?.tokens ?? 0, taskPrefix }, containsPrivate: sections.some((s) => s.privacy === 'private'),
-      outputMode, elidedFunctions: elided, patterns, skills: selections, coreSkillsHash: core?.hash ?? '',
+      outputMode, elidedFunctions: elided, elisions, patterns, skills: selections, coreSkillsHash: core?.hash ?? '',
     };
     // Persist for audit, private sections redacted (game-derived text never leaves .local/).
     this.store.putBundle(hash, {
