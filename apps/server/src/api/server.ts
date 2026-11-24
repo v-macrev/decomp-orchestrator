@@ -12,6 +12,7 @@ import { allocateSlots } from '../orchestrator/engine.js';
 import { z } from 'zod';
 import type { App } from '../app.js';
 import { fromRoot } from '../config.js';
+import { deskEnabled, registerDeskRoutes } from '../desk.js';
 import { ingestGithubReviews, seedRepoLessons } from '../orchestrator/lessons.js';
 import { runMetrics } from '../telemetry/metrics.js';
 import { PACKET_FACETS, PACKET_SORTS } from '../db/store.js';
@@ -47,7 +48,7 @@ export async function buildServer(app: App) {
   const { store, engine, pool, events } = app;
   const notFound = (reply: FastifyReply, what: string) => reply.code(404).send({ error: `${what} not found` });
 
-  f.get('/api/health', async () => ({ ok: true, mode: app.cfg.mode, repo: app.repo.name, slots: app.repo.slotCount, runDefaults: app.cfg.runDefaults }));
+  f.get('/api/health', async () => ({ ok: true, mode: app.cfg.mode, repo: app.repo.name, slots: app.repo.slotCount, runDefaults: app.cfg.runDefaults, desk: deskEnabled(app.cfg) }));
 
   // ---------------- accounts
   f.get('/api/accounts', async () => store.listAccounts());
@@ -207,7 +208,7 @@ export async function buildServer(app: App) {
   // Edit a run's name and the settings that can still change (draftedBy, budget, PR size, staging before it finishes).
   const EditRun = z.object({
     name: z.string().min(1).max(120).optional(), draftedBy: z.string().min(1).max(200).optional(), budgetUsd: z.number().positive().nullable().optional(),
-    prBatchSize: z.number().int().min(1).max(60).optional(), staging: z.enum(['branches', 'off']).optional(),
+    prBatchSize: z.number().int().min(1).max(60).optional(), staging: z.enum(['branches', 'off']).optional(), autoPrepare: z.boolean().optional(),
   }).strict();
   f.patch('/api/runs/:id', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
     const patch = EditRun.parse(req.body ?? {});
@@ -328,10 +329,29 @@ export async function buildServer(app: App) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
+  // The orchestrator decides which packets the comments need changed; nothing is sent to the workers.
+  f.post('/api/runs/:id/batches/:batchId/triage-review', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return { ok: true, ...(await engine.triageReview(req.params.id, req.params.batchId)) };
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
+  // Take the packets of a review fix back, as they were submitted.
+  f.post('/api/runs/:id/batches/:batchId/recall-review', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
+    if (!store.getRun(req.params.id)) return notFound(reply, 'run');
+    try {
+      return await engine.recallReviewFix(req.params.id, req.params.batchId);
+    } catch (e) {
+      return reply.code(409).send({ ok: false, error: (e as Error).message });
+    }
+  });
   f.post('/api/runs/:id/batches/:batchId/fix-review', async (req: FastifyRequest<{ Params: { id: string; batchId: string } }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');
     try {
-      return await engine.fixFromReview(req.params.id, req.params.batchId);
+      const body = z.object({ only: z.array(z.string()).max(500).optional() }).parse(req.body ?? {});
+      return await engine.fixFromReview(req.params.id, req.params.batchId, body.only ? { only: body.only } : {});
     } catch (e) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
@@ -426,10 +446,11 @@ export async function buildServer(app: App) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
   });
-  f.post('/api/runs/:id/regate-matched', async (req: FastifyRequest<{ Params: { id: string } }>, reply) => {
+  // `partial`: also dead packets only some of whose functions matched. `preview`: change nothing.
+  f.post('/api/runs/:id/regate-matched', async (req: FastifyRequest<{ Params: { id: string }; Body: { partial?: boolean; preview?: boolean } | undefined }>, reply) => {
     if (!store.getRun(req.params.id)) return notFound(reply, 'run');
     try {
-      return { ok: true, ...(await engine.regateMatched(req.params.id)) };
+      return { ok: true, ...(await engine.regateMatched(req.params.id, { partial: req.body?.partial === true, preview: req.body?.preview === true })) };
     } catch (e) {
       return reply.code(409).send({ ok: false, error: (e as Error).message });
     }
@@ -630,7 +651,17 @@ export async function buildServer(app: App) {
     });
   });
 
+  // ---------------- desk views (read-only)
+  registerDeskRoutes(f, app.cfg);
+
   // ---------------- UI
+  // The policy makes the browser itself refuse any request to another host.
+  f.addHook('onSend', async (req, reply) => {
+    if (req.url.startsWith('/api/')) return;
+    reply.header('content-security-policy', "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+    reply.header('x-content-type-options', 'nosniff');
+    reply.header('referrer-policy', 'no-referrer');
+  });
   const web = fromRoot('apps/web/dist');
   if (existsSync(web)) {
     // wildcard routing resolves files per request, so a rebuilt UI is served without a restart

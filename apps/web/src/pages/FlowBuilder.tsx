@@ -375,7 +375,7 @@ function Builder() {
           connectionMode={ConnectionMode.Loose}
           connectionRadius={36}
           isValidConnection={isValidConnection}
-          colorMode="system"
+          colorMode={(document.documentElement.dataset.theme as 'light' | 'dark') ?? 'light'}
           fitView
           deleteKeyCode={['Backspace', 'Delete']}
         >

@@ -10,9 +10,11 @@ import { defaultFlow, type Flow } from '@decomp/core';
 import { openDatabase } from '../src/db/database.js';
 import { Store } from '../src/db/store.js';
 import { readyThreshold, RunEngine } from '../src/orchestrator/engine.js';
-import { packUnits } from '../src/orchestrator/staging.js';
+import { batchContent, finishingModel, packUnits } from '../src/orchestrator/staging.js';
+import type { FunctionTarget } from '@decomp/core';
+import { matchedSides } from '../src/orchestrator/engine.js';
 import type { PrComment, PrStatus } from '../src/repo/types.js';
-import { commentLine, reviewComments, reviewTargets } from '../src/orchestrator/review.js';
+import { commentLine, reviewComments, triageTargets } from '../src/orchestrator/review.js';
 import type { TaskRow } from '../src/db/store.js';
 import { AccountPool } from '../src/pool/scheduler.js';
 import { ProviderRegistry } from '../src/providers/registry.js';
@@ -58,7 +60,7 @@ function setup(accountOptions: Record<string, unknown> = {}) {
   const store = new Store(openDatabase(join(d, 'orch.db')));
   const events = new EventBus(store);
   const repo = new SimRepo({ slots: 4, compareLatencyMs: [1, 3], infraRate: 0 });
-  const accounts = [mockAccount('m', { tags: ['w'], options: { latencyMs: [1, 3], skill: 0.95, ...accountOptions } })];
+  const accounts = [mockAccount('m', { tags: ['w', 'orchestrator'], options: { latencyMs: [1, 3], skill: 0.95, ...accountOptions } })];
   const pool = new AccountPool(accounts, store, events, { circuitBaseMs: 100, rateLimitBaseMs: 20, overloadCooldownMs: 20 });
   const providers = new ProviderRegistry({ oracle: repo });
   const engine = new RunEngine({ store, pool, providers, repo, events }, { leaseMs: 5_000, heartbeatMs: 500, infraBackoffMs: 5, idlePollMs: 20 });
@@ -983,11 +985,12 @@ describe('pull requests after submission', () => {
     const inline = comment({ kind: 'inline', path: 'reconstruction/a/A.cpp', line: 12, body: 'use the field name' });
     expect(reviewComments({ comments: [own, general, inline, comment({ body: '  ' })] })).toEqual([general, inline]);
     expect(commentLine(inline)).toBe('reviewer on reconstruction/a/A.cpp:12: use the field name');
-    const t = (id: string, unit: string) => ({ id, unit }) as unknown as TaskRow;
-    const tasks = [t('a', 'reconstruction/a/A.cpp'), t('b', 'reconstruction/b/B.cpp')];
-    const out = reviewTargets(tasks, new Map([['a', ['reconstruction/a/A.cpp']], ['b', ['reconstruction/b/B.cpp']]]), [general, inline]);
-    expect(out.get('a')).toEqual([commentLine(general), commentLine(inline)]);
-    expect(out.get('b')).toEqual([commentLine(general)]);
+    const item = (over: object) => ({ comment: 1, needed: true, packets: [] as number[], instruction: 'do it', why: 'because', ...over });
+    const out = triageTargets({ summary: '', items: [item({ needed: false, packets: [1] }), item({ comment: 2, packets: [2, 2], instruction: 'use the\n field name' })] }, ['a', 'b'], [general, inline]);
+    expect([...out.fix]).toEqual([['b', ['use the field name (asked by reviewer)']]]);
+    expect(out.skipped).toEqual([{ author: 'reviewer', why: 'because' }]);
+    expect(() => triageTargets({ summary: '', items: [item({ packets: [3] })] }, ['a', 'b'], [general])).toThrow(/packet 3/);
+    expect(() => triageTargets({ summary: '', items: [item({ comment: 9, packets: [1] })] }, ['a', 'b'], [general])).toThrow(/comment 9/);
   });
 
   it('reads the PR state and comments, and explains the comments once until they change', async () => {
@@ -1012,15 +1015,87 @@ describe('pull requests after submission', () => {
     await expect(s.engine.fixFromReview(run.id, batch.id)).rejects.toThrow(/merged/);
   }, 60_000);
 
+  /** The orchestrator's answer: every packet of these units needs the change. */
+  const orchestratorSays = (s: ReturnType<typeof setup>, packets: number[]) => vi.spyOn(s.providers, 'complete').mockResolvedValueOnce({
+    text: JSON.stringify({ summary: 'One request.', items: [{ comment: 1, needed: packets.length > 0, packets, instruction: 'name the field', why: 'asked inline' }] }),
+    usage: { inputTokens: 100, outputTokens: 50, cacheReadTokens: 0, cacheWriteTokens: 0 }, stopReason: 'end',
+  });
+
+  it('sends nothing before the orchestrator has decided, and only what it named', async () => {
+    const { s, run, batch, tasks } = await submitted('pr-triage');
+    s.repo.pullRequests.set(PR, status('open', [comment({ body: 'two of these headers are too long' })]));
+    await expect(s.engine.fixFromReview(run.id, batch.id)).rejects.toThrow(/ask the orchestrator first/);
+    const call = orchestratorSays(s, [99]);
+    await expect(s.engine.triageReview(run.id, batch.id)).rejects.toThrow(/packet 99/);
+    orchestratorSays(s, []);
+    expect((await s.engine.triageReview(run.id, batch.id)).fix).toEqual([]);
+    await expect(s.engine.fixFromReview(run.id, batch.id)).rejects.toThrow(/nothing that needs fixing/);
+    const n = call.mock.calls.length;
+    expect((await s.engine.triageReview(run.id, batch.id)).cached).toBe(true);
+    expect(call.mock.calls.length).toBe(n);
+    // Another comment: the old decision no longer counts.
+    s.repo.pullRequests.set(PR, status('open', [comment({ body: 'and the third one' })]));
+    await expect(s.engine.fixFromReview(run.id, batch.id)).rejects.toThrow(/comments changed/);
+    orchestratorSays(s, [1]);
+    const plan = await s.engine.triageReview(run.id, batch.id);
+    expect(plan.fix.map((f) => f.taskId)).toEqual([tasks[0]!.id]);
+    expect(call.mock.calls.at(-1)![1].prompt).toContain(`[1] ${tasks[0]!.unit}`);
+    await expect(s.engine.fixFromReview(run.id, batch.id, { only: [] })).rejects.toThrow(/no packet was chosen/);
+    for (const t of tasks) expect(s.store.getTask(t.id)!.state).toBe('staged');
+  }, 60_000);
+
+  it('refuses, without a model call, once someone else pushed to the PR', async () => {
+    const { s, run, batch, tasks } = await submitted('pr-moved');
+    s.repo.pullRequests.set(PR, status('open', [comment({ body: 'fix this' })]));
+    (s.repo as { branchHead?: (b: string) => Promise<string | null> }).branchHead = async () => 'ours';
+    const call = vi.spyOn(s.providers, 'complete');
+    await expect(s.engine.triageReview(run.id, batch.id)).rejects.toThrow(/someone else pushed/);
+    await expect(s.engine.fixFromReview(run.id, batch.id)).rejects.toThrow(/someone else pushed/);
+    expect(call).not.toHaveBeenCalled();
+    for (const t of tasks) expect(s.store.getTask(t.id)!.state).toBe('staged');
+  }, 60_000);
+
+  it('takes packets back from the agents exactly as they were submitted', async () => {
+    const { s, run, batch, tasks } = await submitted('pr-recall');
+    const before = new Map(tasks.map((t) => [t.id, t.lastVerdictId]));
+    await expect(s.engine.recallReviewFix(run.id, batch.id)).rejects.toThrow(/nothing of this pull request/);
+    s.repo.pullRequests.set(PR, status('open', [comment({ body: 'rework all of it' })]));
+    orchestratorSays(s, tasks.map((_, i) => i + 1));
+    await s.engine.triageReview(run.id, batch.id);
+    // Hold every compare, so the packets are with the workers when the run is paused.
+    const real = s.repo.compare.bind(s.repo);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    s.repo.compare = async (...a: Parameters<SimRepo['compare']>) => { await gate; return real(...a); };
+    await s.engine.fixFromReview(run.id, batch.id);
+    await until(() => s.engine.status(run.id).busySlots > 0);
+    await expect(s.engine.recallReviewFix(run.id, batch.id)).rejects.toThrow(/pause it now/);
+    s.engine.pause(run.id, true);
+    release();
+    await until(() => s.engine.status(run.id).busySlots === 0);
+    // One of them was already matched again by the agents: its new version is dropped too.
+    s.store.db.prepare("UPDATE tasks SET state = 'passed', last_verdict_id = 'vd_new' WHERE id = ?").run(tasks[0]!.id);
+    const r = await s.engine.recallReviewFix(run.id, batch.id);
+    expect(r).toMatchObject({ ok: true, packets: tasks.length });
+    await s.engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    for (const t of tasks) expect(s.store.getTask(t.id)).toMatchObject({ state: 'staged', lastVerdictId: before.get(t.id), fix: null });
+    const b = s.store.getBatch(batch.id)!;
+    expect(b.status).toBe('submitted');
+    expect((b.detail as unknown as { reviewFix?: unknown }).reviewFix).toBeUndefined();
+  }, 60_000);
+
   it('fixes an open PR from its comments with the agents and pushes the fixes to the same PR', async () => {
     const { s, run, batch, tasks } = await submitted('pr-fix-open');
     const victim = tasks[0]!;
     s.repo.pullRequests.set(PR, status('open', [comment({ kind: 'inline', path: victim.unit, line: 3, body: 'name the field' })]));
+    const sameUnit = tasks.filter((t) => t.unit === victim.unit);
+    orchestratorSays(s, sameUnit.map((t) => tasks.indexOf(t) + 1));
+    await s.engine.triageReview(run.id, batch.id);
     const r = await s.engine.fixFromReview(run.id, batch.id);
     expect(r).toMatchObject({ ok: true, open: true, comments: 1 });
-    const sameUnit = tasks.filter((t) => t.unit === victim.unit);
     expect(r.requeued).toBe(sameUnit.length);
-    expect(s.store.getTask(victim.id)!.fix).toMatchObject({ check: 'review', prOpen: true, pr: PR, reasons: [`reviewer on ${victim.unit}:3: name the field`] });
+    expect(s.store.getTask(victim.id)!.fix).toMatchObject({ check: 'review', prOpen: true, pr: PR, reasons: ['name the field (asked by reviewer)'] });
     expect(s.store.getBatch(batch.id)!.status).toBe('submitted');
     await s.engine.waitFor(run.id);
     for (const t of tasks.filter((x) => x.unit !== victim.unit)) expect(s.store.getTask(t.id)!.state).toBe('staged');
@@ -1043,6 +1118,8 @@ describe('pull requests after submission', () => {
   it('fixes a closed PR from its comments into a new batch with the rest of its packets', async () => {
     const { s, run, batch, tasks } = await submitted('pr-fix-closed');
     s.repo.pullRequests.set(PR, status('closed', [comment({ body: 'closing: the names are guesses' })]));
+    orchestratorSays(s, tasks.map((_, i) => i + 1));
+    await s.engine.triageReview(run.id, batch.id);
     const r = await s.engine.fixFromReview(run.id, batch.id);
     expect(r).toMatchObject({ open: false, requeued: tasks.length });
     expect(s.store.getBatch(batch.id)!.status).toBe('superseded');
@@ -1142,6 +1219,214 @@ describe('batching while the run goes on', () => {
     // The held unit was not in that batch: it is still matched, waiting for Prepare all.
     expect(s.store.listTasks(run.id, { state: 'passed', limit: 1000 }).some((t) => t.unit === hold.unit())).toBe(true);
   }, 60_000);
+});
+
+describe('smaller batches after a wait', () => {
+  it('batches ready functions that waited long enough, and dry-runs them on its own', async () => {
+    const s = setup();
+    const dry: Array<{ seq: number; dryRun: boolean }> = [];
+    (s.repo as RepoAdapter).submitBatch = async (input): Promise<SubmitBatchResult> => {
+      dry.push({ seq: input.seq, dryRun: input.dryRun });
+      return { ok: true, dryRun: input.dryRun, problems: [], blockers: [], uncheckedClaims: [], warnings: [], plan: [], pullRequest: null, link: null, error: null };
+    };
+    const real = s.repo.compare.bind(s.repo);
+    let held: string | null = null;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    s.repo.compare = async (...args: Parameters<SimRepo['compare']>) => {
+      held ??= args[1].unit;
+      if (args[1].unit === held) await gate;
+      return real(...args);
+    };
+    const run = s.engine.createRun('aged', { flowId: 'default', selection: { source: 'synthetic', count: 20, seed: 11 }, prBatchSize: 60, batchMaxAgeMinutes: 30, batchMinFunctions: 4 }, flow());
+    await s.engine.start(run.id);
+    await until(() => s.engine.batchingStatus(run.id).ready.functions >= 8);
+    await new Promise((r) => setTimeout(r, 400));
+    expect(s.store.listBatches(run.id)).toHaveLength(0); // far from a full batch, and nothing has waited
+    s.store.db.prepare("UPDATE tasks SET updated_at = updated_at - 3600000 WHERE run_id = ? AND state = 'passed'").run(run.id);
+    (s.engine as unknown as { stageReadySoon(id: string): void }).stageReadySoon(run.id);
+    await until(() => s.events.query({ runId: run.id, limit: 500 }).some((e) => e.kind === 'run.prepared'));
+    expect(s.store.getRun(run.id)!.status).toBe('running');
+    const b = s.store.listBatches(run.id).filter((x) => x.status === 'branch_ready');
+    expect(b.length).toBeGreaterThan(0);
+    expect(dry.length).toBeGreaterThan(0);
+    expect(dry.every((d) => d.dryRun)).toBe(true);
+    release();
+    await s.engine.waitFor(run.id);
+    expect(s.store.getRun(run.id)!.status).toBe('completed');
+    await until(() => !s.engine.operation() && s.store.listBatches(run.id).filter((x) => x.status === 'branch_ready').every((x) => dry.some((d) => d.seq === x.seq)));
+    expect(dry.every((d) => d.dryRun)).toBe(true);
+    expect(s.store.listBatches(run.id).some((x) => x.status === 'submitted')).toBe(false);
+  }, 60_000);
+
+  it('leaves everything to the operator with autoPrepare off', async () => {
+    const s = setup();
+    let calls = 0;
+    (s.repo as RepoAdapter).submitBatch = async (): Promise<SubmitBatchResult> => {
+      calls++;
+      throw new Error('not expected');
+    };
+    const run = s.engine.createRun('manual', { flowId: 'default', selection: { source: 'synthetic', count: 6, seed: 3 }, autoPrepare: false }, flow());
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls).toBe(0);
+  }, 60_000);
+});
+
+/** One packet per unit (whole), whatever their difficulty. */
+const whole = (s: ReturnType<typeof setup>, name: string) =>
+  s.engine.createRun(name, { flowId: 'default', selection: { source: 'synthetic', count: 12, seed: 3 }, prBatchSize: 40, packetMaxFunctions: 20, routing: { enabled: false } }, flow());
+
+describe('functions nobody should pay for', () => {
+  it('skips what upstream matched since, without a model call, and goes on with the rest of the packet', async () => {
+    const s = setup({ cheatRate: 0, skill: 1 });
+    const run = whole(s, 'taken');
+    const found = await s.repo.discover({ source: 'synthetic', count: 12, seed: 3 });
+    const unit = found.map((f) => f.unit).find((u) => found.filter((f) => f.unit === u).length > 1)!;
+    const taken = found.find((f) => f.unit === unit)!;
+    const alone = found.find((f) => found.filter((g) => g.unit === f.unit).length === 1);
+    s.repo.upstreamMatched.set(taken.rva, 'someone');
+    if (alone) s.repo.upstreamMatched.set(alone.rva, null);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const tasks = s.store.listTasks(run.id, { limit: 1000 });
+    for (const f of [taken, ...(alone ? [alone] : [])]) {
+      const t = tasks.filter((x) => x.functions.some((g) => g.rva === f.rva));
+      expect(t).toHaveLength(1);
+      expect(t[0]!.state).toBe('dead');
+      expect(s.store.attemptsForTask(t[0]!.id).map((a) => a.model)).toEqual(['skipped (no model call)']);
+      expect(s.store.getVerdict(t[0]!.lastVerdictId!)!.findings.some((x) => x.code === 'SKIP_MATCHED_UPSTREAM' && x.message.includes(f.rva))).toBe(true);
+    }
+    const rest = found.filter((f) => f.unit === unit && f.rva !== taken.rva);
+    for (const f of rest) expect(tasks.filter((x) => x.functions.some((g) => g.rva === f.rva)).map((x) => x.state)).toEqual(['staged']);
+    const fc = s.store.functionCounts(run.id);
+    expect(Object.values(fc).reduce((a, b) => a + b, 0)).toBe(12);
+  }, 60_000);
+
+  it('keeps going when upstream cannot be asked', async () => {
+    const s = setup({ cheatRate: 0, skill: 1 });
+    s.repo.takenUpstream = async () => {
+      throw new Error('offline');
+    };
+    const run = createRun(s, 'offline', 6, 3);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const fc = s.store.functionCounts(run.id);
+    expect((fc.staged ?? 0) + (fc.dead ?? 0)).toBe(6);
+    expect(fc.staged ?? 0).toBeGreaterThan(3);
+  }, 60_000);
+
+  it('leaves thunks out at discovery when a pack tells, and after prepare when only that does', async () => {
+    const s = setup({ cheatRate: 0, skill: 1 });
+    const found = await s.repo.discover({ source: 'synthetic', count: 12, seed: 3 });
+    const [early, late] = [found[0]!.rva, found[1]!.rva];
+    const real = s.repo.analyze.bind(s.repo);
+    s.repo.analyze = (async (fns: FunctionTarget[], opts?: { packs?: string[] }) => {
+      const m = await real(fns);
+      for (const [rva, f] of m) if (rva === early || (rva === late && opts?.packs)) m.set(rva, { ...f, adjustorThunk: true });
+      return m;
+    }) as typeof s.repo.analyze;
+    const run = whole(s, 'thunks');
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const tasks = s.store.listTasks(run.id, { limit: 1000 });
+    expect(tasks.some((t) => t.functions.some((f) => f.rva === early))).toBe(false);
+    const t = tasks.find((x) => x.functions.some((f) => f.rva === late))!;
+    expect(t.functions).toHaveLength(1);
+    expect(t.state).toBe('dead');
+    expect(s.store.getVerdict(t.lastVerdictId!)!.findings[0]!.code).toBe('SKIP_ADJUSTOR_THUNK');
+    const fc = s.store.functionCounts(run.id);
+    expect((fc.staged ?? 0) + (fc.dead ?? 0)).toBe(11); // the one left out at discovery is no packet
+  }, 60_000);
+});
+
+describe('accepting functions one by one', () => {
+  /** A repo where one function of the first multi-function unit never matches. */
+  async function stubborn(s: ReturnType<typeof setup>) {
+    const found = await s.repo.discover({ source: 'synthetic', count: 12, seed: 3 });
+    const unit = found.map((f) => f.unit).find((u) => found.filter((f) => f.unit === u).length > 1)!;
+    const mine = found.filter((f) => f.unit === unit);
+    const bad = mine[0]!.rva;
+    const real = s.repo.compare.bind(s.repo);
+    s.repo.compare = async (...args: Parameters<SimRepo['compare']>) => {
+      const r = await real(...args);
+      const functions = r.functions.map((f) => (f.rva === bad ? { ...f, result: 'fail' as const, reason: 'code-mismatch', exactBytes: 1 } : f));
+      return { ...r, functions, allPass: functions.every((f) => f.result === 'pass') };
+    };
+    return { unit, bad, good: mine.slice(1) };
+  }
+
+  it('a function that never matches does not sink the rest of its packet', async () => {
+    const s = setup({ cheatRate: 0, skill: 1 });
+    const { unit, bad, good } = await stubborn(s);
+    const run = whole(s, 'split');
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const tasks = s.store.listTasks(run.id, { limit: 1000 }).filter((t) => t.unit === unit);
+    const dead = tasks.filter((t) => t.state === 'dead');
+    expect(dead.flatMap((t) => t.functions.map((f) => f.rva))).toEqual([bad]);
+    for (const g of good) expect(tasks.filter((t) => t.functions.some((f) => f.rva === g.rva)).map((t) => t.state)).toEqual(['staged']);
+    expect(s.events.query({ runId: run.id, limit: 1000 }).some((e) => e.kind === 'task.split')).toBe(true);
+    const free = tasks.filter((t) => t.fix?.check === 'regate' || s.store.attemptsForTask(t.id).some((a) => a.model?.startsWith('stored candidate') && a.model.endsWith('(no model call)')));
+    expect(free.length).toBeGreaterThan(0);
+    for (const t of free) {
+      const first = s.store.attemptsForTask(t.id)[0]!;
+      expect(first.model).toMatch(/^stored candidate of .+ \(no model call\)$/);
+      // Credited to the model that wrote the code, also for rows that do not name it.
+      const writer = /of (.+) \(/.exec(first.model!)![1]!;
+      const now = s.store.getTask(t.id)!;
+      expect(finishingModel(s.store, now)).toBe(writer);
+      s.store.updateAttempt(first.id, { model: 'stored candidate (no model call)' });
+      expect(finishingModel(s.store, now)).toBe(writer);
+      expect(batchContent(s.store, run.id, [now]).message).not.toContain('no model call');
+      expect(first.costUsd ?? 0).toBe(0);
+    }
+    expect(Object.values(s.store.functionCounts(run.id)).reduce((a, b) => a + b, 0)).toBe(12);
+  }, 60_000);
+
+  it('salvages matched functions of packets that died before, without a model call; the preview changes nothing', async () => {
+    const s = setup({ cheatRate: 0, skill: 1 });
+    const { unit, bad, good } = await stubborn(s);
+    // As before the change: packets live or die whole.
+    const proto = s.engine as unknown as { splitMatched: () => void };
+    proto.splitMatched = () => undefined;
+    const run = whole(s, 'salvage');
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const deadBefore = s.store.listTasks(run.id, { state: 'dead', limit: 100 }).filter((t) => t.functions.length > 1 && t.functions.some((f) => f.rva === bad));
+    expect(deadBefore).toHaveLength(1);
+    const lost = deadBefore[0]!.functions.filter((f) => f.rva !== bad);
+    s.repo.upstreamMatched.set(lost[0]!.rva, 'someone');
+    const rows = () => JSON.stringify(s.store.listTasks(run.id, { limit: 1000 }));
+    const before = rows();
+    const preview = await s.engine.regateMatched(run.id, { partial: true, preview: true });
+    expect(rows()).toBe(before);
+    expect(preview).toMatchObject({ preview: true, functions: lost.length - 1, takenUpstream: 1 });
+    expect(await s.engine.regateMatched(run.id)).toMatchObject({ packets: 0 });
+    if (lost.length > 1) {
+      const spent = () => s.store.listTasks(run.id, { limit: 1000 }).flatMap((t) => s.store.attemptsForTask(t.id)).reduce((n, a) => n + (a.costUsd ?? 0), 0);
+      const cost = spent();
+      const r = await s.engine.regateMatched(run.id, { partial: true });
+      expect(r).toMatchObject({ packets: 1, functions: lost.length - 1 });
+      await s.engine.waitFor(run.id);
+      for (const f of lost.slice(1)) expect(s.store.listTasks(run.id, { limit: 1000 }).filter((t) => t.functions.some((g) => g.rva === f.rva)).map((t) => t.state)).toEqual(['staged']);
+      expect(spent()).toBe(cost);
+      expect(s.store.listTasks(run.id, { state: 'dead', limit: 100 }).find((t) => t.unit === unit && t.functions.some((f) => f.rva === bad))!.functions.map((f) => f.rva).sort()).toEqual([bad, lost[0]!.rva].sort());
+    }
+    void good;
+  }, 60_000);
+
+  it('splits only on compare results: a compile error or another finding keeps the packet whole', () => {
+    const functions = [{ rva: '0x10', name: 'A::F', size: 8 }, { rva: '0x20', name: 'A::G', size: 8 }];
+    const row = (rva: string, result: 'pass' | 'fail') => ({ rva, name: null, result }) as never;
+    const v = (codes: string[], compare = [row('0x10', 'pass'), row('0x20', 'fail')]) => ({ decision: 'reject', compare, findings: codes.map((code) => ({ stage: 'compare', code, severity: 'block', message: '' })) }) as never;
+    expect(matchedSides({ functions }, v(['COMPARE_CODE_MISMATCH']))).toEqual({ matched: [functions[0]], rest: [functions[1]] });
+    expect(matchedSides({ functions }, v(['COMPARE_COMPILE_ERROR']))).toBeNull();
+    expect(matchedSides({ functions }, v(['COMPARE_CODE_MISMATCH', 'CHEAT_ASM']))).toBeNull();
+    expect(matchedSides({ functions }, v(['COMPARE_CODE_MISMATCH'], [row('0x10', 'pass')]))).toBeNull();
+    expect(matchedSides({ functions }, v(['COMPARE_CODE_MISMATCH'], [row('0x10', 'fail'), row('0x20', 'fail')]))).toBeNull();
+  });
 });
 
 describe('every AI account down', () => {

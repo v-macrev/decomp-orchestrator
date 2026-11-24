@@ -156,7 +156,7 @@ describe('pre-existing header clutter and files changed by prepare (second real 
   it('drops pre-existing banned/duplicate lines only when the header would exceed the budget', async () => {
     const r = await repairAnswer([{ path: 'r/TESObjectREFR.cpp', content: `${BEFORE}\nint x();\n` }], async () => BEFORE, { codeOrigin: 'written for this reconstruction by forwarding to the extra data list', adaptedBodies: 'none' });
     const out = r.files[0]!.content;
-    expect(out).not.toContain('Drafted by');
+    expect(out).toContain('; mixed. Drafted by claude-sonnet-5-5 from local listings'); // folded, not dropped
     expect(out.match(/Source exposure:/g)).toHaveLength(1);
     expect(out).toContain('// Licence: uses the GetEncounterZone'); // licence and adaptation statements stay
     expect(out).toContain('// Bodies adapted from community sources are listed above');

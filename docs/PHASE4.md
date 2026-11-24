@@ -281,6 +281,25 @@ the same way (`focusTasks`). Packets that died or were quarantined before this, 
 candidate matched all their functions, go back with `POST /api/runs/:id/regate-matched`: each
 becomes a `regate` fix whose first attempt submits that candidate again, with no model call.
 
+### Functions are accepted one by one
+
+`RunEngine.splitMatched`, right after a reject is routed: when compare covers every function of the
+packet, some pass, and every blocking finding is a `COMPARE_*` result (no compile error), the passing
+functions become a new packet with a `regate` fix (`fix.without` = the others). Its free attempt
+submits the stored candidate with the others' definitions, comments and marker lines taken out
+(`removeFunctions`); the Gate Keeper decides it like any candidate. The old packet is narrowed to the
+rest and its best score starts over. No split when the others cannot be taken out cleanly
+(`stillDefines`): an accepted unit never holds a body that did not match. If another packet of the
+unit was accepted meanwhile, the functions are spliced into the unit as it is now. The lease query
+hands out a free re-gate before anything else of its tier. `regate-matched` with `partial` builds the
+same packets from dead ones with `fix.freeOnly`: when the free attempt fails they are dead again.
+
+`skipFunctions` takes functions out before the model call: `repo.takenUpstream` (synced upstream head,
+shared by all slots for 5 minutes; a failed check takes nothing out) unless the packet is a fix of
+accepted work, and adjustor thunks (`isAdjustorThunk`, on the pack's bytes; also at discovery when a
+pack exists). They end `dead` with a `SKIP_*` verdict on an attempt whose model is
+`skipped (no model call)`, which counts as no attempt.
+
 ### Units that need the reconstruction include root
 
 Upstream spells repository includes from the reconstruction root (`#include "skyrim_shared/x/Y.h"`, since

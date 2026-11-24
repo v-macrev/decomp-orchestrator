@@ -88,6 +88,56 @@ function addToClass(header: string, cls: string, decl: string): string | null {
     : `${header.slice(0, close)} ${access}${decl} ${header.slice(close)}`;
 }
 
+const flat = (s: string) => s.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+
+/** A definition `extractFunctions` does not see: one with a constructor initialiser list, or a flattened name. */
+function looseDef(src: string, fn: FunctionTarget): { start: number; close: number } | null {
+  const name = fn.name;
+  if (!name) return null;
+  const code = lex(src).code;
+  const same = defsOf(src).find((d) => flat(d.name) === flat(name));
+  if (same) return same;
+  const o = owner(name);
+  if (!o) return null;
+  const esc = (s: string) => s.replace(/[^\w]/g, '\\$&');
+  const m = new RegExp(`\\b${esc(o)}\\s*::\\s*${esc(bare(name))}\\s*\\([^;{}]*\\{`).exec(code);
+  if (!m) return null;
+  let depth = 1;
+  let k = m.index + m[0].length;
+  while (k < code.length && depth > 0) {
+    if (code[k] === '{') depth++;
+    else if (code[k] === '}') depth--;
+    k++;
+  }
+  return { start: code.lastIndexOf('\n', m.index) + 1, close: k - 1 };
+}
+
+/** Whether `src` still defines any of these functions (then they cannot be taken out of it cleanly). */
+export function stillDefines(src: string, fns: FunctionTarget[]): boolean {
+  return fns.some((fn) => findDef(src, fn) ?? looseDef(src, fn));
+}
+
+/** A unit file without these functions: their definitions, the comment lines right above them, and their `// 0x<rva>` lines. */
+export function removeFunctions(src: string, drop: FunctionTarget[]): string {
+  for (const fn of drop) {
+    const d = findDef(src, fn) ?? looseDef(src, fn);
+    if (d) {
+      let start = d.start;
+      while (start > 0) {
+        const prev = src.lastIndexOf('\n', start - 2) + 1;
+        if (!/^\s*\/\//.test(src.slice(prev, start))) break;
+        start = prev;
+      }
+      // A block that reaches the top is the file's header, not the function's comment.
+      if (start === 0) start = d.start;
+      src = `${src.slice(0, start)}${src.slice(d.close + 1).replace(/^\r?\n/, '')}`;
+    }
+    const line = new RegExp(`^\\s*//\\s*${rvaRe(fn.rva).source}`, 'i');
+    src = src.split('\n').filter((l) => !line.test(l)).join('\n');
+  }
+  return src;
+}
+
 export interface SpliceResult {
   files: Array<{ path: string; content: string }>;
   /** What was carried over, per function, for the event log. */

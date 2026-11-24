@@ -155,6 +155,12 @@ export interface RepoAdapter {
   /** Read only: what the base already has of these functions and files (`branch` = the batch's staged branch, for its base). */
   upstreamState?(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState>;
   /**
+   * Read only: which of these functions nobody needs any more, on the upstream branch as it is now
+   * (fetched at most every few minutes; the pinned base does not move). Asked before a packet is
+   * worked on: matched by another contributor, or already in another unit.
+   */
+  takenUpstream?(rvas: string[], unit: string): Promise<TakenUpstream>;
+  /**
    * Read only: which of these files upstream changed since `since` (a dry run's base; default the
    * pinned base), on the upstream branch now and at the pinned base (null when upstream cannot be reached).
    */
@@ -171,6 +177,8 @@ export interface RepoAdapter {
    * (refused when the fork moved), the files written, every packet of the PR re-verified, committed,
    * pushed as a fast-forward. Never force-pushes and never opens a new PR.
    */
+  /** The local commit of a PR branch (null: none); tells whether someone else pushed to the PR. */
+  branchHead?(branch: string): Promise<string | null>;
   updatePullRequest?(input: { branch: string; pullRequest: string; files: Array<{ path: string; content: string }>; tasks: SubmitBatchInput['tasks']; message: string; progress?: ProgressFn }): Promise<{ ok: boolean; commit: string | null; problems: string[]; error: string | null }>;
 }
 
@@ -283,12 +291,22 @@ export interface BaseDrift {
   changedAtPin: string[];
 }
 
+export interface TakenUpstream {
+  checked: boolean;
+  /** The upstream commit the answer is from. */
+  revision: string | null;
+  /** rva → why it is taken (taken functions only). */
+  taken: Record<string, string>;
+}
+
 export interface UpstreamState {
   checked: boolean;
   /** rva → the owner upstream records for it. */
   matched: Record<string, string | null>;
   /** Functions data/progress.json does not list. */
   untracked: string[];
+  /** rva → the units whose compared-function lines name it at the base, and under which name. */
+  marked?: Record<string, Array<{ unit: string; name: string | null }>>;
   /** Files the batch writes that upstream changed between the batch's base and this one. */
   changed: string[];
   builtOn: string | null;

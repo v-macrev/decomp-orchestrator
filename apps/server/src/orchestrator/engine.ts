@@ -26,7 +26,7 @@ import type { ProviderRegistry } from '../providers/registry.js';
 import { ProviderError, costUsd, type PromptBlock } from '../providers/types.js';
 import { TaskQueue, type StealSource, type TaskPatch } from '../queue/taskQueue.js';
 import type { BaseDrift, ClaimCollision, DiscoveredFunction, ProgressFn, PrStatus, RepoAdapter, PreparedTask, SubmitBatchInput, SubmitBatchResult } from '../repo/types.js';
-import { EXPLAIN_SCHEMA, EXPLAIN_SYSTEM, ExplainOut, commentsKey, explainPrompt, reviewComments, reviewTargets, type Explanation } from './review.js';
+import { EXPLAIN_SCHEMA, EXPLAIN_SYSTEM, ExplainOut, TRIAGE_SCHEMA, TRIAGE_SYSTEM, TriageOut, commentsKey, explainPrompt, reviewComments, triagePrompt, triageTargets, type Explanation, type ReviewPlan } from './review.js';
 import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
 import { ContextBuilder } from './context.js';
@@ -37,9 +37,10 @@ import { buildHistory, findRepeat, progressScore, type HistoryEntry } from './hi
 import { draftedByText, personOf } from './attribution.js';
 import { runPitfalls } from './lessons.js';
 import { WORKER_OUTPUT_SCHEMA, WORKER_OUTPUT_SCHEMA_V2, WORKER_SYSTEM, buildWorkerPrompt, renderBundle, type Feedback } from './prompts.js';
-import { spliceUnit } from './splice.js';
+import { removeFunctions, spliceUnit, stillDefines } from './splice.js';
 import { extractFunctions, lex } from '../gatekeeper/cpp.js';
-import { PR_BATCH_MAX, batchContent, finishingModel, packUnits, stageRun, type StageSummary } from './staging.js';
+import { lostProvenance } from '../gatekeeper/provenance.js';
+import { PR_BATCH_MAX, batchContent, finishingModel, freeAttemptModel, packUnits, stageRun, writerOf, type StageSummary } from './staging.js';
 import { SkillRegistry } from '../skills/registry.js';
 import { FunctionGatherer } from '../intel/gatherer.js';
 import { planCapacity } from './capacity.js';
@@ -152,6 +153,7 @@ export class RunEngine {
   private outageWatch: ReturnType<typeof setInterval>;
   private claimWatch: NodeJS.Timeout;
   private prWatch: NodeJS.Timeout;
+  private rollWatch: NodeJS.Timeout;
 
   constructor(private deps: EngineDeps, opts: Partial<EngineOptions> = {}) {
     this.opts = { ...DEFAULTS, ...opts };
@@ -172,6 +174,10 @@ export class RunEngine {
     // Withheld packets go back into staging on their own once their blocking claims lapse.
     this.claimWatch = setInterval(() => this.autoRecheckWithheld(), 5 * 60_000).unref();
     this.prWatch = setInterval(() => void this.autoRefreshPullRequests(), 10 * 60_000).unref();
+    // Ready functions that waited long enough are batched even when no verdict arrives meanwhile.
+    this.rollWatch = setInterval(() => {
+      for (const id of this.active.keys()) this.stageReadySoon(id);
+    }, 60_000).unref();
     // Every AI account down: pause the run; one back: resume it (only runs this watcher paused).
     this.outageWatch = setInterval(() => void this.watchOutages(), this.opts.outageCheckMs).unref();
   }
@@ -314,6 +320,16 @@ export class RunEngine {
             runId, level: 'warn', data: { selected: found.length, requested },
           });
         }
+        if (row.config.skipThunks) {
+          const thunks = await this.adjustorThunks(found);
+          if (thunks.size) {
+            found = found.filter((f) => !thunks.has(f.rva));
+            events.emit('run.thunks_skipped', `left out ${thunks.size} adjustor thunk(s) (two-instruction stubs the compiler emits from a class layout; no function body compiles to one)`, {
+              runId, data: { rvas: [...thunks] },
+            });
+          }
+        }
+        if (store.getRun(runId)?.status === 'cancelled') return;
         if (!found.length) {
           store.setRunStatus(runId, 'completed', ['discovering']);
           events.emit('run.completed', 'No eligible functions were available', { runId });
@@ -591,6 +607,7 @@ export class RunEngine {
     clearInterval(this.claimWatch);
     clearInterval(this.prWatch);
     clearInterval(this.outageWatch);
+    clearInterval(this.rollWatch);
     for (const t of this.rollTimers.values()) clearTimeout(t);
     this.rollTimers.clear();
   }
@@ -600,6 +617,7 @@ export class RunEngine {
     clearInterval(this.claimWatch);
     clearInterval(this.prWatch);
     clearInterval(this.outageWatch);
+    clearInterval(this.rollWatch);
     for (const t of this.rollTimers.values()) clearTimeout(t);
     this.rollTimers.clear();
   }
@@ -709,19 +727,23 @@ export class RunEngine {
     if (config.staging === 'off') return;
     const size = config.prBatchSize;
     const units = store.readyUnits(runId);
-    if (units.reduce((n, u) => n + u.functions, 0) < size) return;
-    const key = `${size}|${units.map((u) => `${u.unit}:${u.functions}`).join('|')}`;
-    if (this.rollSeen.get(runId) === key) return; // this exact ready set already packed into no full batch
-    if (!this.fullBins(runId, size).length) {
+    const total = units.reduce((n, u) => n + u.functions, 0);
+    // Waited long enough: a smaller batch now beats a full one after someone else got there first.
+    const aged = this.waitedEnough(runId, total, config);
+    if (total < size && !aged) return;
+    const min = aged ? Math.min(config.batchMinFunctions, size) : undefined;
+    const key = `${size}|${aged ? 'aged' : 'full'}|${units.map((u) => `${u.unit}:${u.functions}`).join('|')}`;
+    if (this.rollSeen.get(runId) === key) return; // this exact ready set already packed into no batch
+    if (!this.fullBins(runId, size, min).length) {
       this.rollSeen.set(runId, key);
       return;
     }
     this.rollSeen.delete(runId);
     this.rolling.add(runId);
+    const seqs: number[] = [];
     void this.exclusive(`batching the ready functions of ${runId}`, async () => {
-      const seqs: number[] = [];
       let failed = 0;
-      for (let bin = this.fullBins(runId, size)[0]; bin; bin = this.fullBins(runId, size)[0]) {
+      for (let bin = this.fullBins(runId, size, min)[0]; bin; bin = this.fullBins(runId, size, min)[0]) {
         if (run.cancel.signal.aborted) break;
         const s = await stageRun(store, repo, events, runId, size, { only: bin.taskIds, pack: 'dense', progress: this.progress });
         seqs.push(...s.seqs);
@@ -729,11 +751,12 @@ export class RunEngine {
         if (!s.seqs.length) break; // nothing left to stage from that bin (its packets moved on)
       }
       if (seqs.length) {
-        events.emit('run.batched_early', `${seqs.length} batch(es) of ready functions made while the run goes on (batch ${seqs.join(', ')})${failed ? `; ${failed} failed re-verification` : ''}: they can be dry-run and submitted now`, {
+        events.emit('run.batched_early', `${seqs.length} batch(es) of ready functions made while the run goes on (batch ${seqs.join(', ')}${aged ? `; the oldest had waited ${config.batchMaxAgeMinutes} min` : ''})${failed ? `; ${failed} failed re-verification` : ''}: they can be dry-run and submitted now`, {
           runId, level: failed ? 'warn' : 'info', data: { seqs, failed },
         });
       }
     }, { besideRun: true })
+      .then(() => (seqs.length ? this.autoPrepare(runId) : undefined))
       .catch((e) => events.emit('run.batch_early_failed', `could not batch the ready functions: ${(e as Error).message}`, { runId, level: 'warn' }))
       .finally(() => {
         this.rolling.delete(runId);
@@ -741,11 +764,39 @@ export class RunEngine {
       });
   }
 
+  /** At least `batchMinFunctions` are ready and the oldest of them passed `batchMaxAgeMinutes` ago. */
+  private waitedEnough(runId: string, total: number, config: RunRow['config']): boolean {
+    if (!config.batchMaxAgeMinutes || total < Math.min(config.batchMinFunctions, config.prBatchSize)) return false;
+    const failed = this.failedBatchUnits(runId);
+    const since = this.readyTasks(runId, { rolling: true }).filter((t) => !failed.has(t.unit)).map((t) => t.updatedAt);
+    return since.length > 0 && Math.min(...since) <= Date.now() - config.batchMaxAgeMinutes * 60_000;
+  }
+
+  /** The batch's last dry run was clean at the current base. */
+  private cleanDryRun(b: { detail: unknown }): boolean {
+    const d = (b.detail ?? {}) as { dryRunFingerprint?: string; dryRunBase?: string | null; dryRunUncheckedClaims?: string[]; lastSubmit?: { ok?: boolean; dryRun?: boolean } };
+    return !!d.dryRunFingerprint && d.dryRunBase === (this.deps.repo.baseSha ?? null) && !d.dryRunUncheckedClaims?.length && d.lastSubmit?.ok === true;
+  }
+
   /**
-   * Ready units packed into batches of `size` functions; only batches full enough to stage now.
+   * "Prepare all" on its own, after batches were staged: set aside what upstream already has,
+   * dry-run the rest. Submits and publishes nothing; the operator still opens each pull request.
+   */
+  private async autoPrepare(runId: string) {
+    const { store, repo, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row?.config.autoPrepare || row.config.staging === 'off' || !repo.submitBatch || !PIPELINE_STATES.has(row.status)) return;
+    if (!store.listBatches(runId).some((b) => b.status === 'branch_ready' && !this.cleanDryRun(b))) return;
+    if (this.exclusiveHolder || this.discovering) return; // a finishing run prepares its own batches
+    await this.prepareAll(runId).catch((e) => events.emit('run.prepare_failed', `could not dry-run the new batches: ${(e as Error).message}; use "Prepare all" when the slots are free`, { runId, level: 'warn' }));
+  }
+
+  /**
+   * Ready units packed into batches of `size` functions; only batches full enough to stage now
+   * (`min` functions, by default a nearly full batch).
    * Packets of a batch that failed re-verification wait for the run's end (or Prepare all).
    */
-  private fullBins(runId: string, size: number) {
+  private fullBins(runId: string, size: number, min = readyThreshold(size), floor = min < readyThreshold(size) ? min : size) {
     const failedUnits = this.failedBatchUnits(runId);
     const byUnit = new Map<string, TaskRow[]>();
     for (const t of this.readyTasks(runId, { rolling: true })) {
@@ -756,11 +807,11 @@ export class RunEngine {
     }
     const fnsOf = (items: TaskRow[]) => items.reduce((n, t) => n + t.functions.length, 0);
     const total = [...byUnit.values()].reduce((n, items) => n + fnsOf(items), 0);
-    if (total < size) return [];
+    if (total < floor) return [];
     const bins = packUnits([...byUnit].map(([unit, items]) => ({ unit, functions: fnsOf(items), items })), size);
     return bins
       .map((items) => ({ taskIds: items.map((t) => t.id), functions: fnsOf(items) }))
-      .filter((b) => b.functions >= readyThreshold(size))
+      .filter((b) => b.functions >= min)
       .sort((a, b) => b.functions - a.functions);
   }
 
@@ -785,7 +836,7 @@ export class RunEngine {
    * used from then on (claims are re-recorded, and lines written under the old name are renamed
    * when the functions are staged or submitted).
    */
-  async updateRun(runId: string, patch: { name?: string; draftedBy?: string; budgetUsd?: number | null; prBatchSize?: number; staging?: 'branches' | 'off' }) {
+  async updateRun(runId: string, patch: { name?: string; draftedBy?: string; budgetUsd?: number | null; prBatchSize?: number; staging?: 'branches' | 'off'; autoPrepare?: boolean }) {
     const { store, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
@@ -800,6 +851,10 @@ export class RunEngine {
     if (patch.prBatchSize !== undefined && patch.prBatchSize !== cfg.prBatchSize) {
       changes.push(`functions per PR ${cfg.prBatchSize} → ${patch.prBatchSize}`);
       cfg.prBatchSize = patch.prBatchSize;
+    }
+    if (patch.autoPrepare !== undefined && patch.autoPrepare !== cfg.autoPrepare) {
+      changes.push(`dry-run new batches ${cfg.autoPrepare ? 'automatically' : 'when asked'} → ${patch.autoPrepare ? 'automatically' : 'when asked'}`);
+      cfg.autoPrepare = patch.autoPrepare;
     }
     if (patch.staging !== undefined && patch.staging !== cfg.staging) {
       if (row.status === 'completed' || this.finishing.has(runId)) throw new Error('staging is decided when the run finishes; for a completed run use "Batch passed functions"');
@@ -1375,6 +1430,18 @@ export class RunEngine {
     if (!st.checked) return found;
     for (const t of tasks) {
       const out: string[] = [];
+      for (const f of t.functions) {
+        const at = st.marked?.[f.rva] ?? [];
+        const other = at.find((m) => m.unit !== t.unit);
+        const renamed = at.find((m) => m.unit === t.unit && m.name && f.name && m.name !== f.name);
+        if (other) out.push(`${t.unit}:1: ${f.rva} already has a unit upstream (${other.unit}); a second one is refused as a duplicate`);
+        else if (renamed) out.push(`${t.unit}:1: ${f.rva} is already in this unit upstream as ${renamed.name}; a second definition is refused`);
+      }
+      for (const x of batchContent(store, runId, [t]).files) {
+        const base = await repo.baseFile(x.path);
+        const lost = base === null ? [] : lostProvenance(base, x.content);
+        if (lost.length) out.push(`${x.path}:1: the header drops ${lost.length} statement(s) upstream's file makes (${lost.slice(0, 2).map((l) => l[0]!.slice(0, 80)).join(' | ')}); rebuild it on upstream's current file`);
+      }
       const matched = t.functions.filter((f) => Object.hasOwn(st.matched, f.rva));
       if (matched.length) out.push(`${t.unit}:1: already matched upstream: ${matched.map((f) => `${f.rva}${st.matched[f.rva] ? ` (${st.matched[f.rva]})` : ''}`).join(', ')}; nothing to submit for it`);
       const untracked = t.functions.filter((f) => st.untracked.includes(f.rva));
@@ -1484,8 +1551,8 @@ export class RunEngine {
    * Each goes back to the queue as a 'regate' fix: its first attempt submits that candidate again,
    * with no model call, to the Gate Keeper, which now counts only the packet's own results.
    */
-  async regateMatched(runId: string) {
-    const { store, events } = this.deps;
+  async regateMatched(runId: string, opts: { partial?: boolean; preview?: boolean } = {}) {
+    const { store, events, repo } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
     if (!PIPELINE_STATES.has(row.status)) throw new Error(`run is ${row.status}; only a running or completed run can re-gate packets`);
@@ -1503,19 +1570,46 @@ export class RunEngine {
       });
       if (found) plan.push({ task: t, verdictId: found.id });
     }
-    if (!plan.length) return { packets: 0, functions: 0, status: row.status };
+    const partial = opts.partial ? this.partialPlan(runId, new Set(plan.map((p) => p.task.id))) : [];
+    if (!plan.length && !partial.length) return { packets: 0, functions: 0, status: row.status };
     // Upstream may have matched (or stopped publishing) some of these functions since: `sr claim`
     // refuses those, so such a packet keeps only the rest and is rebuilt from that candidate on
     // upstream's current file instead; a packet with nothing left stays where it is.
     const st = this.deps.repo.upstreamState
-      ? await this.deps.repo.upstreamState({ rvas: plan.flatMap((p) => p.task.functions.map((f) => f.rva)), files: [], branch: null })
+      ? await this.deps.repo.upstreamState({ rvas: [...plan, ...partial].flatMap((p) => p.task.functions.map((f) => f.rva)), files: [], branch: null })
       : null;
-    const why = (rva: string) => (!st?.checked ? null : Object.hasOwn(st.matched, rva) ? `matched upstream${st.matched[rva] ? ` (${st.matched[rva]})` : ''}` : st.untracked.includes(rva) ? 'no longer published upstream' : null);
+    const now = new Map<string, string>();
+    for (const p of [...plan, ...partial]) {
+      const r = await repo.takenUpstream?.(p.task.functions.map((f) => f.rva), p.task.unit).catch(() => null);
+      for (const [rva, w] of Object.entries(r?.checked ? r.taken : {})) now.set(rva, w);
+    }
+    const why = (rva: string) => now.get(rva) ?? (!st?.checked ? null : Object.hasOwn(st.matched, rva) ? `matched upstream${st.matched[rva] ? ` (${st.matched[rva]})` : ''}` : st.untracked.includes(rva) ? 'no longer published upstream' : null);
     const at = Date.now();
     let requeued = 0;
     let functions = 0;
     let rebuilt = 0;
-    await this.exclusive(`re-gating ${plan.length} matched packet(s) of ${runId}`, async () => {
+    const salvage = partial
+      .map((p) => {
+        const matched = p.matched.filter((f) => !why(f.rva));
+        return { ...p, matched, rest: p.task.functions.filter((f) => !matched.some((m) => m.rva === f.rva)) };
+      })
+      .filter((p) => p.matched.length);
+    if (opts.preview) {
+      const whole = plan.map((p) => p.task.functions.filter((f) => !why(f.rva))).filter((k) => k.length);
+      return {
+        preview: true, packets: whole.length + salvage.length, functions: whole.flat().length + salvage.flatMap((p) => p.matched).length,
+        bytes: [...whole.flat(), ...salvage.flatMap((p) => p.matched)].reduce((n, f) => n + f.size, 0),
+        partial: salvage.map((p) => ({ taskId: p.task.id, unit: p.task.unit, matched: p.matched.map((f) => f.rva) })),
+        takenUpstream: [...new Set(partial.flatMap((p) => p.matched.filter((f) => why(f.rva)).map((f) => f.rva)))].length, status: row.status,
+      };
+    }
+    await this.exclusive(`re-gating ${plan.length + salvage.length} matched packet(s) of ${runId}`, async () => {
+      for (const p of salvage) {
+        // Rest holds what does not match and what upstream took; neither is submitted.
+        if (!store.tx(() => store.getTask(p.task.id)?.state === 'dead' && this.splitOff(p.task, newId('task'), p.matched, p.rest, p.verdictId, { freeOnly: true }))) continue;
+        requeued++;
+        functions += p.matched.length;
+      }
       for (const p of plan) {
         const keep = p.task.functions.filter((f) => !why(f.rva));
         if (!keep.length) continue;
@@ -1529,6 +1623,8 @@ export class RunEngine {
             batchId: '', seq: 0, check: 'regate', at, verdictId: p.verdictId,
             reasons: [`its functions all matched in an earlier candidate that only results for functions outside the packet blocked; that candidate goes to the Gate Keeper again`],
           };
+        // A salvage pass (`partial`) makes free attempts only, for packets that matched whole too.
+        if (opts.partial) fix.freeOnly = true;
         store.tx(() => {
           if (store.requeueForFix(runId, p.task.id, fix, ['dead', 'quarantined', 'pending'])) {
             store.db.prepare('UPDATE tasks SET last_verdict_id = ? WHERE id = ?').run(p.verdictId, p.task.id);
@@ -1550,6 +1646,23 @@ export class RunEngine {
     return { packets: requeued, functions, rebuilt, status: store.getRun(runId)?.status ?? "running" };
   }
 
+  /** Dead packets some of whose functions matched in a candidate only the others' compare results blocked: the best such candidate. */
+  private partialPlan(runId: string, skip: Set<string>) {
+    const { store } = this.deps;
+    const out: Array<{ task: TaskRow; verdictId: string; matched: FunctionTarget[] }> = [];
+    for (const task of store.listTasks(runId, { state: 'dead', limit: 100_000 })) {
+      if (skip.has(task.id) || task.functions.length < 2) continue;
+      let best: { verdictId: string; matched: FunctionTarget[]; bytes: number } | null = null;
+      for (const v of store.verdictsForTask(task.id)) {
+        const m = matchedSides(task, v)?.matched;
+        const bytes = m?.reduce((n, f) => n + f.size, 0) ?? 0;
+        if (m && bytes > (best?.bytes ?? 0) && store.getAttempt(v.attemptId)?.files?.length) best = { verdictId: v.id, matched: m, bytes };
+      }
+      if (best) out.push({ task, verdictId: best.verdictId, matched: best.matched });
+    }
+    return out;
+  }
+
   /**
    * The candidate a 'regate' fix submits again, as the free attempt's answer, while it still keeps
    * every function body upstream's current unit has. Upstream moved on since (it matched more of
@@ -1562,16 +1675,19 @@ export class RunEngine {
     const a = v ? store.getAttempt(v.attemptId) : null;
     if (!a?.files?.length) return null;
     const mine = new Set(task.functions.map((f) => (f.name ?? '').split('::').pop()));
-    const up = (await repo.baseFile(task.unit)) ?? '';
-    const ours = extractFunctions(lex(a.files.find((f) => f.path === task.unit)?.content ?? '').code);
+    // What the unit holds now: accepted by other packets of this run, else upstream's file.
+    const up = this.carriedFiles(task.runId, task.unit).find((f) => f.path === task.unit)?.content ?? (await repo.baseFile(task.unit)) ?? '';
+    const without = (task.fix?.without ?? []).map((f) => ({ rva: f.rva, name: f.name, size: 0 }));
+    const files = without.length ? a.files.map((f) => (f.path === task.unit ? { ...f, content: removeFunctions(f.content, without) } : f)) : a.files;
+    const ours = extractFunctions(lex(files.find((f) => f.path === task.unit)?.content ?? '').code);
     const lost = extractFunctions(lex(up).code)
       .filter((d) => !mine.has(d.name.split('::').pop()))
       .filter((d) => !ours.some((o) => o.name === d.name && o.body === d.body));
     if (lost.length) {
       const s = await this.spliceForRebuild(task, slot);
-      if (s) return { ...s, notes: [`upstream's current file has ${lost.length} body(ies) the stored candidate lacks (${lost.slice(0, 4).map((d) => d.name).join(', ')}): spliced into it instead`, ...s.notes] };
+      if (s) return { ...s, notes: [`the unit's current file has ${lost.length} body(ies) the stored candidate lacks (${lost.slice(0, 4).map((d) => d.name).join(', ')}): spliced into it instead`, ...s.notes] };
     }
-    return { files: a.files, notes: [`attempt #${a.n} (${a.model ?? 'unknown model'}) again`], model: a.model ?? undefined, codeOrigin: undefined as string | undefined, adaptedBodies: undefined as string | undefined };
+    return { files, notes: [`attempt #${a.n} (${a.model ?? 'unknown model'}) again${without.length ? ` without ${without.map((f) => f.name ?? f.rva).join(', ')}` : ''}`], model: writerOf(store, task, v!.id) ?? undefined, codeOrigin: undefined as string | undefined, adaptedBodies: undefined as string | undefined };
   }
 
   /** Upstream's unit files (as the slot has them) with the packet's accepted functions spliced in. */
@@ -1583,7 +1699,7 @@ export class RunEngine {
     const h = task.unit.replace(/.cpp$/, '.h');
     const ours = new Map(a.files.map((f) => [f.path, f.content]));
     const upstream = new Map<string, string | null>([[task.unit, await repo.readFile(slot, task.unit)], [h, await repo.readFile(slot, h)]]);
-    const drop = (task.fix?.dropped ?? []).map((d) => ({ rva: d.rva, name: d.name, size: 0 }));
+    const drop = [...(task.fix?.dropped ?? []), ...(task.fix?.without ?? [])].map((d) => ({ rva: d.rva, name: d.name, size: 0 }));
     const r = spliceUnit({ cpp: task.unit, ours, upstream, keep: task.functions as FunctionTarget[], drop });
     // The origin statements the accepted attempt made: `sr start` adds a placeholder for the carried
     // functions, and the header repair fills it from these, as it does from a worker's reply.
@@ -1595,7 +1711,7 @@ export class RunEngine {
     // naming an adapted body), so "none", which leaves upstream's own statement as it is.
     const adaptedBodies = statement('Adapted bodies') ?? statement('Adapted code') ?? 'none';
     return {
-      ...r, model: a.model,
+      ...r, model: writerOf(store, task, v!.id),
       codeOrigin: codeOrigin && codeOrigin.length >= 8 ? codeOrigin.slice(0, 300) : undefined,
       adaptedBodies: adaptedBodies && adaptedBodies.length >= 4 ? adaptedBodies.slice(0, 300) : undefined,
     };
@@ -1884,14 +2000,119 @@ export class RunEngine {
     return { ...explained, cached: false };
   }
 
+  /** An open PR's fixes are pushed on top of our commit: refuse early when someone else has pushed to its branch. */
+  private async assertPrBranchOurs(prBranch: string | undefined, st: PrStatus) {
+    if (st.state !== 'open' || !prBranch || !st.headSha || !this.deps.repo.branchHead) return;
+    const ours = await this.deps.repo.branchHead(prBranch);
+    if (ours && ours !== st.headSha) {
+      throw new Error(`someone else pushed to the pull request (it is at ${st.headSha.slice(0, 10)}, your commit is ${ours.slice(0, 10)}): fixes could not be pushed to it, so nothing was sent. Read what was pushed first: it may already hold the fix`);
+    }
+  }
+
   /**
-   * Fix a pull request from its review comments with the run's AI workers. The packets the comments
-   * are about go back to the worker queue with the comments as instructions, and the run goes through
-   * its flow again. An open PR keeps its other packets; when the run finishes its fixed packets form
+   * Ask the run's orchestrator which packets a PR's comments really need changed, and what to change.
+   * One model call; sends nothing to the workers. Kept in `detail.reviewPlan` until the comments change.
+   */
+  async triageReview(runId: string, batchId: string): Promise<ReviewPlan & { cached: boolean }> {
+    const { store, pool, providers, events } = this.deps;
+    const row = store.getRun(runId);
+    if (!row) throw new Error(`run ${runId} not found`);
+    await this.refreshPullRequests(runId, { batchId });
+    const batch = store.getBatch(batchId);
+    if (!batch || batch.runId !== runId) throw new Error('batch not found');
+    const d = (batch.detail ?? {}) as { prBranch?: string; prStatus?: PrStatus; reviewPlan?: ReviewPlan; reviewFix?: unknown };
+    const st = d.prStatus;
+    if (!st?.state) throw new Error(st?.error ?? 'the pull request could not be read');
+    if (st.state === 'merged') throw new Error('the pull request is merged: there is nothing to fix');
+    if (d.reviewFix) throw new Error('this pull request is already being fixed: take the packets back first');
+    const comments = reviewComments(st);
+    if (!comments.length) throw new Error(`the pull request is ${st.state} and nobody else has commented: there is nothing to fix from`);
+    await this.assertPrBranchOurs(d.prBranch, st);
+    const key = commentsKey(comments);
+    if (d.reviewPlan?.key === key) return { ...d.reviewPlan, cached: true };
+    if (budgetReached(row)) throw new Error(`run budget $${row.config.budgetUsd} reached ($${row.costUsd.toFixed(2)} spent): raise it first`);
+    const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
+    const prompt = triagePrompt({
+      title: st.title, state: st.state, comments,
+      packets: tasks.map((t) => ({ unit: t.unit, files: batchContent(store, runId, [t]).files.map((f) => f.path), functions: t.functions })),
+    });
+    const binding = compileFlowPlan(row.flow).orchestrator.data.pool;
+    const lease = await pool.acquire({ binding, role: 'orchestrator', estInputTokens: Math.ceil(prompt.length / 3.5), estOutputTokens: 2_000 });
+    const t = Date.now();
+    let text: string;
+    try {
+      const r = await providers.complete(lease.account, { system: TRIAGE_SYSTEM, prompt, model: lease.model, effort: 'low', jsonSchema: TRIAGE_SCHEMA, maxOutputTokens: 6_000, timeoutMs: 180_000, signal: new AbortController().signal });
+      pool.release(lease, { kind: 'ok', usage: r.usage, latencyMs: Date.now() - t, rateLimit: r.rateLimit });
+      store.addRunUsage(runId, costUsd(lease.model, r.usage), r.usage);
+      text = r.text;
+    } catch (e) {
+      const pe = e instanceof ProviderError ? e : new ProviderError('network', String(e));
+      pool.release(lease, { kind: pe.kind, retryAfterMs: pe.retryAfterMs, message: pe.message });
+      throw new Error(`the orchestrator could not be reached (${pe.kind}): nothing was sent, try again`);
+    }
+    const parsed = TriageOut.safeParse(extractJson(text));
+    if (!parsed.success) throw new Error('the orchestrator did not answer in the expected form: nothing was sent, try again');
+    let targets: ReturnType<typeof triageTargets<TaskRow>>;
+    try {
+      targets = triageTargets(parsed.data, tasks, comments);
+    } catch (e) {
+      throw new Error(`the orchestrator's answer does not fit the pull request (${(e as Error).message}): nothing was sent, try again`);
+    }
+    const plan: ReviewPlan = {
+      key, at: Date.now(), model: lease.model.id, summary: parsed.data.summary, skipped: targets.skipped,
+      fix: [...targets.fix].map(([p, instructions]) => ({ taskId: p.id, unit: p.unit, functions: p.functions.map((f) => f.rva), instructions })),
+    };
+    store.updateBatch(batchId, { detail: { ...(store.getBatch(batchId)!.detail as Record<string, unknown> | null), reviewPlan: plan } });
+    events.emit('batch.review_triaged', `batch ${batch.seq}: the orchestrator (${plan.model}) read ${comments.length} review comment(s): ${plan.fix.length} of ${tasks.length} packet(s) need work`, { runId, data: { seq: batch.seq, fix: plan.fix.length, packets: tasks.length } });
+    return { ...plan, cached: false };
+  }
+
+  /**
+   * Take back packets sent to the workers from an open PR's comments: each returns to the PR's batch
+   * with the verdict (and so the files) it was submitted with, as if it had never been sent. Refused
+   * while a worker holds one of them, or once their fixes are a batch of their own.
+   */
+  async recallReviewFix(runId: string, batchId: string) {
+    const { store, events } = this.deps;
+    const batch = store.getBatch(batchId);
+    if (!batch || batch.runId !== runId) throw new Error('batch not found');
+    const r = await this.exclusive(`taking back the review fix of batch ${batch.seq} of ${runId}`, async () => {
+      const detail = (store.getBatch(batchId)!.detail ?? {}) as { reviewFix?: { taskIds: string[] } } & Record<string, unknown>;
+      if (!detail.reviewFix || batch.status !== 'submitted') throw new Error('nothing of this pull request is with the AI agents');
+      const fixes = store.listBatches(runId).find((b) => (b.detail as { updatesPr?: { batchId: string } } | null)?.updatesPr?.batchId === batchId && ['draft', 'branch_ready'].includes(b.status));
+      if (fixes) throw new Error(`the fixes are already in batch ${fixes.seq}: clear that batch first`);
+      const tasks = detail.reviewFix.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t && t.fix?.check === 'review' && t.fix.batchId === batchId);
+      const held = tasks.filter((t) => t.state === 'leased' || t.state === 'gating');
+      if (held.length || this.status(runId).busySlots) throw new Error('workers are still on this run: pause it now, then take the packets back');
+      const bad = tasks.find((t) => !t.fix!.verdictId || !store.getVerdict(t.fix!.verdictId));
+      if (bad) throw new Error(`${bad.unit} has no record of the verdict it was submitted with: nothing was changed`);
+      const { reviewFix: _gone, ...rest } = detail;
+      store.tx(() => {
+        for (const t of tasks) if (!store.recallFix(runId, t.id, t.fix!.verdictId!)) throw new Error(`${t.unit} changed meanwhile: nothing was taken back`);
+        store.updateBatch(batchId, { detail: rest });
+      });
+      const open = store.listTasks(runId, { limit: 100_000 }).some((t) => ['pending', 'leased', 'gating'].includes(t.state));
+      events.emit('batch.review_recalled', `batch ${batch.seq}: ${tasks.length} packet(s) taken back from the AI agents; each is as it was submitted`, { runId, level: 'warn', data: { seq: batch.seq, packets: tasks.length } });
+      // `sr start` named the worker tier in the local task records: name the finishing models again.
+      await this.reclaim(runId, tasks.map((t) => store.getTask(t.id)!));
+      return { packets: tasks.length, functions: tasks.reduce((n, t) => n + t.functions.length, 0), open };
+    }, { besideRun: true });
+    if (!r.open && store.getRun(runId)?.status === 'paused') {
+      // Nothing is left to do: a loaded run ends on its own, one that is not loaded just goes back.
+      if (this.active.has(runId)) await this.resumeRun(runId);
+      else store.setRunStatus(runId, 'completed', ['paused']);
+    }
+    return { ok: true as const, seq: batch.seq, packets: r.packets, functions: r.functions, status: store.getRun(runId)?.status ?? 'completed' };
+  }
+
+  /**
+   * Fix a pull request from its review comments with the run's AI workers. The orchestrator decides
+   * first (`triageReview`): only the packets it names go back to the worker queue, with its
+   * instructions (`only` narrows them further), and the run goes through its flow again. An open PR keeps its other packets; when the run finishes its fixed packets form
    * a batch of their own, pushed to the same PR with `pushReviewFixes`. A closed PR's batch is
    * replaced: every packet goes back into batching and the result is a new PR.
    */
-  async fixFromReview(runId: string, batchId: string) {
+  async fixFromReview(runId: string, batchId: string, opts: { only?: string[] } = {}) {
     const { store, events } = this.deps;
     const row = store.getRun(runId);
     if (!row) throw new Error(`run ${runId} not found`);
@@ -1900,16 +2121,21 @@ export class RunEngine {
     if (budgetReached(row)) throw new Error(`run budget $${row.config.budgetUsd} reached ($${row.costUsd.toFixed(2)} spent): raise it before fixing with the agents`);
     await this.refreshPullRequests(runId, { batchId });
     const batch = store.getBatch(batchId)!;
-    const d = (batch.detail ?? {}) as { pr: string; prStatus?: PrStatus };
+    const d = (batch.detail ?? {}) as { pr: string; prBranch?: string; prStatus?: PrStatus; reviewPlan?: ReviewPlan };
     const st = d.prStatus;
     if (!st?.state) throw new Error(st?.error ?? 'the pull request could not be read');
     if (st.state === 'merged') throw new Error('the pull request is merged: there is nothing to fix');
     const comments = reviewComments(st);
     if (!comments.length) throw new Error(`the pull request is ${st.state} and nobody else has commented: there is nothing to fix from`);
+    await this.assertPrBranchOurs(d.prBranch, st);
+    if (!d.reviewPlan) throw new Error('ask the orchestrator first which packets the comments need changed');
+    if (d.reviewPlan.key !== commentsKey(comments)) throw new Error('the comments changed since the orchestrator read them: ask it again');
+    const only = opts.only ? new Set(opts.only) : null;
+    const chosen = d.reviewPlan.fix.filter((f) => !only || only.has(f.taskId));
+    if (!chosen.length) throw new Error(d.reviewPlan.fix.length ? 'no packet was chosen' : 'the orchestrator found nothing that needs fixing');
     const tasks = batch.taskIds.map((id) => store.getTask(id)).filter((t): t is TaskRow => !!t);
     if (tasks.some((t) => t.state !== 'staged')) throw new Error('part of this pull request is already being fixed or changed');
-    const filesOf = new Map(tasks.map((t) => [t.id, batchContent(store, runId, [t]).files.map((f) => f.path)]));
-    const reasons = reviewTargets(tasks, filesOf, comments);
+    const reasons = new Map(chosen.map((f) => [f.taskId, f.instructions]));
     const targets = tasks.filter((t) => reasons.has(t.id));
     const open = st.state === 'open';
     const r = await this.exclusive(`sending the review of batch ${batch.seq} of ${runId} to the AI agents`, async () => {
@@ -2054,10 +2280,7 @@ export class RunEngine {
           return [];
         }
       };
-      const clean = (b: { detail: unknown }) => {
-        const d = (b.detail ?? {}) as { dryRunFingerprint?: string; dryRunBase?: string | null; dryRunUncheckedClaims?: string[]; lastSubmit?: { ok?: boolean; dryRun?: boolean } };
-        return !!d.dryRunFingerprint && d.dryRunBase === (repo.baseSha ?? null) && !d.dryRunUncheckedClaims?.length && d.lastSubmit?.ok === true;
-      };
+      const clean = (b: { detail: unknown }) => this.cleanDryRun(b);
 
       phase(1, 'batching and re-verifying');
       if (failedLeft().length) {
@@ -2570,6 +2793,13 @@ export class RunEngine {
         this.infraFailure(run, task, leaseId, `slot ${slot} could not be restored`, undefined, { slotFault: true });
         return;
       }
+      // 1a. nobody pays for a function upstream has matched since it was selected (fixes of packets
+      // already accepted have their own checks: they change code a pull request or batch holds).
+      if (!task.fix || task.fix.check === 'regate') {
+        const taken = await this.takenNow(task);
+        if (signal.aborted) throw new AbortedError();
+        if (taken.size) return this.skipFunctions(run, task, leaseId, taken, tierIdx, slot);
+      }
       const carried = this.carriedFiles(runId, task.unit);
       if (carried.length) await repo.writeFiles(slot, carried);
       // The claim must name a model or the agent, never a guess: the model is chosen per attempt
@@ -2584,11 +2814,23 @@ export class RunEngine {
         return this.infraFailure(run, task, leaseId, `prepare failed: ${(e as Error).message}`);
       }
       if (prepared.srTaskId && !this.queue.transition(task.id, leaseId, ['leased'], 'leased', { srTaskId: prepared.srTaskId })) return;
+      if (cfg.skipThunks && !task.fix) {
+        const thunks = await this.adjustorThunks(task.functions, prepared.packs);
+        if (signal.aborted) throw new AbortedError();
+        if (thunks.size) {
+          return this.skipFunctions(run, task, leaseId, new Map([...thunks].map((r) => [r, { code: 'SKIP_ADJUSTOR_THUNK', why: 'an adjustor thunk (two instructions: adjust `this`, jump): the compiler emits it from the class layout, no function body compiles to it' }])), tierIdx, slot, prepared.srTaskId);
+        }
+      }
       // A unit rebuilt on upstream: every attempt starts from upstream's file with the packet's
       // accepted functions spliced in (the first attempt submits exactly that).
       // A packet re-gated: every attempt starts from the candidate whose functions all matched.
       const spliced = task.fix?.check === 'rebuild' ? await this.spliceForRebuild(task, slot) : task.fix?.check === 'regate' ? await this.storedCandidate(task, slot) : null;
       if (spliced) await repo.writeFiles(slot, spliced.files);
+      if (task.fix?.freeOnly && !(spliced && task.fix.verdictId === task.lastVerdictId)) {
+        this.queue.transition(task.id, leaseId, ['leased'], 'dead');
+        ev('task.dead', 'its stored candidate is gone: dead again without a model call', 'warn');
+        return;
+      }
 
       // 1b. late classification: prepare just produced the local packs — refine size-only estimates
       const routing = cfg.routing;
@@ -2666,7 +2908,7 @@ export class RunEngine {
         text = JSON.stringify({ files: spliced.files, ...(spliced.codeOrigin ? { codeOrigin: spliced.codeOrigin } : {}), ...(spliced.adaptedBodies ? { adaptedBodies: spliced.adaptedBodies } : {}) });
         finisher = spliced.model ?? 'decomp-orchestrator';
         const regate = task.fix?.check === 'regate';
-        store.updateAttempt(attempt.id, { model: regate ? 'stored candidate (no model call)' : 'splice (no model call)', latencyMs: 0 });
+        store.updateAttempt(attempt.id, { model: freeAttemptModel(regate ? 'stored candidate' : 'splice', spliced.model), latencyMs: 0 });
         ev('attempt.spliced', `${regate ? 're-gated' : 'rebuilt on upstream'} without a model call: ${spliced.notes.join('; ').slice(0, 600)}`, 'info', { notes: spliced.notes });
       } else {
         const tier = run.plan.tiers[tierIdx]!;
@@ -2763,6 +3005,7 @@ export class RunEngine {
       const untouched = await Promise.all(prepared.allowedPaths.filter((p) => !mat.files.some((f) => f.path === p)).map(async (p) => ({ path: p, current: await repo.readFile(slot, p), base: await repo.baseFile(p) })));
       const fixed = await repairAnswer(mat.files, (p) => repo.readFile(slot, p), { codeOrigin: parsed.data.codeOrigin, adaptedBodies: parsed.data.adaptedBodies }, {
         untouched, attribution: { person: personOf(cfg.draftedBy), model: finisher },
+        base: (p) => repo.baseFile(p), own: task.functions.map((f) => (f.name ?? f.rva).split('::').pop()!),
       });
       mat.files = fixed.files;
       // The exact code (comments and spacing aside) already failed in the compiler: refuse it without
@@ -2796,6 +3039,7 @@ export class RunEngine {
       store.updateAttempt(attempt.id, { status: 'completed', files: written, finishedAt: Date.now() });
       if (gate.verdict.decision === 'pass') await this.learn(run, task, written, carriedMap).catch((e) => ev('knowledge.failed', `knowledge extraction failed: ${(e as Error).message}`, 'warn'));
       this.route(run, task, leaseId, attempt, gate.verdict, { infra: gate.infra, strike: gate.strike }, tierIdx, prepared.srTaskId);
+      if (gate.verdict.decision === 'reject' && !gate.infra && !gate.strike) this.splitMatched(run, task, gate.verdict);
       if (gate.verdict.decision === 'pass' && prepared.srTaskId && repo.recordAttribution && store.getTask(task.id)?.lastVerdictId === gate.verdict.id) {
         const draftedBy = draftedByText(personOf(cfg.draftedBy), [finisher]);
         const r = await repo.recordAttribution({ task, srTaskId: prepared.srTaskId, model: finisher, draftedBy, slot }).catch((e: Error) => ({ ok: false, problems: [e.message] }));
@@ -2824,6 +3068,117 @@ export class RunEngine {
         this.parkSlot(run, slot, (err as Error).message);
       });
     }
+  }
+
+  /** Which of these functions are adjustor thunks, as far as local packs tell (none without a pack). */
+  private async adjustorThunks(fns: FunctionTarget[], packs?: string[]): Promise<Set<string>> {
+    const got = await this.deps.repo.analyze?.(fns, packs ? { packs } : {}).catch(() => null);
+    return new Set(fns.filter((f) => got?.get(f.rva)?.adjustorThunk).map((f) => f.rva));
+  }
+
+  /** The packet's functions upstream has by now; a check that cannot be made takes nothing out. */
+  private async takenNow(task: TaskRow): Promise<Map<string, { code: string; why: string }>> {
+    const r = await this.deps.repo.takenUpstream?.(task.functions.map((f) => f.rva), task.unit).catch(() => null);
+    return new Map(Object.entries(r?.checked ? r.taken : {}).map(([rva, why]) => [rva, { code: 'SKIP_MATCHED_UPSTREAM', why }]));
+  }
+
+  /**
+   * Take functions out of a leased packet without a model call. The rest goes back to the queue and
+   * is prepared again without them; the ones taken out are dead, in a packet of their own (or this
+   * one, when nothing is left), with the reason as its verdict.
+   */
+  private skipFunctions(run: ActiveRun, task: TaskRow, leaseId: string, skip: Map<string, { code: string; why: string }>, tierIdx: number, slot: number, srTaskId?: string | null) {
+    const { store, events } = this.deps;
+    const runId = run.row.id;
+    const out = task.functions.filter((f) => skip.has(f.rva));
+    const keep = task.functions.filter((f) => !skip.has(f.rva));
+    const now = Date.now();
+    const record = (taskId: string, n: number) => {
+      const attempt: Attempt = {
+        id: newId('att'), taskId, runId, n, tier: tierIdx, nodeId: run.plan.tiers[tierIdx]!.node.id, accountId: null, model: 'skipped (no model call)', status: 'completed',
+        bundleHash: '', usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, costUsd: 0,
+        latencyMs: 0, error: null, files: null, startedAt: now, finishedAt: now, difficulty: task.difficulty, contextTokens: 0, contextRawTokens: 0,
+      };
+      store.insertAttempt(attempt);
+      const verdict: Verdict = {
+        id: newId('vd'), taskId, attemptId: attempt.id, decision: 'reject', route: 'dead_letter', compare: null, exactBytes: 0, createdAt: now,
+        findings: out.map((f) => ({ stage: 'worker', code: skip.get(f.rva)!.code, severity: 'block' as const, message: `${f.rva} ${f.name ?? ''}: ${skip.get(f.rva)!.why}` })),
+        stages: [{ name: 'skip', ok: false, ms: 0, skipped: false }],
+      };
+      store.insertVerdict(verdict);
+      store.db.prepare('UPDATE tasks SET last_verdict_id = ? WHERE id = ?').run(verdict.id, taskId);
+    };
+    const moved = store.tx(() => {
+      const sr = srTaskId ? { srTaskId } : {};
+      if (!keep.length) {
+        if (!this.queue.transition(task.id, leaseId, ['leased'], 'dead', sr)) return false;
+        record(task.id, task.attemptsTotal + 1);
+        return true;
+      }
+      if (!this.queue.transition(task.id, leaseId, ['leased'], 'pending', { ...sr, notBefore: 0 })) return false;
+      const id = newId('task');
+      if (!store.narrowTask(task.id, keep)) store.setTaskFunctions(task.id, keep);
+      if (task.fix?.check === 'regate') {
+        const gone = out.map((f) => ({ rva: f.rva, name: f.name ?? null, why: skip.get(f.rva)!.why }));
+        store.db.prepare('UPDATE tasks SET fix_json = ? WHERE id = ?').run(JSON.stringify({ ...task.fix, without: [...(task.fix.without ?? []), ...gone] }), task.id);
+      }
+      if (store.splitTask(task.id, id, out, { state: 'dead', srTaskId: srTaskId ?? null })) record(id, 1);
+      return true;
+    });
+    if (!moved) return;
+    const worker = run.workerBySlot.get(slot);
+    if (worker && task.attemptsTotal === 0) this.queue.unassign(runId, worker, task.id);
+    const why = [...new Set(out.map((f) => skip.get(f.rva)!.why))];
+    events.emit('task.skipped', `skipped ${out.map((f) => f.name ?? f.rva).join(', ')} without a model call: ${why.join('; ').slice(0, 300)}${keep.length ? `; ${keep.length} function(s) of the packet go on` : ''}`, {
+      runId, taskId: task.id, data: { skipped: out.map((f) => ({ rva: f.rva, code: skip.get(f.rva)!.code })), kept: keep.length },
+    });
+    this.stageReadySoon(runId);
+    run.wake.notify();
+  }
+
+  /**
+   * Functions are accepted one by one: when a candidate matched some of the packet's functions and
+   * only compare results block the others, the matched ones become a packet of their own, whose
+   * first attempt submits that candidate without the others (no model call). The packet goes on
+   * with the functions that do not match yet. Nothing is accepted here: the Gate Keeper decides it.
+   */
+  private splitMatched(run: ActiveRun, task: TaskRow, verdict: Verdict) {
+    const { store, events } = this.deps;
+    if (task.fix && task.fix.check !== 'regate') return;
+    const sides = matchedSides(task, verdict);
+    if (!sides) return;
+    const id = newId('task');
+    const done = store.tx(() => {
+      const t = store.getTask(task.id);
+      if (!t || (t.state !== 'pending' && t.state !== 'dead') || t.lastVerdictId !== verdict.id) return false;
+      return this.splitOff(t, id, sides.matched, sides.rest, verdict.id, { freeOnly: task.fix?.freeOnly, without: task.fix?.without });
+    });
+    if (!done) return;
+    events.emit('task.split', `${sides.matched.map((f) => f.name ?? f.rva).join(', ')} matched; on their own now, re-gated without ${sides.rest.map((f) => f.name ?? f.rva).join(', ')} (no model call), which go on alone`, {
+      runId: run.row.id, taskId: id, data: { from: task.id, matched: sides.matched.map((f) => f.rva), rest: sides.rest.map((f) => f.rva) },
+    });
+    run.wake.notify();
+  }
+
+  /** In a transaction: `matched` leave packet `t` as a 're-gate' packet of their own; `rest` stay in it. */
+  private splitOff(t: TaskRow, id: string, matched: FunctionTarget[], rest: FunctionTarget[], verdictId: string, opts: { freeOnly?: boolean; without?: BatchFix['without'] } = {}): boolean {
+    const { store } = this.deps;
+    // The others must come out of the candidate cleanly: accepting their unmatched bodies with it
+    // would put them into the unit (and its pull request). Otherwise the packet stays whole.
+    const a = store.getAttempt(store.getVerdict(verdictId)?.attemptId ?? '');
+    const src = a?.files?.find((f) => f.path === t.unit)?.content;
+    if (src === undefined || stillDefines(removeFunctions(src, rest), rest)) return false;
+    if (a!.files!.some((f) => f.path !== t.unit && stillDefines(f.content, rest))) return false;
+    const fix: BatchFix = {
+      batchId: '', seq: 0, check: 'regate', at: Date.now(), verdictId,
+      reasons: [`${matched.length} function(s) matched in a candidate that only ${rest.map((f) => f.name ?? f.rva).join(', ')} blocked; that candidate goes to the Gate Keeper again without them`],
+      without: [...(opts.without ?? []), ...rest.map((f) => ({ rva: f.rva, name: f.name ?? null, why: 'does not match yet' }))],
+      ...(opts.freeOnly ? { freeOnly: true } : {}),
+    };
+    if (!store.splitTask(t.id, id, matched, { state: 'pending', fix, lastVerdictId: verdictId })) return false;
+    if (!store.narrowTask(t.id, rest)) store.setTaskFunctions(t.id, rest);
+    store.db.prepare('UPDATE tasks SET best_exact_bytes = 0 WHERE id = ?').run(t.id);
+    return true;
   }
 
   /** Mine a passing packet's accepted files for verified facts the rest of the run can reuse. */
@@ -2910,8 +3265,9 @@ export class RunEngine {
     // Progress counts bytes that align with the target, not only bytes exact in place: a candidate
     // whose first instruction is still wrong can be much closer than the last one, and resetting
     // patience on that keeps a packet that is converging from being dead-lettered.
-    const prior = store.verdictsForTask(task.id).filter((v) => v.id !== verdict.id).map(progressScore).filter((s): s is number => s !== null);
-    const score = progressScore(verdict);
+    const own = new Set(task.functions.map((f) => Number.parseInt(f.rva, 16)));
+    const prior = store.verdictsForTask(task.id).filter((v) => v.id !== verdict.id).map((v) => progressScore(v, own)).filter((s): s is number => s !== null);
+    const score = progressScore(verdict, own);
     const improved = verdict.exactBytes > task.bestExactBytes || (score !== null && score > Math.max(task.bestExactBytes, ...prior));
     const bestExactBytes = Math.max(task.bestExactBytes, verdict.exactBytes);
     const noImprovementStreak = improved ? 0 : task.noImprovementStreak + 1;
@@ -2936,6 +3292,11 @@ export class RunEngine {
           runId, taskId: task.id, level: 'warn', data: { problems },
         });
       }
+      return;
+    }
+    // A packet put back only to try its stored candidate again: no model call follows.
+    if (task.fix?.freeOnly) {
+      if (this.settle(run, task, leaseId, 'dead', { ...common, attemptsTotal, attemptsAtTier, bestExactBytes }, verdict, 'dead_letter')) events.emit('task.dead', `DEAD ${fnLabel}: the stored candidate does not pass on its own (${summarise(verdict)}); no model call was made`, { runId, taskId: task.id, level: 'warn' });
       return;
     }
     const limit = tierNode.node.data;
@@ -3031,8 +3392,14 @@ export class RunEngine {
       this.op = null;
       this.releaseSlotLock();
     }
-    // Curation runs shadow evaluations on the slots: only once the slot lock is released.
-    if (store.getRun(runId)?.status === 'completed' && run.row.config.skills.enabled && run.row.config.skills.autoCurate) queueMicrotask(() => this.afterRun?.(runId));
+    if (store.getRun(runId)?.status === 'completed') void this.autoPrepare(runId).finally(() => this.curateAfter(run));
+  }
+
+  /** Curation runs shadow evaluations on the slots: only once the slot lock is released. */
+  private curateAfter(run: ActiveRun) {
+    if (this.deps.store.db.open === false) return;
+    const runId = run.row.id;
+    if (this.deps.store.getRun(runId)?.status === 'completed' && run.row.config.skills.enabled && run.row.config.skills.autoCurate) queueMicrotask(() => this.afterRun?.(runId));
   }
 
   private async finishStaging(run: ActiveRun) {
@@ -3161,6 +3528,21 @@ function syntheticVerdict(task: TaskRow, attempt: Attempt, code: string, message
     findings: [{ stage: 'worker', code, severity: 'block', message }], compare: null, exactBytes: 0,
     stages: [{ name: 'parse', ok: false, ms: 0, skipped: false }], createdAt: Date.now(),
   };
+}
+
+/**
+ * The packet's functions a rejected candidate matched and the ones it did not, when compare results
+ * alone block it and both sides exist; null otherwise (nothing to accept, or another kind of fault).
+ */
+export function matchedSides(task: Pick<TaskRow, 'functions'>, v: Verdict): { matched: FunctionTarget[]; rest: FunctionTarget[] } | null {
+  if (v.decision !== 'reject' || !v.compare?.length) return null;
+  const blocks = v.findings.filter((f) => f.severity === 'block');
+  if (!blocks.length || !blocks.every((f) => f.code.startsWith('COMPARE_') && f.code !== 'COMPARE_COMPILE_ERROR')) return null;
+  const result = new Map(v.compare.map((c) => [Number.parseInt(c.rva, 16), c.result]));
+  if (!task.functions.every((f) => result.has(Number.parseInt(f.rva, 16)))) return null;
+  const matched = task.functions.filter((f) => result.get(Number.parseInt(f.rva, 16)) === 'pass');
+  const rest = task.functions.filter((f) => !matched.includes(f));
+  return matched.length && rest.length ? { matched, rest } : null;
 }
 
 function summarise(v: Verdict) {

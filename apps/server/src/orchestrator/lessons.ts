@@ -146,7 +146,7 @@ export function runPitfalls(store: Store, runId: string): string[] {
     WHERE t.run_id = ? AND json_extract(f.value, '$.severity') = 'block' ORDER BY v.created_at DESC LIMIT 4000`).all(runId) as Array<{ code: string; message: string | null }>;
   const counts = new Map<string, { n: number; text: string }>();
   for (const r of rows) {
-    if (NOT_PITFALLS.has(r.code) || r.code.startsWith('INFRA')) continue;
+    if (NOT_PITFALLS.has(r.code) || r.code.startsWith('INFRA') || r.code.startsWith('SKIP_')) continue;
     let key = r.code;
     let text = FINDING_GUIDANCE[r.code] ?? 'see Gate Keeper diagnostics';
     if (r.code === 'PREFLIGHT_PROBLEM') {

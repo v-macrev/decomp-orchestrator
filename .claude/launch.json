@@ -29,17 +29,7 @@
     },
     {
       "name": "orchestrator-real",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": [
-        "run",
-        "start",
-        "-w",
-        "@decomp/server"
-      ],
-      "env": {
-        "ORCH_CONFIG": "config/orchestrator.json",
-        "PORT": "8789"
-      },
+      "url": "http://localhost:8789",
       "port": 8789
     }
   ]

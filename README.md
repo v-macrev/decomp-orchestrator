@@ -93,6 +93,9 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    Accounts can also be managed from the **Accounts** tab.
 4. `npm run dev`, then start a run with source **sr next**. Leave *exposure consent* off unless you,
    as the owner of the game copy, agree to send locally made listings to your AI providers.
+   On Windows, `tools\server.ps1 start` runs the server on its own instead (no terminal to keep open,
+   started again after a crash) until `tools\server.ps1 stop`; output in `data/server.log`.
+   `autostart` / `no-autostart` turn starting it at Windows sign-in on and off.
 5. Accepted units are staged on local branches (`decomp/<run>-b<n>`), re-verified as a whole.
    A batch that fails re-verification gets no branch and its packets stay `passed`; stage them
    again with **Batch passed functions** (`POST /api/runs/:id/stage`), which also batches a
@@ -112,7 +115,8 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    (`POST /api/runs/:id/prepare`) does every step below in order and dry-runs each batch, using
    every idle worktree slot for compares; you then submit each clean batch yourself. One step at
    a time: re-verify failed batches, set aside the units a dry
-   run blamed (or that upstream already matched or changed: **Check against upstream**), and put
+   run blamed (or that upstream already matched, already has in
+   another unit or changed, or whose header drops what upstream's says: **Check against upstream**), and put
    them back later. A dry run checks upstream first and recompiles only packets whose last compare
    no longer proves the tree. **Fix with AI agents** on a batch whose check or dry run failed
    (`POST /api/runs/:id/batches/:batchId/fix`) sends the packets it failed back to the run's worker
@@ -127,11 +131,23 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    finished units (no packet of the unit left to work on) fill a PR batch (`prBatchSize`, 40 by
    default), they become a batch at once, checked in a clean tree on the staging worktree while the
    workers keep going; a group under 90% of the batch size waits for more, and the run's end
-   batches whatever is left. The queue finishes units it has started before opening new ones, so
+   batches whatever is left. A group whose oldest function has been ready for `batchMaxAgeMinutes`
+   (60; 0 = off) is batched even when it is small, from `batchMinFunctions` (10) up. New batches are
+   then prepared on their own (`autoPrepare`, on): what upstream already has is set aside and each
+   batch is dry-run. Nothing is submitted or claimed publicly; **Submit PR** stays your click.
+   The queue finishes units it has started before opening new ones, so
    units complete, and batches fill, early. Every PR step (Prepare all, dry run, submit, claims,
    set aside, combine, fixes) works on a running or paused run too, on the staging worktree only;
    the run's end waits for a step in progress. The PR batches tab shows **Next PR batch: N of 40**
    (`GET /api/runs/:id/batching`: functions ready, those waiting on their unit, the batch size).
+   **Less spent on what cannot be won**: before a packet is worked on, the upstream branch is
+   fetched (at most every 5 minutes) and functions others matched since, or that another unit
+   already holds, leave it without a model call (`SKIP_MATCHED_UPSTREAM`). Adjustor thunks (`sub rcx,
+   imm` + `jmp`) are left out (`skipThunks`, on). When a candidate matches some of a packet's
+   functions and only compare results block the rest, the matched ones become a packet of their own
+   and that candidate goes to the Gate Keeper again without the others, free; the rest goes on alone.
+   `POST /api/runs/:id/regate-matched` with `{ "partial": true }` does the same for packets that died
+   before this (free attempt only; `"preview": true` only counts them).
    The Packets tab pages through packets (50 to 500 per page) and counts functions, not only
    packets, for every state. Click a column header to sort on it (ascending, descending, off); the
    funnel that shows when you hover a header filters on that column: tick values (state,
@@ -147,9 +163,14 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
    read when the tab opens, every 10 minutes for open PRs, and on **Check GitHub now**
    (`POST /api/runs/:id/pull-requests/refresh`), with every comment, review and inline comment from
    other people. **Explain the comments** (`POST .../batches/:batchId/explain-review`) asks the run's
-   most capable model to explain them in plain words, cached until they change. **Fix from the
-   comments** (`POST .../batches/:batchId/fix-review`, open or closed PRs) sends the packets the comments
-   are about back to the AI workers with the comments as instructions; for an open PR the fixed
+   most capable model to explain them in plain words, cached until they change. **Ask the orchestrator
+   what to fix** (`POST .../triage-review`, open or closed PRs) sends nothing to the workers: the
+   orchestrator's model sorts every comment into what needs a fix, what does not and why, and shows the
+   packets it would send with an instruction for each. You tick the packets and press **Send**
+   (`POST .../batches/:batchId/fix-review`, body `{"only": [...]}`); it is refused without a plan for the
+   current comments, or when someone else pushed to the pull request. **Take back from the agents**
+   (`POST .../recall-review`, run paused or finished) puts every packet back as it was submitted.
+   For an open PR the fixed
    packets come back as their own batch and **Push the fixes** (`POST .../push-review-fixes`) adds one
    commit to the same PR after re-verifying all of it (never a force-push); a closed PR's packets
    are batched again for a new PR.
@@ -164,13 +185,26 @@ stream also takes it as `?token=`, because browsers cannot send headers to an Ev
 server binds to `127.0.0.1` by default and refuses any other address without a token, unless
 `ORCH_ALLOW_UNAUTHENTICATED=1` says the network is trusted.
 
+## Desk
+
+In repo mode the web app opens on the desk: Overview, Solved, Near misses, Templates and queue, Models,
+Activity and Flag reports (plus Local model when one is configured), next to Runs, Flow builder, Skills
+and Accounts. These views only read. The server runs `tools/desk/collect.py` (standard-library Python, no
+network code) every `desk.intervalSec` seconds (120 by default; `desk.enabled: false` turns it off) and
+serves the files it writes to `data/desk/` (git-ignored) through GET-only `/api/desk/*`. The collector
+reads the orchestrator database, the git objects of the already fetched `origin/main` and the clone's
+`.local/contrib` records; it never opens accounts, credentials, packs, objects, listings or session
+logs. A number no source records is a dash with a footnote. The data is as fresh as the clone's last
+`git fetch`, which the collector never runs.
+
 ## Layout
 
 ```
 packages/core     Zod schemas (accounts, flows, tasks, attempts, verdicts) + flow validation/compilation
 packages/skills   skill schemas, deterministic trigger matcher, SKILL.md format, compression, safety scans, cookbook parser
 apps/server       engine, queue, account pool, providers, Gate Keeper, repo adapters, skill registry/curator/shadow evaluator, API, simulator
-apps/web          React + React Flow UI
+apps/web          React UI: desk views (src/desk) and orchestrator pages (src/pages, React Flow builder)
+tools/desk        read-only collector behind the desk views
 docs/             architecture
 config/           example configs
 ```

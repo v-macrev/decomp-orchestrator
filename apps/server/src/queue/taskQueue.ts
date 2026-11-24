@@ -70,11 +70,13 @@ export class TaskQueue {
       const take = (fromTier: number, limit: number) => {
         // Units already started go first: a unit's matched functions reach a PR batch only once no
         // packet of it is left, so finishing units fills batches early (rolling batches).
+        // A re-gated packet goes first of all: its attempt is free, and the rest of its unit builds on it.
         const rows = db
           .prepare(`SELECT t.id, json_array_length(t.functions_json) fn,
               EXISTS (SELECT 1 FROM worker_assignments a WHERE a.run_id = t.run_id AND a.worker_id = @worker AND a.task_id = t.id) own,
-              EXISTS (SELECT 1 FROM tasks s WHERE s.run_id = t.run_id AND s.unit = t.unit AND s.state IN ('passed','staged','withheld','set_aside','dead','quarantined')) started
-            FROM tasks t WHERE ${READY} ORDER BY own DESC, started DESC, t.priority DESC, t.rowid LIMIT @n`)
+              EXISTS (SELECT 1 FROM tasks s WHERE s.run_id = t.run_id AND s.unit = t.unit AND s.state IN ('passed','staged','withheld','set_aside','dead','quarantined')) started,
+              COALESCE(json_extract(t.fix_json, '$.check') = 'regate' AND json_extract(t.fix_json, '$.verdictId') = t.last_verdict_id, 0) regate
+            FROM tasks t WHERE ${READY} ORDER BY regate DESC, own DESC, started DESC, t.priority DESC, t.rowid LIMIT @n`)
           .all({ runId, tier: fromTier, now, n: limit * 4 + 8, worker }) as Array<{ id: string; fn: number; own: number }>;
         for (const { id, fn, own } of rows) {
           if (out.length >= n) break;

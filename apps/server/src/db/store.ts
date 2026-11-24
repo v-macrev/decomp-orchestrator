@@ -119,9 +119,15 @@ export interface BatchFix {
   verdictId: string | null;
   /** For 'rebuild': functions taken out of the packet (matched upstream since, or no longer published). */
   dropped?: Array<{ rva: string; name: string | null; why: string }>;
+  /** For 'regate': functions of the stored candidate that are not this packet's; taken out of it before it is submitted. */
+  without?: Array<{ rva: string; name: string | null; why: string }>;
+  /** Only the free attempt: when it fails, the packet is dead again without a model call. */
+  freeOnly?: boolean;
 }
 
 type Raw = Record<string, any>;
+
+const functionsKey = (fns: FunctionTarget[]) => fns.map((f) => f.rva).sort().join(',');
 
 function toTask(r: Raw): TaskRow {
   return {
@@ -286,7 +292,7 @@ export class Store {
     let inserted = 0;
     this.tx(() => {
       for (const t of packets) {
-        const key = t.functions.map((f) => f.rva).sort().join(',');
+        const key = functionsKey(t.functions);
         inserted += stmt.run(t.id, runId, t.unit, key, j(t.functions), t.priority, t.tier ?? 0, t.difficulty ?? 'medium', t.complexity ?? 0, t.assessment ? j(t.assessment) : null, now).changes;
       }
     });
@@ -547,9 +553,37 @@ export class Store {
         fix_json = ?, hold_json = NULL, updated_at = ?
       WHERE id = ? AND run_id = ? AND state IN (${from.map(() => '?').join(',')})`).run(j(fix), Date.now(), taskId, runId, ...from).changes > 0;
   }
+  /** Undo `requeueForFix`: back in its batch, with the verdict it had. Never while a worker holds it. */
+  recallFix(runId: string, taskId: string, verdictId: string): boolean {
+    return this.db.prepare(`UPDATE tasks SET state = 'staged', last_verdict_id = ?, fix_json = NULL, hold_json = NULL, lease_id = NULL, lease_expires_at = NULL, not_before = 0, updated_at = ?
+      WHERE id = ? AND run_id = ? AND fix_json IS NOT NULL AND state NOT IN ('leased', 'gating')`).run(verdictId, Date.now(), taskId, runId).changes > 0;
+  }
   /** Narrow a packet to some of its functions (the rest stay out of it for good). */
   setTaskFunctions(taskId: string, functions: FunctionTarget[]) {
     this.db.prepare('UPDATE tasks SET functions_json = ?, updated_at = ? WHERE id = ?').run(j(functions), Date.now(), taskId);
+  }
+  /**
+   * Like `setTaskFunctions`, and the packet's key follows (so its key never names functions another
+   * packet now holds). False when a packet of the unit already holds exactly these functions.
+   */
+  narrowTask(taskId: string, functions: FunctionTarget[]): boolean {
+    return this.db.prepare('UPDATE OR IGNORE tasks SET functions_json = ?, functions_key = ?, updated_at = ? WHERE id = ?')
+      .run(j(functions), functionsKey(functions), Date.now(), taskId).changes === 1;
+  }
+  /**
+   * A new packet with some of another packet's functions, on the same unit, tier and sr task, and
+   * free for the workers already charged for those functions. False when the unit already has it.
+   */
+  splitTask(parentId: string, id: string, functions: FunctionTarget[], opts: { state: 'pending' | 'dead'; fix?: BatchFix | null; lastVerdictId?: string | null; srTaskId?: string | null; priority?: number }): boolean {
+    const now = Date.now();
+    const n = this.db.prepare(`INSERT OR IGNORE INTO tasks (id, run_id, unit, functions_key, functions_json, state, priority, tier, difficulty, complexity, assessment_json, sr_task_id, last_verdict_id, fix_json, updated_at)
+      SELECT @id, run_id, unit, @key, @fns, @state, COALESCE(@priority, priority), tier, difficulty, complexity, assessment_json, COALESCE(@sr, sr_task_id), @verdict, @fix, @now FROM tasks WHERE id = @parent`)
+      .run({ id, parent: parentId, key: functionsKey(functions), fns: j(functions), state: opts.state, priority: opts.priority ?? null, sr: opts.srTaskId ?? null, verdict: opts.lastVerdictId ?? null, fix: opts.fix ? j(opts.fix) : null, now }).changes;
+    if (n) {
+      this.db.prepare(`INSERT OR IGNORE INTO worker_assignments (run_id, worker_id, task_id, functions, assigned_at)
+        SELECT run_id, worker_id, @id, 0, @now FROM worker_assignments WHERE task_id = @parent`).run({ id, parent: parentId, now });
+    }
+    return n === 1;
   }
   /** Record (or forget, with null) why a packet whose functions all match is set aside. */
   setHold(taskIds: string[], hold: TaskHold | null) {

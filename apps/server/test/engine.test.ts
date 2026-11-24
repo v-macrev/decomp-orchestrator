@@ -144,7 +144,7 @@ describe('RunEngine', () => {
   it('escalates stuck packets to the strong tier', async () => {
     const s = setup(tmpDb(), { accounts: accounts({ 'claude-ws-a': { skill: 0.05 }, 'claude-ws-b': { skill: 0.05 }, 'gpt-a': { skill: 0.05 } }) });
     // Ladder mechanics in isolation (difficulty routing would send hard packets straight to the strong tier).
-    const run = s.engine.createRun('esc', { flowId: 'default', selection: { source: 'synthetic', count: 40, seed: 3 }, routing: { enabled: false } }, flow(4, 2));
+    const run = s.engine.createRun('esc', { flowId: 'default', selection: { source: 'synthetic', count: 160, seed: 3 }, packetMaxFunctions: 1, routing: { enabled: false } }, flow(4, 2));
     await s.engine.start(run.id);
     await s.engine.waitFor(run.id);
     const escalations = s.store.db.prepare(`SELECT COUNT(*) n FROM verdicts WHERE route = 'escalate'`).get() as { n: number };
@@ -254,7 +254,7 @@ describe('attempts per tier', () => {
     const f = flow(2, 2);
     for (const n of f.nodes) if (n.type === 'worker') n.data = { ...n.data, maxAttempts: n.id === 'worker-cheap' ? 4 : 3, stuckAfter: 1 };
     // promoteAfterFailures: 1 and stuckAfter: 1 would each have moved a packet on after one failure.
-    const run = s.engine.createRun('attempts', { flowId: 'default', selection: { source: 'synthetic', count: 6, seed: 5 }, routing: { enabled: true, promoteAfterFailures: 1 } }, f);
+    const run = s.engine.createRun('attempts', { flowId: 'default', selection: { source: 'synthetic', count: 24, seed: 5 }, packetMaxFunctions: 1, routing: { enabled: true, promoteAfterFailures: 1 } }, f);
     await s.engine.start(run.id);
     await s.engine.waitFor(run.id);
     const dead = s.store.listTasks(run.id, { state: 'dead', limit: 100 });
@@ -297,7 +297,7 @@ describe('re-gating packets only foreign compare results killed', () => {
     const after = s.store.getTask(t.id)!;
     expect(['passed', 'staged']).toContain(after.state);
     const last = s.store.getAttempt(s.store.getVerdict(after.lastVerdictId!)!.attemptId)!;
-    expect(last.model).toBe('stored candidate (no model call)');
+    expect(last.model).toMatch(/^stored candidate( of .+)? \(no model call\)$/);
     expect(last.costUsd ?? 0).toBe(0);
     expect(s.store.attemptsForTask(t.id).length).toBe(before + 1);
     s.pool.close();

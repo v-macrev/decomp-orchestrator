@@ -12,6 +12,7 @@
 //
 // Code rules run on lexed source (comments and string contents blanked) to avoid false positives
 // on prose. Each finding carries file + line so a Worker retry gets an exact, actionable trace.
+import { lostProvenance } from './provenance.js';
 import type { Finding, FunctionTarget } from '@decomp/core';
 import { extractFunctions, lex, lineOf, normalise, topLevelArgs } from './cpp.js';
 
@@ -224,6 +225,12 @@ export function cheatScan(ctx: CheatContext): Finding[] {
       if (!cur) push(f, 'CHEAT_MATCHED_BODY_REMOVED', 'block', path, p.line, `previously accepted function ${p.name} was removed; add new functions alongside matched ones`);
       else if (normalise(cur.body) !== normalise(p.body)) push(f, 'CHEAT_MATCHED_BODY_MODIFIED', 'block', path, cur.line, `previously accepted function ${p.name} was modified; never change matched bodies`);
     }
+  }
+
+  // --- what upstream's header says about the code already there stays
+  if (ctx.before) {
+    const lost = lostProvenance(ctx.before, after);
+    if (lost.length) push(f, 'CONV_PROVENANCE_REMOVED', 'block', path, 1, `the header no longer says ${lost.slice(0, 3).map((l) => `"${l[0]!.slice(0, 110)}"`).join(', ')}${lost.length > 3 ? ` and ${lost.length - 3} more` : ''}; keep every origin, licence, label and function line the file already has and add yours beside them`);
   }
 
   // --- header block conventions (new or changed headers only, as the repo's header_check does)

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-or-later
 // Rebuilding a set-aside unit on upstream's current files (synthetic units only).
 import { describe, expect, it } from 'vitest';
-import { spliceUnit } from '../src/orchestrator/splice.js';
+import { removeFunctions, spliceUnit, stillDefines } from '../src/orchestrator/splice.js';
 
 const CPP = 'reconstruction/a/Widget.cpp';
 const H = 'reconstruction/a/Widget.h';
@@ -46,6 +46,24 @@ const OURS_CPP = [
 const OURS_H = ['#pragma once', '// Widget, Height: GUESS(low)', 'class Widget { public: int Width() const; int Height() const; void Gone(); int w; int h; };', ''].join('\n');
 
 const fn = (rva: string, name: string) => ({ rva, name, size: 8 });
+
+describe('taking functions out of a stored candidate', () => {
+  it('removes the definition, its own comment and its marker line, and nothing else', () => {
+    const src = OURS_CPP.replace('int Widget::Height() const\n', '// Scaled height.\nint Widget::Height() const\n');
+    const out = removeFunctions(src, [fn('0x120', 'Widget::Height'), fn('0x999', 'Widget::Absent')]);
+    expect(out).not.toMatch(/Height|Scaled|0x120/);
+    expect(out).toContain('// Code origin: original; drafted from the listing');
+    expect(out).toContain('// 0x100 Widget::Width');
+    expect(out).toContain('int Widget::Width() const { return w + 0; }');
+    expect(out).toContain('void Widget::Gone() { }');
+    const ctor = 'A::A(int n)\n    : m(n)\n{\n    Init();\n}\n\nvoid A::Init()\n{\n}\n';
+    expect(removeFunctions(ctor, [fn('0x2', 'A::A')])).toBe('\nvoid A::Init()\n{\n}\n');
+    expect(stillDefines(ctor, [fn('0x3', 'A::Init')])).toBe(true);
+    expect(stillDefines(removeFunctions(ctor, [fn('0x3', 'A::Init')]), [fn('0x3', 'A::Init')])).toBe(false); // the call in A::A is no definition
+    // A comment block that is the file's header stays.
+    expect(removeFunctions('// Source exposure: public.\nvoid A::B()\n{\n}\n', [fn('0x1', 'A::B')])).toBe('// Source exposure: public.\n');
+  });
+});
 
 describe('rebuild on upstream', () => {
   const r = spliceUnit({

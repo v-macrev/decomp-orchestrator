@@ -25,7 +25,7 @@ import type { TaskRow } from '../db/store.js';
 import { KeyedMutex } from '../util/async.js';
 import type { RunResult } from '../util/proc.js';
 import { LocalHost, WslHost, type Host } from './host.js';
-import type { Backlog, BaseDrift, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, PrComment, PrStatus, ProgressFn, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, UpstreamState } from './types.js';
+import type { Backlog, BaseDrift, ClaimCollision, ClaimCollisionCheck, CompareOutcome, DiscoveredFunction, DocSection, InventoryEntry, PreflightOutcome, PreparedTask, PrComment, PrStatus, ProgressFn, RepoAdapter, StageBatchInput, StageBatchResult, SubmitBatchInput, SubmitBatchResult, TakenUpstream, UpstreamState } from './types.js';
 import { batchPrText, withClaimLine, type CompareSummary } from './batchPr.js';
 import { autoBindHints, bindHintsPath, unboundNames, type AlignPair, type PackInstruction, type PackReference } from './binding.js';
 import { withRootIncludeRecipe } from './rootIncludes.js';
@@ -101,11 +101,32 @@ const LIVE_GIT_SCRIPT = [
   '  if tr "\\0" " " < "$d/cmdline" 2>/dev/null | grep -qF -e "$1" -e "$2"; then echo "${d#/proc/} $n"; fi',
   'done',
 ].join('\n');
+/** Prints the RVAs of the target-hash shards named (binary rows of tools/target_hash_store.py, or JSON), never their hashes. */
+const PUBLISHED_RVAS_PY = [
+  'import json, struct, subprocess, sys',
+  'out = []',
+  'for path in sys.argv[2:]:',
+  "    b = subprocess.run(['git', 'cat-file', 'blob', sys.argv[1] + ':' + path], capture_output=True, check=True).stdout",
+  "    if b[:4] == b'SRTH':",
+  "        version, count = struct.unpack_from('<BI', b, 4)",
+  "        if version != 1 or len(b) != 9 + 73 * count: raise SystemExit('unknown shard format: ' + path)",
+  "        out += [struct.unpack_from('<I', b, 9 + 73 * i)[0] for i in range(count)]",
+  '    else:',
+  "        out += [r['rva'] for r in json.loads(b)['functions']]",
+  "print(','.join(map(str, out)))",
+].join('\n');
+
+/** How long one fetch of the upstream branch answers `takenUpstream`. */
+const TAKEN_TTL_MS = 5 * 60_000;
+
 export class SrRepo implements RepoAdapter {
   readonly name = 'skyrim_decomp';
   readonly slotCount: number;
   readonly host: Host;
   private sha = '';
+  private marks: { revision: string; units: Map<string, Array<{ unit: string; name: string | null }>> } | null = null;
+  /** What upstream had at its last fetch by `takenUpstream` (shared by every slot for TAKEN_TTL_MS). */
+  private upstreamNow: { at: number; state: Promise<{ revision: string; matched: Map<number, string | null>; marks: Map<string, Array<{ unit: string; name: string | null }>> | null }> } | null = null;
   private srMutex = new KeyedMutex();
   private baseCache = new Map<string, string | null>();
 
@@ -338,12 +359,15 @@ export class SrRepo implements RepoAdapter {
       }
       if (result.claims_checked !== true) throw new InfraError('GitHub claims could not be checked. Restore GitHub access and try again.');
       const entries = new Map(progress.functions.map((entry) => [rvaHex(entry.rva), entry]));
+      const marks = await this.markedUnits(revision).catch(() => null);
       // Candidates must be startable in the pinned build and not matched upstream since the pin.
       // A function of the published target-hash list has no inventory entry until the bot records
       // its match (`next`/`claim`/`start` offer it), so no upstream entry means still unmatched.
       const candidates: DiscoveredFunction[] = result.candidates
         .filter((c: SrCandidate) => {
           if (!c.startable || !c.unit) return false;
+          // Another unit already holds it: a second one is refused upstream as a duplicate.
+          if (marks?.get(c.rva)?.some((m) => m.unit !== c.unit!.replace(/\\/g, '/'))) return false;
           const upstream = entries.get(c.rva);
           if (!upstream) return true;
           return upstream.status === 'mapped' && upstream.size === c.size && (!upstream.build_id || !c.build_id || upstream.build_id === c.build_id);
@@ -715,26 +739,71 @@ export class SrRepo implements RepoAdapter {
   }
 
   /**
-   * RVAs `sr next` offers before they are in data/progress.json (tools/claimable.py): published in
-   * the target-hash shards and offered with a class in contributor-targets.json, at the base revision.
+   * RVAs that may be claimed before they are in data/progress.json (tools/claimable.py): every function
+   * of the published target-hash shards, binary (`SRTH`) or JSON, at the base revision. Null when the
+   * shards cannot be read (a format this does not know): nothing is then called untracked.
    */
-  private async claimTimeRvas(buildId: string | null): Promise<Set<number>> {
-    if (!buildId || !/^[\w.-]+$/.test(buildId)) return new Set();
-    const out = new Set<number>();
+  private claimTime: { key: string; rvas: Set<number> } | null = null;
+  private async claimTimeRvas(buildId: string | null): Promise<Set<number> | null> {
+    if (!buildId || !/^[\w.-]+$/.test(buildId)) return null;
+    const key = `${this.sha}:${buildId}`;
+    if (this.claimTime?.key === key) return this.claimTime.rvas;
     try {
-      const offered = JSON.parse((await this.baseFile('data/target-hashes/contributor-targets.json')) ?? '{}') as { functions?: Array<{ rva?: unknown; class?: unknown }> };
-      const manifest = JSON.parse((await this.baseFile(`data/target-hashes/${buildId}.json`)) ?? '{}') as { shards?: Array<{ path?: unknown }> };
-      const published = new Set<number>();
-      for (const shard of manifest.shards ?? []) {
-        if (typeof shard.path !== 'string' || !/^[\w./-]+$/.test(shard.path)) continue;
-        const rows = (JSON.parse((await this.baseFile(shard.path)) ?? '{}') as { functions?: Array<{ rva?: unknown }> }).functions ?? [];
-        for (const r of rows) if (typeof r.rva === 'number') published.add(r.rva);
-      }
-      for (const r of offered.functions ?? []) if (typeof r.rva === 'number' && r.class && published.has(r.rva)) out.add(r.rva);
-    } catch {
-      /* unreadable lists: nothing counts as claim-time, as before */
+      const manifest = JSON.parse((await this.baseFile(`data/target-hashes/${buildId}.json`)) ?? '{}') as { shards?: Array<{ path?: unknown; count?: unknown }> };
+      const paths = (manifest.shards ?? []).map((x) => x.path).filter((x): x is string => typeof x === 'string' && /^[\w./-]+$/.test(x));
+      if (!paths.length || paths.length !== manifest.shards!.length) throw new Error('no shards listed');
+      const r = await this.host.run(this.cfg.python, ['-c', PUBLISHED_RVAS_PY, this.sha, ...paths], { cwd: this.cfg.repoPath, timeoutMs: 60_000, maxOutputBytes: 32 * 1024 * 1024 });
+      const rvas = r.code === 0 ? new Set(r.stdout.trim().split(',').filter(Boolean).map(Number)) : null;
+      if (!rvas?.size) throw new Error(r.stderr.trim().slice(-200) || 'no rows');
+      this.claimTime = { key, rvas };
+      return rvas;
+    } catch (e) {
+      this.notice?.('upstream.published_unreadable', `the published function list at ${this.sha.slice(0, 10)} could not be read (${(e as Error).message}): no function is called untracked until it can`);
+      return null;
     }
-    return out;
+  }
+
+  /** rva → the units whose compared-function lines (`// 0x<rva> Name`) name it at `revision`. */
+  private async markedUnits(revision: string): Promise<Map<string, Array<{ unit: string; name: string | null }>> | null> {
+    if (this.marks?.revision === revision) return this.marks.units;
+    const r = await this.git(this.cfg.repoPath, ['grep', '-I', '-E', '^ *// *0x[0-9A-Fa-f]+( |$)', revision, '--', 'reconstruction/*.cpp']);
+    if (r.code !== 0) return null;
+    const units = new Map<string, Array<{ unit: string; name: string | null }>>();
+    for (const line of r.stdout.split('\n')) {
+      const m = /^[0-9a-f]+:([^:]+):\s*\/\/\s*0x([0-9A-Fa-f]+)\s*(\S+)?/.exec(line);
+      if (!m) continue;
+      const rva = rvaHex(Number.parseInt(m[2]!, 16));
+      units.set(rva, [...(units.get(rva) ?? []), { unit: m[1]!, name: m[3] ?? null }]);
+    }
+    this.marks = { revision, units };
+    return units;
+  }
+
+  async takenUpstream(rvas: string[], unit: string): Promise<TakenUpstream> {
+    if (!this.upstreamNow || Date.now() - this.upstreamNow.at > TAKEN_TTL_MS) {
+      const state = this.srMutex.run('claim-sync', async () => {
+        const { revision, progress } = await this.syncedInventory();
+        const matched = new Map<number, string | null>();
+        for (const f of progress.functions as Array<{ rva?: unknown; status?: unknown; owner?: unknown }>) {
+          if (f.status !== 'matched') continue;
+          matched.set(typeof f.rva === 'number' ? f.rva : Number.parseInt(String(f.rva), 16), typeof f.owner === 'string' ? f.owner : null);
+        }
+        return { revision, matched, marks: await this.markedUnits(revision).catch(() => null) };
+      });
+      // A failed check is also kept for the interval: an unreachable remote must not slow every packet.
+      this.upstreamNow = { at: Date.now(), state };
+      state.catch(() => undefined);
+    }
+    const now = await this.upstreamNow.state.catch(() => null);
+    if (!now) return { checked: false, revision: null, taken: {} };
+    const taken: Record<string, string> = {};
+    for (const rva of new Set(rvas)) {
+      const n = Number.parseInt(rva, 16);
+      const other = now.marks?.get(rva)?.find((m) => m.unit !== unit);
+      if (now.matched.has(n)) taken[rva] = `matched upstream${now.matched.get(n) ? ` (${now.matched.get(n)})` : ''}`;
+      else if (other) taken[rva] = `already in another unit upstream (${other.unit})`;
+    }
+    return { checked: true, revision: now.revision, taken };
   }
 
   async upstreamState(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState> {
@@ -751,13 +820,12 @@ export class SrRepo implements RepoAdapter {
       return out;
     }
     const byRva = new Map(fns.map((f) => [typeof f.rva === 'number' ? f.rva : Number.parseInt(String(f.rva), 16), f]));
-    // A function of the published target-hash list that a contributor-targets row offers has no
-    // inventory entry until its claim is recorded (`sr next` offers it as Class::Function<rva>):
-    // it is tracked, not gone.
+    // A function of the published target-hash list has no inventory entry until it is recorded
+    // (`sr claim` resolves it from that list): it is tracked, not gone.
     const claimTime = await this.claimTimeRvas(buildId);
     for (const rva of new Set(input.rvas)) {
       const e = byRva.get(Number.parseInt(rva, 16));
-      if (!e && !claimTime.has(Number.parseInt(rva, 16))) out.untracked.push(rva);
+      if (!e && claimTime && !claimTime.has(Number.parseInt(rva, 16))) out.untracked.push(rva);
       else if (e?.status === 'matched') out.matched[rva] = typeof e.owner === 'string' ? e.owner : null;
     }
     if (input.branch && /^[A-Za-z0-9._/-]+$/.test(input.branch)) {
@@ -770,6 +838,11 @@ export class SrRepo implements RepoAdapter {
       const d = await this.git(this.cfg.repoPath, ['diff', '--name-only', out.builtOn, this.sha, '--', ...files]);
       if (d.code !== 0) return out;
       out.changed = d.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+    }
+    if (input.rvas.length) {
+      const marks = await this.markedUnits(this.sha);
+      if (!marks) return out;
+      out.marked = Object.fromEntries(input.rvas.flatMap((r) => (marks.has(r) ? [[r, marks.get(r)!]] : [])));
     }
     out.checked = true;
     return out;
@@ -1287,6 +1360,13 @@ export class SrRepo implements RepoAdapter {
   }
 
   /** See RepoAdapter.updatePullRequest. */
+  /** The local commit of a batch's PR branch, or null when there is none. */
+  async branchHead(branch: string): Promise<string | null> {
+    if (!/^decomp\/run_[a-z0-9]+-b[1-9]\d*-pr$/.test(branch)) return null;
+    const r = await this.git(this.cfg.repoPath, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`]);
+    return r.code === 0 ? r.stdout.trim() || null : null;
+  }
+
   async updatePullRequest(input: { branch: string; pullRequest: string; files: Array<{ path: string; content: string }>; tasks: SubmitBatchInput['tasks']; message: string; progress?: ProgressFn }): Promise<{ ok: boolean; commit: string | null; problems: string[]; error: string | null }> {
     const slot = this.slotCount;
     const p = this.wt(slot);

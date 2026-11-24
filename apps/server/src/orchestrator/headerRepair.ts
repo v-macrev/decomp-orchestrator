@@ -16,8 +16,11 @@
 //     placeholders, which are removed only once the worker has supplied that key's real statement);
 //   * nothing is invented: a missing `Code origin:` is filled only with the worker's own statement
 //     from another file of the same answer (its .cpp), never with orchestrator text;
+//   * what upstream's header says about the code already in the unit is put back when a worker left
+//     it out, and a new statement is added beside it, never in its place (see gatekeeper/provenance.ts);
 //   * every change is reported, so the attempt record shows exactly what was normalised.
 
+import { documentsAdaptation, headerStatements, lostProvenance, statementText } from '../gatekeeper/provenance.js';
 import { setDraftedBy } from './attribution.js';
 
 const SINGLE_KEYS = ['Source exposure', 'Code origin', 'Adapted bodies', 'Adapted code', 'Licence', 'License', 'Recipe'];
@@ -63,7 +66,7 @@ function splitHeader(src: string): { header: string[]; rest: string[] } {
 function entries(header: string[], before: Set<string>): Entry[] {
   const out: Entry[] = [];
   for (const line of header) {
-    const starts = keyOf(line) !== null || COMPARED.test(line) || !out.length || /(?:\.|\))\s*$/.test(out.at(-1)!.lines.at(-1)!) && /^\/\/\s*[A-Z]/.test(line);
+    const starts = keyOf(line) !== null || COMPARED.test(line) || !out.length || LABEL_WORD.test(line) && /^\s*\/\/\s*[^:(]+:\s/.test(line) || (/(?:\.|\))\s*$/.test(out.at(-1)!.lines.at(-1)!) || out.at(-1)!.lines.at(-1)!.length < 75 && !out.at(-1)!.placeholder) && /^\/\/\s*[A-Z]/.test(line);
     if (starts) out.push({ lines: [line], key: keyOf(line), placeholder: PLACEHOLDER.test(line), added: !before.has(line.trim()) });
     else {
       const e = out.at(-1)!;
@@ -89,7 +92,7 @@ export function originStatement(src: string): string | null {
   return null;
 }
 
-export function repairHeader(path: string, after: string, before: string | null, opts: { originHint?: string | null; adaptedHint?: string | null } = {}): HeaderRepairResult {
+export function repairHeader(path: string, after: string, before: string | null, opts: { originHint?: string | null; adaptedHint?: string | null; base?: string | null; own?: string[] } = {}): HeaderRepairResult {
   const changes: string[] = [];
   if (!/\.(cpp|h|hpp|inl)$/.test(path)) return { content: after, changes };
   const { header, rest } = splitHeader(after);
@@ -145,19 +148,76 @@ export function repairHeader(path: string, after: string, before: string | null,
     es.splice(at >= 0 ? at + 1 : 0, 0, { lines: [`// Code origin: ${opts.originHint}`], key: 'Code origin', placeholder: false, added: true });
     changes.push(`Code origin: added the worker's own statement (required in every changed file's header)`);
   }
+  // 4b. Upstream's own statements the worker left out or replaced go back; the worker's follow them, named
+  // for the functions they are about, so they do not speak for the code that was there before.
+  if (opts.base) {
+    const own = opts.own?.length ? (opts.own.length > 3 ? 'the added functions' : opts.own.join(', ')) : 'the added functions';
+    const value = (lines: string[]) => lines.map((l) => l.replace(/^\s*\/\/\s?/, '')).join(' ').replace(/^[^:]+:\s*/, '').replace(/\s+/g, ' ').replace(/[\s;,.]+$/, '').trim();
+    const lost = lostProvenance(opts.base, es.flatMap((e) => e.lines).join('\n'));
+    const order = entries(splitHeader(opts.base).header, new Set()).map((e) => e.lines[0]!.trim());
+    const theirs = headerStatements(opts.base).map(statementText);
+    const joined = new Map<Entry, { theirs: string[]; mine: string | null }>();
+    let back = 0;
+    for (const lines of lost) {
+      const was = statementText(lines);
+      const key = keyOf(lines[0]!);
+      const same = key && key !== 'SPDX-License-Identifier' && SINGLE_KEYS.includes(key) ? es.find((e) => e.key === key && !e.placeholder) : undefined;
+      if (same) {
+        // A line of upstream's that stayed is upstream's too; what the worker wrote speaks for its own functions.
+        const kept = theirs.includes(statementText(same.lines));
+        const j = joined.get(same) ?? { theirs: kept ? [value(same.lines)] : [], mine: kept ? null : value(same.lines) };
+        joined.set(same, j);
+        j.theirs.push(was.replace(/^[^:]+:\s*/, ''));
+        const all = j.theirs.join('; ');
+        const mine = j.mine && !/^none\b/i.test(j.mine) && !all.toLowerCase().includes(j.mine.toLowerCase()) ? `; ${key === 'Code origin' ? `${own}: ` : ''}${j.mine}` : '';
+        same.lines = [`// ${was.slice(0, was.indexOf(':'))}: ${all}${mine}`];
+        same.added = false;
+      } else {
+        const i = order.indexOf(lines[0]!.trim());
+        const prev = order.slice(0, Math.max(i, 0)).reverse().map((l) => es.findIndex((e) => e.lines[0]!.trim().startsWith(l.slice(0, 24)))).find((k) => k >= 0);
+        es.splice(prev === undefined ? 0 : prev + 1, 0, { lines: lines.map((l) => l.trim()), key, placeholder: false, added: false });
+      }
+      back++;
+    }
+    if (back) changes.push(`put back ${back} statement(s) of upstream's header`);
+    const none = es.find((e) => (e.key === 'Adapted bodies' || e.key === 'Adapted code') && /:\s*none\W*$/i.test(e.lines.join(' ')));
+    if (none && documentsAdaptation(opts.base) && !/^\/\/\s*Adapted (?:bodies|code):/im.test(opts.base)) {
+      none.lines = [`// ${none.key}: none in ${own}`];
+      changes.push(`${none.key}: "none" now speaks only for what this change adds (the unit documents adapted code)`);
+    }
+  }
   // 5. Still over the repo's 6-line budget? `sr start` stacks its skeleton on top of the unit's
   // existing header, so the file itself may carry a second "Source exposure" or a "Recipe:" /
   // "Drafted by" line from an older draft. Untouched, the lint tolerates that; once the header
-  // changes it must fit. Only then drop pre-existing banned lines and later duplicates of
-  // single-valued keys (adaptation and licence statements are never dropped).
+  // changes it must fit. Only then fold later duplicates of single-valued keys
+  // into the first and, if that is not enough, drop pre-existing banned lines (what the header says about
+  // origin, adaptation and licence is never dropped).
+  if (countedLines(es) > HEADER_BUDGET) {
+    // A wrapped statement counts once per line: put it on one line first, which loses nothing.
+    let joined = 0;
+    for (const e of es) {
+      if (e.lines.length === 1) continue;
+      e.lines = [`// ${e.lines.map((l) => l.trim().replace(/^\/\/\s?/, '')).join(' ').replace(/\s+/g, ' ').trim()}`];
+      joined++;
+    }
+    if (joined) changes.push(`put ${joined} wrapped header statement(s) on one line to fit the ${HEADER_BUDGET}-line budget`);
+    // Then a later duplicate of a single-valued key is folded into the first one, not dropped.
+    let folded = 0;
+    for (const key of ['Source exposure', 'Code origin']) {
+      const all = es.filter((e) => e.key === key && !e.placeholder);
+      for (const extra of all.slice(1)) {
+        const add = statementText(extra.lines).replace(/^[^:]+:\s*/, '');
+        if (add && !statementText(all[0]!.lines).includes(add)) all[0]!.lines = [`// ${statementText(all[0]!.lines)}; ${add}`];
+        es = es.filter((e) => e !== extra);
+        folded++;
+      }
+    }
+    if (folded) changes.push(`folded ${folded} duplicate header line(s) into the first to fit the ${HEADER_BUDGET}-line budget`);
+  }
   if (countedLines(es) > HEADER_BUDGET) {
     const before0 = es.length;
     es = es.filter((e) => e.added || !NOISE.test(e.lines.join(' ')) || e.key === 'Licence' || e.key === 'License');
-    for (const key of ['Source exposure', 'Code origin', 'Recipe']) {
-      const all = es.filter((e) => e.key === key && !e.placeholder);
-      for (const extra of all.slice(1)) es = es.filter((e) => e !== extra);
-    }
-    if (es.length < before0) changes.push(`dropped ${before0 - es.length} pre-existing banned or duplicate header line(s) to fit the ${HEADER_BUDGET}-line budget`);
+    if (es.length < before0) changes.push(`dropped ${before0 - es.length} pre-existing banned header line(s) to fit the ${HEADER_BUDGET}-line budget`);
   }
   if (!changes.length) return { content: after, changes };
   return { content: [...es.flatMap((e) => e.lines), ...rest].join('\n'), changes };
@@ -175,6 +235,10 @@ export async function repairAnswer(
     untouched?: Array<{ path: string; current: string | null; base: string | null }>;
     /** Name the model of this attempt in each returned unit source's "Drafted by" line. */
     attribution?: { person: string | null; model: string };
+    /** A file as upstream has it: what its header says about the code there is kept. */
+    base?: (path: string) => Promise<string | null>;
+    /** Names of the functions this answer adds. */
+    own?: string[];
   } = {},
 ): Promise<{ files: Array<{ path: string; content: string }>; changes: string[] }> {
   const order = [...files].sort((a, b) => Number(a.path.endsWith('.h')) - Number(b.path.endsWith('.h')));
@@ -185,7 +249,7 @@ export async function repairAnswer(
   const adapted = clean(stated.adaptedBodies);
   for (const f of order) {
     const before = await current(f.path);
-    const r = repairHeader(f.path, out.get(f.path)!, before, { originHint: hint ?? originStatement(f.content), adaptedHint: adapted });
+    const r = repairHeader(f.path, out.get(f.path)!, before, { originHint: hint ?? originStatement(f.content), adaptedHint: adapted, base: opts.base ? await opts.base(f.path) : null, own: opts.own });
     out.set(f.path, r.content);
     changes.push(...r.changes.map((c) => `${f.path}: ${c}`));
     hint ??= originStatement(r.content);
@@ -200,7 +264,7 @@ export async function repairAnswer(
   const extra: Array<{ path: string; content: string }> = [];
   for (const x of opts.untouched ?? []) {
     if (out.has(x.path) || x.current === null || x.current === x.base) continue;
-    const r = repairHeader(x.path, x.current, x.base, { originHint: hint, adaptedHint: adapted });
+    const r = repairHeader(x.path, x.current, x.base, { originHint: hint, adaptedHint: adapted, base: opts.base ? x.base : null, own: opts.own });
     if (!r.changes.length) continue;
     extra.push({ path: x.path, content: r.content });
     changes.push(...r.changes.map((c) => `${x.path} (changed by prepare): ${c}`));

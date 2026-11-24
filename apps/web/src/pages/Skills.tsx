@@ -90,7 +90,7 @@ export default function Skills() {
       {o.proposals.length > 0 && (
         <div className="panel">
           <h2>Proposed SKILL.md changes</h2>
-          <div style={{ display: 'grid', gap: 12 }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr)', gap: 12 }}>
             {o.proposals.map((p) => <ProposalCard key={`${p.skill.id}@${p.version.version}`} p={p} busy={!!busy} onChange={refresh} />)}
           </div>
         </div>
@@ -184,7 +184,7 @@ function ProposalCard({ p, busy, onChange }: { p: SkillProposal; busy: boolean; 
       <Diff before={p.diff.before ?? ''} after={p.diff.after ?? ''} />
       <div className="row" style={{ marginTop: 8 }}>
         {e ? (
-          <span className="grow" style={{ fontSize: 12 }}>
+          <span className="grow" style={{ fontSize: 12, flexBasis: '16rem' }}>
             <span className={`chip ${e.status === 'running' ? 'running' : e.status === 'error' ? 'error' : e.decision ?? ''}`}>{e.status}</span>{' '}
             {e.cases ? `${e.baselinePass}/${e.cases} → ${e.candidatePass}/${e.cases} pass` : ''} <span className="muted">{e.reason}</span>
           </span>

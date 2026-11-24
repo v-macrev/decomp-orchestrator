@@ -83,7 +83,7 @@ function NewRun({ mode, runs, onCreated, onCancel }: { mode: string; runs: RunSu
     name: `run ${new Date().toISOString().slice(0, 16).replace('T', ' ')}`, flowId: 'default', source: mode === 'sim' ? 'synthetic' : 'sr_next',
     ...flowRunDefaults(undefined), rvas: '', packetMaxFunctions: 4, gateConcurrency: 4, prBatchSize: 40, budgetUsd: '', exposureConsent: true, draftedBy: 'operator',
     routing: true, llmTieBreak: false, workStealing: true, contextMode: 'budgeted',
-    skills: true, autoCurate: false, staging: mode === 'sim' ? 'branches' : 'off',
+    skills: true, autoCurate: false, batchMaxAge: 60, batchMin: 10, autoPrepare: true, skipThunks: true, staging: mode === 'sim' ? 'branches' : 'off',
     gMaxSize: 256, gNamespaces: '', gModules: '', gRange: '', gExcludeGuess: false, gExcludeDrafted: false,
   });
   const [err, setErr] = useState('');
@@ -151,6 +151,7 @@ function NewRun({ mode, runs, onCreated, onCancel }: { mode: string; runs: RunSu
     try {
       const r = await api.createRun(f.name, f.flowId, {
         ...(selection ? { selection } : {}), ...(carryOn.length ? { carry: { fromRuns: carryOn } } : {}), maxFunctionsPerWorker: f.capPerWorker, staging: f.staging, packetMaxFunctions: f.packetMaxFunctions, gateConcurrency: f.gateConcurrency, prBatchSize: f.prBatchSize,
+        batchMaxAgeMinutes: f.batchMaxAge, batchMinFunctions: f.batchMin, autoPrepare: f.autoPrepare, skipThunks: f.skipThunks,
         exposureConsent: f.exposureConsent, draftedBy: f.draftedBy, ...(f.budgetUsd ? { budgetUsd: Number(f.budgetUsd) } : {}),
         routing: { enabled: f.routing, llmTieBreak: f.llmTieBreak, workStealing: f.workStealing },
         context: { mode: f.contextMode },
@@ -240,6 +241,10 @@ function NewRun({ mode, runs, onCreated, onCancel }: { mode: string; runs: RunSu
             <label>Functions per packet<input type="number" min={1} max={60} value={f.packetMaxFunctions} onChange={(e) => set('packetMaxFunctions', Number(e.target.value))} /></label>
             <label>Compares at once<input type="number" min={1} max={64} value={f.gateConcurrency} onChange={(e) => set('gateConcurrency', Number(e.target.value))} /></label>
             <label>Functions per PR (≤60)<input type="number" min={1} max={60} value={f.prBatchSize} onChange={(e) => set('prBatchSize', Number(e.target.value))} /></label>
+            <label title="While the run goes on: batch the ready functions once the oldest has waited this long, even if they do not fill a batch. 0: only full batches">Batch after (minutes)<input type="number" min={0} max={10080} value={f.batchMaxAge} onChange={(e) => set('batchMaxAge', Number(e.target.value))} /></label>
+            <label title="Smallest batch made because its functions waited">…with at least (functions)<input type="number" min={1} max={60} value={f.batchMin} onChange={(e) => set('batchMin', Number(e.target.value))} /></label>
+            <label title="Once batches are staged: set aside what upstream already has and dry-run them. Nothing is submitted or claimed publicly; you still open each PR">Dry-run new batches<select value={f.autoPrepare ? 'auto' : 'manual'} onChange={(e) => set('autoPrepare', e.target.value === 'auto')}><option value="auto">automatically</option><option value="manual">when I ask</option></select></label>
+            <label title="Two-instruction stubs the compiler emits from a class layout; no worker has ever matched one">Adjustor thunks<select value={f.skipThunks ? 'skip' : 'try'} onChange={(e) => set('skipThunks', e.target.value === 'skip')}><option value="skip">leave out</option><option value="try">try anyway</option></select></label>
             <label>Budget (USD)<input value={f.budgetUsd} placeholder="none" onChange={(e) => set('budgetUsd', e.target.value)} /></label>
             <label title="Off: nothing is committed in the target repository and every claim is released at the end">When finished<select value={f.staging} onChange={(e) => set('staging', e.target.value)}><option value="off">commit nothing</option><option value="branches">stage local branches</option></select></label>
             <label title="Hard ceiling of distinct functions one worker instance may take in this run">Max functions per worker<input type="number" min={1} max={5000} value={f.capPerWorker} onChange={(e) => set('capPerWorker', Number(e.target.value))} /></label>
@@ -792,10 +797,10 @@ function batchView(b: Batch): { tone: Tone; title: string; why: string; action: 
     const n = reviewOf(b).length;
     const said = `${n} comment${n === 1 ? '' : 's'} from others`;
     if (d?.prUpdateOf !== undefined) return { tone: 'ok', title: 'Fixes pushed to the PR', why: `Pushed to batch ${d.prUpdateOf}'s pull request as one more commit${d.commit ? ` (${d.commit.slice(0, 10)})` : ''}.`, action: 'none', steps };
-    if (d?.reviewFix) return { tone: 'next', title: 'Being fixed from the review', why: `${d.reviewFix.taskIds.length} packet(s) are with the AI agents, with the ${d.reviewFix.comments} review comment(s) as instructions. When the run finishes, push the fixes to this pull request from the new batch's card.`, action: 'none', steps };
+    if (d?.reviewFix) return { tone: 'next', title: 'Being fixed from the review', why: `${d.reviewFix.taskIds.length} packet(s) are with the AI agents, with the orchestrator's instructions. When the run finishes, push the fixes to this pull request from the new batch's card.`, action: 'none', steps };
     if (st?.state === 'merged') return { tone: 'ok', title: 'Merged upstream', why: `Merged ${shortDate(st.mergedAt)}. Nothing more to do${n ? `; ${said} are below` : ''}.`, action: 'none', steps };
-    if (st?.state === 'closed') return { tone: 'bad', title: 'Closed without merging', why: n ? `Closed ${shortDate(st.closedAt)} with ${said}. Read them in plain words, or let the AI agents fix the code from them: the result becomes a new pull request.` : `Closed ${shortDate(st.closedAt)}, and nobody else commented. Open it on GitHub to see why.`, action: 'none', steps };
-    if (st?.state === 'open' && n) return { tone: 'warn', title: 'Reviewers commented', why: `${said} on the open pull request. Read them in plain words, or let the AI agents fix the code from them: the fixes go to the same pull request.`, action: 'none', steps };
+    if (st?.state === 'closed') return { tone: 'bad', title: 'Closed without merging', why: n ? `Closed ${shortDate(st.closedAt)} with ${said}. Read them in plain words, or ask the orchestrator which of them need a fix: the result becomes a new pull request.` : `Closed ${shortDate(st.closedAt)}, and nobody else commented. Open it on GitHub to see why.`, action: 'none', steps };
+    if (st?.state === 'open' && n) return { tone: 'warn', title: 'Reviewers commented', why: `${said} on the open pull request. Read them in plain words, or ask the orchestrator which of them need a fix: the fixes go to the same pull request.`, action: 'none', steps };
     return { tone: 'ok', title: 'Pull request open', why: d?.pr ? (st ? 'Waiting for review on GitHub. The comments show up here.' : 'Submitted upstream. Its state on GitHub shows up here.') : 'Submitted: open the pull request by hand from the link below.', action: 'none', steps };
   }
   if (b.status === 'branch_ready' && d?.updatesPr) return { tone: 'ok', title: 'Fixes ready for the PR', why: `Fixed from batch ${d.updatesPr.seq}'s review and checked in a clean tree. Push them to the same pull request as one more commit (every packet of the PR is checked again first).`, action: 'update', steps };
@@ -961,11 +966,12 @@ function OperationPanel({ op, runId }: { op: OperationProgress; runId: string })
   );
 }
 
-type HeldReason = 'merged' | 'untracked' | 'changed' | 'dryrun' | 'preflight' | 'claimed' | 'fixing';
+type HeldReason = 'merged' | 'duplicate' | 'untracked' | 'changed' | 'dryrun' | 'preflight' | 'claimed' | 'fixing';
 const HELD_LABEL: Record<HeldReason, string> = {
   merged: 'Already merged upstream',
+  duplicate: 'Already in another unit upstream',
   untracked: 'No longer tracked upstream',
-  changed: 'Upstream changed the file',
+  changed: 'Upstream changed the file or its header',
   dryrun: 'Blocked a dry run',
   preflight: 'Matched, file blocked by a line it did not write',
   claimed: 'Claimed by someone else',
@@ -973,6 +979,7 @@ const HELD_LABEL: Record<HeldReason, string> = {
 };
 const HELD_HINT: Record<HeldReason, string> = {
   merged: 'Upstream data/progress.json already records these functions as matched: nothing to submit for them.',
+  duplicate: 'A unit upstream already holds these functions, under this name or another: a second one is refused.',
   untracked: 'Upstream data/progress.json no longer lists these functions.',
   changed: 'Upstream changed a file these units write since they were batched: submitting would overwrite their version.',
   dryrun: 'sr submit --dry-run blamed their unit (lint, origin statements, a failed compare…).',
@@ -1002,9 +1009,10 @@ function heldBackReasons(batches: Batch[], held: HeldPacket[] = []) {
         const names = (re: RegExp) => reasons.find((r) => re.test(r) && r.toLowerCase().includes(f.rva.toLowerCase()));
         const merged = names(/already matched upstream/i);
         const untracked = names(/no longer tracked upstream/i);
-        const changed = reasons.find((r) => /upstream changed this file/i.test(r));
-        const reason: HeldReason = merged ? 'merged' : untracked ? 'untracked' : changed ? 'changed' : 'dryrun';
-        byFn.set(key, { reason, rva: f.rva, name: f.name, unit: f.unit, detail: merged ?? untracked ?? changed ?? reasons[0] ?? sa.why });
+        const duplicate = names(/already has a unit upstream|already in this unit upstream/i);
+        const changed = reasons.find((r) => /upstream changed this file|header drops .* upstream's file makes/i.test(r));
+        const reason: HeldReason = merged ? 'merged' : duplicate ? 'duplicate' : untracked ? 'untracked' : changed ? 'changed' : 'dryrun';
+        byFn.set(key, { reason, rva: f.rva, name: f.name, unit: f.unit, detail: merged ?? duplicate ?? untracked ?? changed ?? reasons[0] ?? sa.why });
       } else if (['pending', 'leased', 'gating'].includes(f.state) && (b.detail?.fixed?.taskIds.includes(f.taskId) || b.detail?.reviewFix?.taskIds.includes(f.taskId))) {
         byFn.set(key, { reason: 'fixing', rva: f.rva, name: f.name, unit: f.unit, detail: `from batch ${b.seq}` });
       }
@@ -1020,7 +1028,7 @@ function HeldBackKpis({ batches, held }: { batches: Batch[]; held?: HeldPacket[]
   const { counts, rows } = heldBackReasons(batches, held);
   const [show, setShow] = useState<HeldReason | null>(null);
   if (!rows.length) return null;
-  const tone: Record<HeldReason, string | undefined> = { merged: 'var(--ok)', untracked: undefined, changed: 'var(--warn)', dryrun: 'var(--bad)', preflight: 'var(--warn)', claimed: 'var(--warn)', fixing: undefined };
+  const tone: Record<HeldReason, string | undefined> = { merged: 'var(--ok)', duplicate: 'var(--ok)', untracked: undefined, changed: 'var(--warn)', dryrun: 'var(--bad)', preflight: 'var(--warn)', claimed: 'var(--warn)', fixing: undefined };
   const list = show ? rows.filter((r) => r.reason === show) : [];
   return (
     <div className="panel stack" style={{ gap: 8 }}>
@@ -1247,9 +1255,21 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
     toggleExplain(`${b.id}:${r.key}`, false);
     return `Batch ${b.seq}: ${r.points.length} point(s) explained on its card${r.cached ? ' (unchanged since the last explanation)' : ''}.`;
   });
+  // Packets the operator unticked in the orchestrator's plan (batch:plan key:task), for this visit.
+  const [unticked, setUnticked] = useState<Set<string>>(new Set());
+  const planId = (b: Batch, taskId: string) => `${b.id}:${b.detail?.reviewPlan?.key}:${taskId}`;
+  const chosenFix = (b: Batch) => (b.detail?.reviewPlan?.fix ?? []).filter((f) => !unticked.has(planId(b, f.taskId)));
+  const triage = (b: Batch) => run(`triage-${b.id}`, async () => {
+    const r = await api.triageReview(runId, b.id);
+    return `Batch ${b.seq}: ${r.fix.length ? `the orchestrator would send ${r.fix.length} packet(s) to the agents; check them on its card, then send` : 'the orchestrator found nothing that needs fixing'}${r.cached ? ' (same comments, saved answer)' : ''}. Nothing was sent.`;
+  });
+  const recall = (b: Batch) => run(`recall-${b.id}`, async () => {
+    const r = await api.recallReview(runId, b.id);
+    return `Batch ${b.seq}: ${r.functions} function(s) in ${r.packets} packet(s) taken back, as they were submitted.`;
+  });
   const fixReview = (b: Batch) => run(`review-${b.id}`, async () => {
-    const r = await api.fixFromReview(runId, b.id);
-    return `Batch ${b.seq}: ${r.functions} function(s) in ${r.requeued} packet(s) went to the AI agents with ${r.comments} review comment(s) as instructions. The run is running again; ${r.open ? 'when it finishes, push the fixes to the same pull request from the new batch\'s card.' : 'when it finishes, everything is batched again for a new pull request.'}`;
+    const r = await api.fixFromReview(runId, b.id, chosenFix(b).map((f) => f.taskId));
+    return `Batch ${b.seq}: ${r.functions} function(s) in ${r.requeued} packet(s) went to the AI agents with the orchestrator's instructions. The run is running again; ${r.open ? 'when it finishes, push the fixes to the same pull request from the new batch\'s card.' : 'when it finishes, everything is batched again for a new pull request.'}`;
   });
   const pushFixes = (b: Batch) => run(`push-${b.id}`, async () => {
     const r = await api.pushReviewFixes(runId, b.id);
@@ -1415,7 +1435,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
         </div>
       );
     }
-    if (submitted.length) return <div className="hero done"><span className="eyebrow">All done</span><h3>Every batch is submitted</h3><p>{submitted.length} pull request{submitted.length === 1 ? '' : 's'} open.{withheld + setAside ? ' Some packets are still held back: see below.' : ''}</p></div>;
+    if (submitted.length) return <div className="hero done"><span className="eyebrow">All done</span><h3>Every batch is submitted</h3><p>{openPrs.length} pull request{openPrs.length === 1 ? '' : 's'} open, {merged.length} merged.{withheld + setAside ? ' Some packets are still held back: see below.' : ''}</p></div>;
     if (live) return null; // the next-batch meter says what comes next
     return <div className="hero"><span className="eyebrow">PR batches</span><h3>Nothing to submit right now</h3><p>{withheld + setAside ? 'Everything left is held back: see below.' : 'This run has no batches waiting.'}</p></div>;
   })();
@@ -1470,15 +1490,50 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
           ? <button onClick={() => toggleExplain(explainId, false)} title="Shows the saved explanation again (no new model call)">Show the explanation</button>
           : <button disabled={locked} onClick={() => explain(b)} title="One short model call reads the comments and explains each one in plain words: what it is about, what it means, and what to do. Unchanged comments reuse the saved explanation.">{busy === `explain-${b.id}` ? 'Reading the comments…' : d?.prExplain ? 'Explain again' : 'Explain the comments'}</button>}
         {pipeline && prState && prState !== 'merged' && !d?.reviewFix && (
+          <button disabled={locked} onClick={() => triage(b)} title="One orchestrator call reads the comments and decides which packets really need a change. Nothing is sent to the agents; you check its plan first. Refused, without a model call, when someone else already pushed to the pull request.">
+            {busy === `triage-${b.id}` ? 'The orchestrator is reading…' : d?.reviewPlan ? 'Ask the orchestrator again' : 'Ask the orchestrator what to fix'}
+          </button>
+        )}
+        {pipeline && prState && prState !== 'merged' && !d?.reviewFix && chosenFix(b).length > 0 && (
           <ConfirmButton className="" disabled={locked} onConfirm={() => fixReview(b)}
-            confirmLabel={`Send the ${review.length} comment(s) to the AI agents as instructions? ${live ? 'The run picks them up.' : 'The run starts again.'}`}
+            confirmLabel={`Send ${chosenFix(b).length} of ${b.taskIds.length} packet(s) to the AI agents? ${live ? 'The run picks them up.' : 'The run starts again.'}`}
             title={prState === 'open'
-              ? 'The packets the comments are about go back to the run\'s AI workers with the comments as instructions, through the whole flow (Gate Keeper, escalation). When the run finishes, you push the fixes to this same pull request as one more commit.'
-              : 'The pull request is closed: the packets the comments are about go back to the AI workers with the comments as instructions, the others are batched again with them, and the result becomes a new pull request (dry run, then Submit).'}>
-            {busy === `review-${b.id}` ? 'Sending to the agents…' : 'Fix from the comments'}
+              ? 'Only the ticked packets go back to the run\'s AI workers, with the orchestrator\'s instructions, through the whole flow (Gate Keeper, escalation). When the run finishes, you push the fixes to this same pull request as one more commit.'
+              : 'The pull request is closed: the ticked packets go back to the AI workers with the orchestrator\'s instructions, the others are batched again with them, and the result becomes a new pull request (dry run, then Submit).'}>
+            {busy === `review-${b.id}` ? 'Sending to the agents…' : `Send ${chosenFix(b).length} packet(s) to the agents`}
           </ConfirmButton>
         )}
       </>
+    );
+    const recallButton = hasPr && d?.reviewFix && prState !== 'closed' && (
+      <ConfirmButton className="" disabled={locked} onConfirm={() => recall(b)} confirmLabel={`Take back ${d.reviewFix.taskIds.length} packet(s)?`}
+        title="Returns every packet of this pull request that is with the AI agents to the batch, exactly as it was submitted; anything the agents made since is dropped. Pause the run first if workers are on it. Nothing is pushed.">
+        {busy === `recall-${b.id}` ? 'Taking back…' : 'Take back from the agents'}
+      </ConfirmButton>
+    );
+    const plan = hasPr && !d?.reviewFix ? d?.reviewPlan : undefined;
+    const planned = plan && (
+      <div className="explain">
+        <b className="small">What the orchestrator would fix: {plan.fix.length} of {b.taskIds.length} packet(s)</b>
+        <p>{plan.summary}</p>
+        {plan.fix.length > 0 && (
+          <ul className="comments">
+            {plan.fix.map((f) => {
+              const id = planId(b, f.taskId);
+              return (
+                <li key={f.taskId}>
+                  <label className="inline" style={{ alignItems: 'flex-start' }}>
+                    <input type="checkbox" checked={!unticked.has(id)} onChange={() => setUnticked((s) => { const n = new Set(s); if (!n.delete(id)) n.add(id); return n; })} />
+                    <span><span className="mono">{f.unit.slice(f.unit.lastIndexOf('/') + 1)}</span> <span className="muted small">{f.functions.join(', ')}</span>{f.instructions.map((x) => <span key={x} style={{ display: 'block' }}>→ {x}</span>)}</span>
+                  </label>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {plan.skipped.length > 0 && <details><summary className="small muted">{plan.skipped.length} comment(s) need nothing</summary><ul>{plan.skipped.map((x, i) => <li key={i}><b>{x.author}</b>: {x.why}</li>)}</ul></details>}
+        <span className="muted small">Decided {new Date(plan.at).toLocaleString()} by {plan.model}</span>
+      </div>
     );
     const explained = hasPr && d?.prExplain && !explainClosed && (
       <div className="explain">
@@ -1502,7 +1557,8 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
         <p className="why">{v.why}</p>
         <StepDots steps={v.steps} />
         {explained}
-        <div className="actions">{primary(b)}{fixButton}{reviewButtons}{d?.claims?.length ? <span className="small">Claim: {d.claims.map((u, i) => <span key={u}>{i ? ', ' : ''}<a href={u} target="_blank" rel="noreferrer">{issueNo(u)} ↗</a></span>)}</span> : null}</div>
+        {planned}
+        <div className="actions">{primary(b)}{fixButton}{reviewButtons}{recallButton}{d?.claims?.length ? <span className="small">Claim: {d.claims.map((u, i) => <span key={u}>{i ? ', ' : ''}<a href={u} target="_blank" rel="noreferrer">{issueNo(u)} ↗</a></span>)}</span> : null}</div>
         <details className="more">
           <summary>Details and more actions</summary>
           <div className="stack" style={{ gap: 10, marginTop: 8 }}>

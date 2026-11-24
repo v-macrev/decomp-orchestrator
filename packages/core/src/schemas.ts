@@ -295,6 +295,17 @@ export const RunConfig = z.object({
   /** Passing functions per staged PR batch (repo cap is 60). */
   prBatchSize: z.number().int().min(1).max(60).default(40),
   /**
+   * While the run goes on, ready functions are also batched once the oldest has waited this long,
+   * even when they do not fill a batch (0: only full batches).
+   */
+  batchMaxAgeMinutes: z.number().int().min(0).max(10_080).default(60),
+  /** ... but never in a batch smaller than this (upstream reviews per pull request). */
+  batchMinFunctions: z.number().int().min(1).max(60).default(10),
+  /** After batches are staged, set aside what upstream has and dry-run them. Submits nothing. */
+  autoPrepare: z.boolean().default(true),
+  /** Leave out adjustor thunks: the compiler emits them from a class layout; a worker cannot write one. */
+  skipThunks: z.boolean().default(true),
+  /**
    * The repo requires the owner to agree before any game-derived listing is sent to an AI provider.
    * When false, bundles contain only public repo context and the private pack is never read.
    */
@@ -550,6 +561,8 @@ export const FunctionFeatures = z.object({
   /** .pdata entries in the function: >1 means funclets (C++ EH / SEH). */
   unwindEntries: z.number().int().nonnegative().nullable().default(null),
   tailCall: z.boolean().nullable().default(null),
+  /** The whole function is an adjustor thunk: subtract a constant from `this`, then jump. */
+  adjustorThunk: z.boolean().optional(),
   /** Failed attempts on this RVA in earlier runs. */
   priorFailures: z.number().int().nonnegative().default(0),
   nameConfidence: z.enum(['named', 'guess', 'unnamed']).default('named'),

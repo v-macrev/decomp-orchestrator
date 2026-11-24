@@ -3,7 +3,9 @@ dist/
 data/*.db*
 data/worktrees/
 data/sim/
+data/desk/
 .env
 config/accounts.json
 config/orchestrator.json
 data/*.txt
+data/server.*

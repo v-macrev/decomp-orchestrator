@@ -52,10 +52,11 @@ export function sourceFingerprint(files: Array<{ path: string; content: string }
   return h.digest('hex');
 }
 
-/** Progress of a verdict: target size for passes, else max(exact, aligned) per function. */
-export function progressScore(v: Pick<Verdict, 'compare'>): number | null {
-  if (!v.compare?.length) return null;
-  return v.compare.reduce((s, c) => s + (c.result === 'pass' ? (c.targetSize ?? c.totalBytes ?? 0) : Math.max(c.exactBytes ?? 0, c.alignedBytes ?? 0)), 0);
+/** Progress of a verdict: target size for passes, else max(exact, aligned) per function (only `own` RVAs, when given). */
+export function progressScore(v: Pick<Verdict, 'compare'>, own?: Set<number>): number | null {
+  const rows = own ? v.compare?.filter((c) => own.has(Number.parseInt(c.rva, 16))) : v.compare;
+  if (!rows?.length) return null;
+  return rows.reduce((s, c) => s + (c.result === 'pass' ? (c.targetSize ?? c.totalBytes ?? 0) : Math.max(c.exactBytes ?? 0, c.alignedBytes ?? 0)), 0);
 }
 
 function outcomeOf(v: Verdict): string {

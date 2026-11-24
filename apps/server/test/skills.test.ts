@@ -338,8 +338,10 @@ describe('end to end: skill loop', () => {
       if (retry) expect(renderBundle(b, r.n, true).blocks[1]!.text).toContain(retry);
       byTask.set(r.task_id, [...(byTask.get(r.task_id) ?? []), dyn]);
     }
-    for (const list of byTask.values()) {
-      if (list.length < 2) continue;
+    // A packet whose matched functions left for a packet of their own has other functions afterwards.
+    const split = new Set((w.store.db.prepare(`SELECT json_extract(data_json, '$.from') id FROM events WHERE run_id = ? AND kind = 'task.split'`).all(run1.id) as Array<{ id: string }>).map((r) => r.id));
+    for (const [id, list] of byTask) {
+      if (list.length < 2 || split.has(id)) continue;
       expect(new Set(list).size).toBe(1);
       checked++;
     }

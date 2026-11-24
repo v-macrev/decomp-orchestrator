@@ -78,6 +78,17 @@ export function classifyInstruction(code: Uint8Array, off: number, len: number):
   return { kind: 'other' };
 }
 
+/**
+ * A this-adjusting thunk: exactly `sub rcx, imm` (48 83 E9 ib / 48 81 E9 id) then `jmp rel32`.
+ * The compiler emits it for a virtual function inherited through a second base; no function body
+ * written in a unit compiles to it.
+ */
+export function isAdjustorThunk(code: Uint8Array): boolean {
+  if (code[0] !== 0x48 || code[2] !== 0xe9) return false;
+  if (code[1] === 0x83) return code.length === 9 && code[4] === 0xe9;
+  return code[1] === 0x81 && code.length === 12 && code[7] === 0xe9;
+}
+
 /** Decode a pack into complexity counts. Never throws on odd input: unknown bytes count as "other". */
 export function featuresFromPack(pack: PackJson, extra: Partial<FunctionFeatures> = {}): FunctionFeatures {
   const code = Uint8Array.from(Buffer.from(pack.bytes_hex ?? '', 'hex'));
@@ -133,6 +144,7 @@ export function featuresFromPack(pack: PackJson, extra: Partial<FunctionFeatures
   return {
     source: 'pack', size, instructions: rows.length, basicBlocks, condBranches, backEdges, calls, indirectCalls, indirectJumps, sseOps,
     dataRefs, xrefsIn: null, unwindEntries: pack.unwind_entries ?? null, tailCall, priorFailures: 0, nameConfidence: 'named', cautions: 0,
+    ...(isAdjustorThunk(code) ? { adjustorThunk: true } : {}),
     ...extra,
   };
 }

@@ -157,6 +157,7 @@ export class SkillRegistry {
     const b = this.db.prepare(`SELECT COUNT(*) n, COALESCE(SUM(CASE WHEN v.decision = 'pass' THEN 1 ELSE 0 END), 0) pass
       FROM attempts a JOIN verdicts v ON v.attempt_id = a.id
       WHERE a.run_id IN (SELECT DISTINCT run_id FROM skill_injections WHERE skill_id = ? AND version = ?)
+        AND COALESCE(a.model, '') NOT LIKE '%(no model call)%'
         AND NOT EXISTS (SELECT 1 FROM skill_injections si WHERE si.attempt_id = a.id AND si.skill_id = ?)`).get(id, version, id) as Raw;
     return { n: b.n as number, pass: b.pass as number };
   }
@@ -356,7 +357,7 @@ export class SkillRegistry {
   runStats(runId: string): { totalFunctions: number; skills: RunSkillStat[] } {
     const total = ((this.db.prepare('SELECT COALESCE(SUM(json_array_length(functions_json)), 0) n FROM tasks WHERE run_id = ?').get(runId) as Raw).n as number) || 0;
     const rows = this.db.prepare(`SELECT c.skill_id, c.tasks, c.functions, o.injected, o.injected_pass, o.held, o.held_pass, s.name, s.status
-      FROM (SELECT skill_id, COUNT(*) tasks, SUM(functions) functions FROM (SELECT DISTINCT skill_id, task_id, functions FROM skill_injections WHERE run_id = ?) GROUP BY skill_id) c
+      FROM (SELECT skill_id, COUNT(*) tasks, SUM(functions) functions FROM (SELECT DISTINCT si.skill_id, si.task_id, json_array_length(t.functions_json) functions FROM skill_injections si JOIN tasks t ON t.id = si.task_id WHERE si.run_id = ?) GROUP BY skill_id) c
       JOIN (SELECT skill_id, SUM(injected) injected, SUM(CASE WHEN injected = 1 AND decision = 'pass' THEN 1 ELSE 0 END) injected_pass,
               SUM(1 - injected) held, SUM(CASE WHEN injected = 0 AND decision = 'pass' THEN 1 ELSE 0 END) held_pass
             FROM skill_injections WHERE run_id = ? GROUP BY skill_id) o ON o.skill_id = c.skill_id

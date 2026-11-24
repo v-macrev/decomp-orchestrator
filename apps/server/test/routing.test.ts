@@ -8,7 +8,7 @@ import {
 import { openDatabase } from '../src/db/database.js';
 import { Store } from '../src/db/store.js';
 import { partitionRouted } from '../src/intel/complexity.js';
-import { classifyInstruction, featuresFromPack } from '../src/intel/x64features.js';
+import { classifyInstruction, featuresFromPack, isAdjustorThunk } from '../src/intel/x64features.js';
 import { AccountPool } from '../src/pool/scheduler.js';
 import { TaskQueue } from '../src/queue/taskQueue.js';
 import { mockAccount, req } from './helpers.js';
@@ -102,6 +102,18 @@ describe('pack features (x64 classifier)', () => {
     expect(JSON.stringify(f)).not.toContain('f30f'); // no bytes survive
     expect(classifyInstruction(Uint8Array.from([0x48, 0xff, 0x60, 0x08]), 0, 4)).toMatchObject({ kind: 'ijmp', viaMemory: true });
     expect(classifyInstruction(Uint8Array.from([0xff, 0x15, 0, 0, 0, 0]), 0, 6)).toMatchObject({ kind: 'icall', ripRelative: true, viaMemory: false });
+  });
+});
+
+describe('adjustor thunks', () => {
+  it('recognises exactly sub rcx, imm + jmp rel32', () => {
+    const code = (hex: string) => Uint8Array.from(Buffer.from(hex, 'hex'));
+    expect(isAdjustorThunk(code('4883e910e900000000'))).toBe(true);
+    expect(isAdjustorThunk(code('4881e900010000e900000000'))).toBe(true);
+    for (const no of ['4883c110e900000000', '4883ea10e900000000', '4883e910e90000000090', '4883e910eb00', 'e900000000', '']) expect(isAdjustorThunk(code(no)), no).toBe(false);
+    const rows = [[0, 4], [4, 5]].map(([offset, length]) => ({ offset: offset!, length: length!, field: null, target: null }));
+    expect(featuresFromPack({ bytes_hex: '4883e910e900000000', instructions: rows }).adjustorThunk).toBe(true);
+    expect(featuresFromPack({ bytes_hex: '4883c110e900000000', instructions: rows }).adjustorThunk).toBeUndefined();
   });
 });
 

@@ -140,10 +140,29 @@ export function batchContent(store: Store, runId: string, tasks: TaskRow[]) {
   return { files, fnCount, finisher, models, draftedBy, person, message };
 }
 
-/** The model of the packet's accepted attempt. */
+/** What an attempt that made no model call records: whose code it submitted. */
+export const freeAttemptModel = (kind: 'stored candidate' | 'splice', writer: string | null | undefined) => `${kind}${writer ? ` of ${writer}` : ''} (no model call)`;
+
+/** The model that finished the packet: the one that wrote what its accepted attempt submitted. */
 export function finishingModel(store: Store, t: TaskRow): string | null {
-  const v = t.lastVerdictId ? store.getVerdict(t.lastVerdictId) : null;
-  return (v ? store.getAttempt(v.attemptId)?.model : null) ?? null;
+  return writerOf(store, t, t.lastVerdictId);
+}
+
+/**
+ * The model that wrote what a verdict's attempt submitted. An attempt without a model call submitted
+ * an earlier attempt's code: the model it names, or (rows before it was named) the model of the
+ * attempt the packet's fix came from, else of the packet's newest accepted attempt by a model.
+ */
+export function writerOf(store: Store, t: TaskRow, verdictId: string | null | undefined): string | null {
+  const modelAt = (id: string | null | undefined) => {
+    const v = id ? store.getVerdict(id) : null;
+    return (v ? store.getAttempt(v.attemptId)?.model : null) ?? null;
+  };
+  const named = (m: string | null) => (m?.endsWith('(no model call)') ? (/^(?:stored candidate|splice) of (.+) \(no model call\)$/.exec(m)?.[1] ?? null) : m);
+  const model = modelAt(verdictId);
+  if (!model) return null;
+  const accepted = () => store.attemptsForTask(t.id).filter((a) => named(a.model) && store.db.prepare("SELECT 1 FROM verdicts WHERE attempt_id = ? AND decision = 'pass'").get(a.id)).at(-1)?.model ?? null;
+  return named(model) ?? named(modelAt(t.fix?.verdictId)) ?? named(accepted());
 }
 
 function latestFiles(store: Store, tasks: TaskRow[]) {

@@ -76,6 +76,15 @@ export interface AccountView {
   models: string[];
 }
 
+export interface ReviewPlan {
+  key: string;
+  at: number;
+  model: string;
+  summary: string;
+  fix: Array<{ taskId: string; unit: string; functions: string[]; instructions: string[] }>;
+  skipped: Array<{ author: string; why: string }>;
+}
+
 export interface SubscriptionUsage {
   buckets: Array<{
     id: string;
@@ -301,6 +310,8 @@ export interface Batch {
     prStatus?: PrStatus & { checkedAt?: number };
     /** The review comments explained in plain words (for the comments as they were at `key`). */
     prExplain?: PrExplanation;
+    /** The orchestrator's decision on which packets the comments need changed. */
+    reviewPlan?: ReviewPlan;
     /** Packets sent to the AI agents with this PR's review comments. */
     reviewFix?: { at: number; state: string; taskIds: string[]; comments: number; key: string };
     /** This batch holds fixes from batch `seq`'s open PR review: it is pushed to that PR, not submitted. */
@@ -442,7 +453,7 @@ export interface RunEdit {
 
 export const api = {
   selectionPreview: (count: number, maxSize: number) => req<{ requested: number; selected: number; units: number }>('POST', '/api/selection/preview', { source: 'sr_next', count, maxSize }),
-  health: () => req<{ ok: boolean; mode: string; repo: string; slots: number; runDefaults?: { draftedBy?: string } }>('GET', '/api/health'),
+  health: () => req<{ ok: boolean; mode: string; repo: string; slots: number; desk: boolean; runDefaults?: { draftedBy?: string } }>('GET', '/api/health'),
   accounts: () => req<Account[]>('GET', '/api/accounts'),
   accountRuntime: () => req<AccountView[]>('GET', '/api/accounts/runtime'),
   subscriptionUsage: (id: string) => req<SubscriptionUsage>('GET', `/api/accounts/${encodeURIComponent(id)}/subscription-usage`),
@@ -481,7 +492,9 @@ export const api = {
   prepareAll: (id: string) => req<{ ok: true; started: true }>('POST', `/api/runs/${id}/prepare`, {}),
   refreshPullRequests: (id: string, batchId?: string) => req<{ ok: true; pullRequests: Array<{ seq: number; state: string | null; comments: number; error: string | null }> }>('POST', `/api/runs/${id}/pull-requests/refresh`, batchId ? { batchId } : {}),
   explainReview: (id: string, batchId: string) => req<{ ok: true } & PrExplanation>('POST', `/api/runs/${id}/batches/${batchId}/explain-review`, {}),
-  fixFromReview: (id: string, batchId: string) => req<{ ok: true; seq: number; requeued: number; functions: number; comments: number; open: boolean; status: string }>('POST', `/api/runs/${id}/batches/${batchId}/fix-review`, {}),
+  triageReview: (id: string, batchId: string) => req<{ ok: true; cached: boolean } & ReviewPlan>('POST', `/api/runs/${id}/batches/${batchId}/triage-review`, {}),
+  recallReview: (id: string, batchId: string) => req<{ ok: true; seq: number; packets: number; functions: number; status: string }>('POST', `/api/runs/${id}/batches/${batchId}/recall-review`, {}),
+  fixFromReview: (id: string, batchId: string, only?: string[]) => req<{ ok: true; seq: number; requeued: number; functions: number; comments: number; open: boolean; status: string }>('POST', `/api/runs/${id}/batches/${batchId}/fix-review`, only ? { only } : {}),
   pushReviewFixes: (id: string, batchId: string) => req<{ ok: boolean; commit: string | null; problems: string[]; error: string | null }>('POST', `/api/runs/${id}/batches/${batchId}/push-review-fixes`, { confirm: true }),
   rebalancePlan: (id: string) => req<{ max: number; batches: Array<{ seq: number; functions: number }>; after: number[]; functions: number }>('GET', `/api/runs/${id}/batches/rebalance`),
   rebalanceBatches: (id: string) => req<{ ok: true; from: number[]; functions: number; staged: StageResult }>('POST', `/api/runs/${id}/batches/rebalance`, {}),

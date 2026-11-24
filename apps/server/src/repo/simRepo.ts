@@ -234,6 +234,11 @@ export class SimRepo implements RepoAdapter, SimOracle {
     return { checked: true, error: null, collisions };
   }
 
+  async takenUpstream(rvas: string[]) {
+    const taken = Object.fromEntries(rvas.filter((r) => this.upstreamMatched.has(r)).map((r) => [r, `matched upstream${this.upstreamMatched.get(r) ? ` (${this.upstreamMatched.get(r)})` : ''}`]));
+    return { checked: true, revision: 'sim', taken };
+  }
+
   async upstreamState(input: { rvas: string[]; files: string[]; branch: string | null }): Promise<UpstreamState> {
     const matched = Object.fromEntries(input.rvas.filter((r) => this.upstreamMatched.has(r)).map((r) => [r, this.upstreamMatched.get(r)!]));
     return { checked: true, matched, untracked: [], changed: input.files.filter((p) => this.upstreamChanged.has(p)), builtOn: null };

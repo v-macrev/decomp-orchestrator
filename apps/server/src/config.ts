@@ -61,6 +61,14 @@ export const ServerConfig = z.object({
       infraBackoffMs: z.number().int().optional(),
     })
     .default({}),
+  /** Desk views: how often the read-only collector runs, and the Python (3.11+) that runs it. */
+  desk: z
+    .object({
+      enabled: z.boolean().default(true),
+      python: z.array(z.string()).min(1).default(process.platform === 'win32' ? ['py', '-3'] : ['python3']),
+      intervalSec: z.number().int().min(30).default(120),
+    })
+    .default({ enabled: true, python: process.platform === 'win32' ? ['py', '-3'] : ['python3'], intervalSec: 120 }),
   /** Defaults for new runs: `draftedBy` is the person named on claims, commits and `sr submit` (e.g. a GitHub login). */
   runDefaults: z.object({ draftedBy: z.string().min(1).max(200).optional() }).default({}),
 });
@@ -70,8 +78,10 @@ export type ServerConfig = z.infer<typeof ServerConfig>;
 export const ROOT = resolve(import.meta.dirname, '..', '..', '..');
 export const fromRoot = (p: string) => (isAbsolute(p) ? p : resolve(ROOT, p));
 
+export const configPath = () => fromRoot(process.env.ORCH_CONFIG ?? 'config/orchestrator.json');
+
 export function loadConfig(): ServerConfig {
-  const path = fromRoot(process.env.ORCH_CONFIG ?? 'config/orchestrator.json');
+  const path = configPath();
   const raw = existsSync(path) ? JSON.parse(readFileSync(path, 'utf8')) : {};
   const cfg = ServerConfig.parse(raw);
   if (process.env.PORT) cfg.port = Number(process.env.PORT);
