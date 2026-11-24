@@ -350,7 +350,7 @@ export class SrRepo implements RepoAdapter {
       }
       // sr next reads local reservations and GitHub issues/PRs, but does not publish a claim.
       const { SR_CONTRIB_OFFLINE: _, ...env } = this.srEnv();
-      const run = await this.host.run(this.cfg.python, ['tools/contrib.py', '--json', 'next', '--count', '100000', '--max-size', String(maxSize)], {
+      const run = await this.host.run(this.cfg.python, ['-c', FAST_NEXT_PY, '--json', 'next', '--count', '100000', '--max-size', String(maxSize)], {
         cwd: this.claimWorktree, env, timeoutMs: 600_000, maxOutputBytes: 32 * 1024 * 1024,
       });
       const result = parseJsonOutput(run.stdout);
@@ -1593,6 +1593,38 @@ export function clipMiddle(text: string, maxChars: number): string {
   }
   return [...head, `[… ${j - i + 1} line(s) elided to fit the context budget …]`, ...tail].join('\n');
 }
+
+/**
+ * Run from the checkout root: `contrib.py <argv>` for a `next` over the whole backlog. Plain `sr next`
+ * screens and parses a class's header again for every function of the class, and looks up name hints
+ * for each row only to print them: minutes for tens of thousands of functions. Here the pure parsing
+ * helpers remember their answers, a method the header never spells is not searched for, and the
+ * printed lines are left out. The candidates are the same; a helper upstream renames is just not sped up.
+ */
+export const FAST_NEXT_PY = `
+import functools, importlib, sys
+sys.path.insert(0, 'tools')
+import contrib
+
+def patch(module, name, make):
+    try:
+        m = importlib.import_module(module)
+        setattr(m, name, make(getattr(m, name)))
+    except (ImportError, AttributeError):
+        pass
+
+memo = functools.lru_cache(maxsize=None)
+patch('check_labels', 'strip', memo)
+patch('check_labels', 'braces', memo)
+patch('check_labels', 'scope_matches', lambda f: memo(lambda text: tuple(f(text))))
+patch('contrib_screen', 'screen', memo)
+patch('contrib_readiness', 'declaration', lambda f: lambda text, cls, method: f(text, cls, method) if method in text else None)
+patch('contrib', 'pdb_names', lambda f: lambda ctx: None)
+patch('pdb_facts', 'brief', lambda f: lambda *a, **k: '')
+if hasattr(contrib.Ctx, 'say'):
+    contrib.Ctx.say = lambda self, line: None
+sys.exit(contrib.main(sys.argv[1:]))
+`;
 
 /** Run from the checkout root: sr's own collision rule for a JSON list of RVAs (argv[1]). */
 export const CLAIM_COLLISIONS_PY = [
