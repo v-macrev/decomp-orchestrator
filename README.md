@@ -183,7 +183,8 @@ npm run bench:skills -w @decomp/server -- --count 500    # skill loop: bootstrap
 Set `ORCH_API_TOKEN` to require a bearer token on the API (the UI asks for it). Only the event
 stream also takes it as `?token=`, because browsers cannot send headers to an EventSource. The
 server binds to `127.0.0.1` by default and refuses any other address without a token, unless
-`ORCH_ALLOW_UNAUTHENTICATED=1` says the network is trusted.
+`ORCH_ALLOW_UNAUTHENTICATED=1` says the network is trusted. Without a token it also refuses requests
+sent by other websites open in the browser (`Host`, `Origin` and `Sec-Fetch-Site` are checked).
 
 ## Desk
 

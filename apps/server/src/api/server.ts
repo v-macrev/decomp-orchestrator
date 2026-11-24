@@ -12,6 +12,7 @@ import { allocateSlots } from '../orchestrator/engine.js';
 import { z } from 'zod';
 import type { App } from '../app.js';
 import { fromRoot } from '../config.js';
+import { localOnly } from './localOnly.js';
 import { deskEnabled, registerDeskRoutes } from '../desk.js';
 import { ingestGithubReviews, seedRepoLessons } from '../orchestrator/lessons.js';
 import { runMetrics } from '../telemetry/metrics.js';
@@ -26,6 +27,7 @@ export async function buildServer(app: App) {
   await f.register(cors, { origin: [/^http:\/\/localhost(:\d+)?$/, /^http:\/\/127\.0\.0\.1(:\d+)?$/] });
 
   const token = process.env.ORCH_API_TOKEN;
+  if (!token && process.env.ORCH_ALLOW_UNAUTHENTICATED !== '1') localOnly(f);
   if (token) {
     const expected = Buffer.from(`Bearer ${token}`);
     const same = (got: string | undefined) => {
