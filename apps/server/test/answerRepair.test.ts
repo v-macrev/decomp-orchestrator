@@ -59,6 +59,15 @@ describe('member and replace edits', () => {
   });
 });
 
+describe('members named under the wrong file', () => {
+  it('go to the file of the pair that defines the class', async () => {
+    const files: Record<string, string> = { 'a/Foo.h': 'class Foo\n{\npublic:\n    int x;\n};\n', 'a/Foo.cpp': '#include "Foo.h"\n' };
+    const m = await materialise({ edits: [{ path: 'a/Foo.cpp', members: [{ class: 'Foo', code: 'int Get();' }], functions: [{ name: 'Foo::Get', code: 'int Foo::Get()\n{\n    return x;\n}' }] }] }, async (p) => files[p] ?? null);
+    expect(m.problems).toEqual([]);
+    expect(m.files.find((f) => f.path === 'a/Foo.h')!.content).toContain('    int x;\n    int Get();\n};');
+  });
+});
+
 describe('origin labels', () => {
   const fix = (s: string, base: string | null = null, p = 'a/Foo.h') => repairLabels(p, s, base).content;
 
@@ -74,6 +83,12 @@ describe('origin labels', () => {
     expect(fix('    x = 1; // GUESS(low)', null, 'a/Foo.cpp')).toBe('    x = 1; // guess(low)');
     expect(fix('// STANDIN filler slots to place Unk_12')).toBe('// standin filler slots to place Unk_12');
     expect(fix('// Code origin: names invented (GUESS).')).toBe('// Code origin: names invented (guess).');
+  });
+
+  it('knows the newer labels and gives placeholder stand-ins their origin', () => {
+    const ok = '// A: CRASHLOGGER_PDB(59818@1.2)\n// B: SYMBOLS(fo4-pdb) GUESS(low)\n// BSFixedString: STANDIN';
+    expect(fix(ok)).toBe(ok);
+    expect(fix('// Slot06..Slot17: STANDIN; placeholders for unknown slots')).toBe('// Slot06..Slot17: STANDIN GUESS(low); placeholders for unknown slots');
   });
 
   it('leaves valid labels and lines upstream already has alone', () => {

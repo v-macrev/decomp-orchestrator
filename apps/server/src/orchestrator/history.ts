@@ -25,6 +25,8 @@ export interface HistoryEntry {
   fingerprint: string | null;
   /** The code was judged by the compiler (compiled and compared, or failed to compile). */
   judged: boolean;
+  /** The text of a candidate whose functions all matched: only its comments, labels or shape can have failed. */
+  matchedText: string | null;
   /** Bodies of the packet's functions in this candidate, keyed by function name. */
   bodies: Map<string, string>;
   /** Hash of the candidate's compiled code per function name (from the comparator), when it compiled. */
@@ -103,6 +105,7 @@ export function buildHistory(store: Store, task: TaskRow): HistoryEntry[] {
       category: v.decision === 'pass' ? 'PASS' : failureCategory(v.findings.find((f) => f.severity === 'block')?.code ?? 'OTHER'),
       score: progressScore(v), outcome: outcomeOf(v),
       fingerprint: a.files?.length ? sourceFingerprint(a.files) : null, judged,
+      matchedText: a.files?.length && v.compare?.length && v.compare.every((c) => c.result === 'pass') ? textOf(a.files) : null,
       bodies: bodiesOf(a, names),
       machine: new Map((v.compare ?? []).filter((c) => c.codeSha256 && c.name).map((c) => [c.name!, c.codeSha256!])),
       firstMismatches: (v.compare ?? []).filter((c) => c.result !== 'pass' && c.firstMismatch).map((c) => c.firstMismatch!),
@@ -112,10 +115,17 @@ export function buildHistory(store: Store, task: TaskRow): HistoryEntry[] {
   return out;
 }
 
-/** The earlier candidate with exactly this code that the compiler already judged, if any. */
+const textOf = (files: Array<{ path: string; content: string }>) =>
+  [...files].sort((a, b) => a.path.localeCompare(b.path)).map((f) => `${f.path}\n${f.content.replace(/\r\n/g, '\n').trim()}`).join('\n');
+
+/**
+ * The earlier candidate with exactly this code that the compiler already judged, if any. One whose
+ * functions all matched failed on something else (a label, a header line): the same code with other
+ * comments is the fix, not a repeat.
+ */
 export function findRepeat(history: HistoryEntry[], files: Array<{ path: string; content: string }>): HistoryEntry | null {
   const fp = sourceFingerprint(files);
-  return [...history].reverse().find((h) => h.judged && h.fingerprint === fp) ?? null;
+  return [...history].reverse().find((h) => h.judged && h.fingerprint === fp && (h.matchedText === null || h.matchedText === textOf(files))) ?? null;
 }
 
 /** Best score so far (null when no attempt produced byte evidence). */

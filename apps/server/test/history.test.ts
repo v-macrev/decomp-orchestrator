@@ -85,6 +85,14 @@ describe('attempt history', () => {
     expect(findRepeat(h, unit('    return nullptr;'))).toBeNull();
   });
 
+  it('the same code with other comments is no repeat of a candidate that matched and failed on a comment', () => {
+    const { store, task } = seed([{ files: unit(A), code: 'REVIEW_PROVENANCE', message: 'fix the label' }]);
+    store.db.prepare('UPDATE verdicts SET compare_json = ?').run(JSON.stringify([cmp({ result: 'pass', reason: null })]));
+    const h = buildHistory(store, task);
+    expect(findRepeat(h, unit(A, 'fixed label'))).toBeNull();
+    expect(findRepeat(h, unit(A))?.n).toBe(h[0]!.judged ? h[0]!.n : undefined);
+  });
+
   it('does not count a format-only rejection as a judged candidate', () => {
     const { store, task } = seed([{ files: unit(A), code: 'CONV_HEADER_TOO_LONG', message: 'header too long' }]);
     expect(findRepeat(buildHistory(store, task), unit(A, 'shorter header'))).toBeNull();

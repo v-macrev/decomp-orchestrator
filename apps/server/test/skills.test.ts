@@ -379,7 +379,7 @@ describe('end to end: skill loop', () => {
 
     // Optimizer: coverage > 25% of the run's functions → promoted_to_core.
     const stats = w.registry.runStats(r1.id);
-    const wide = stats.skills.find((s) => s.coverage > 0.25 && s.status === 'active');
+    const wide = stats.skills.find((s) => s.coverage > 0.25 && s.status === 'active' && (w.registry.lift(s.skillId).lift ?? 0) >= -0.02); // one that hurts is never promoted
     const opt = await w.curator.run('optimize', { runId: r1.id, evaluate: false }).done;
     if (wide) expect((opt.summary.promoted as Array<{ id: string }>).map((p) => p.id)).toContain(wide.skillId);
     for (const p of opt.summary.promoted as Array<{ id: string }>) expect(w.registry.get(p.id)!.status).toBe('promoted_to_core');

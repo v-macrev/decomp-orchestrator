@@ -26,7 +26,21 @@ export async function materialise(out: WorkerOutput, current: (path: string) => 
     if (r.missing.length) problems.push(`${f.path}: the returned file lost declarations that were elided from your view (${r.missing.slice(0, 8).join(', ')}): change this file with "edits" (members, replace, declarations), or keep every "// [elided #N: …]" line`);
     files.set(f.path, r.content);
   }
+  const has = (src: string | null, cls: string) => src !== null && classSpan(lex(src).code, className(cls)) !== null;
+  // Members named under the .cpp for a class its .h defines (or the other way round) go where the class is.
+  const edits: UnitEdit[] = [];
   for (const e of out.edits ?? []) {
+    const other = e.path.endsWith('.cpp') ? e.path.replace(/\.cpp$/, '.h') : e.path.replace(/\.h$/, '.cpp');
+    const moved: NonNullable<UnitEdit['members']> = [];
+    for (const m of other === e.path ? [] : (e.members ?? [])) {
+      const here = files.get(e.path) ?? (await current(e.path));
+      const there = files.get(other) ?? (await current(other));
+      if (!has(here, m.class) && has(there, m.class)) moved.push(m);
+    }
+    edits.push(moved.length ? { ...e, members: e.members!.filter((m) => !moved.includes(m)) } : e);
+    if (moved.length) edits.push({ path: other, members: moved, functions: [] });
+  }
+  for (const e of edits) {
     const base = files.get(e.path) ?? (await current(e.path)) ?? '';
     const r = applyEdit(base, e);
     problems.push(...r.problems.map((p) => `${e.path}: ${p}`));
@@ -86,7 +100,7 @@ export function applyEdit(src: string, e: UnitEdit): { content: string; problems
   }
 
   for (const m of e.members ?? []) {
-    const cls = m.class.split('::').pop()!.replace(/^(?:class|struct)\s+/, '').trim();
+    const cls = className(m.class);
     const span = classSpan(lex(out).code, cls);
     if (!span) {
       problems.push(`members: class ${cls} is not defined in this file; edit the file that defines it, or declare it in "declarations"`);
@@ -121,6 +135,8 @@ export function applyEdit(src: string, e: UnitEdit): { content: string; problems
   if (!out.endsWith('\n')) out += '\n';
   return { content: out, problems };
 }
+
+const className = (s: string) => s.replace(/^(?:class|struct)\s+/, '').trim().split('::').pop()!.trim();
 
 /** Where `find` occurs in `src`, exactly or with other spacing; null unless it occurs exactly once (`many`: at least once). */
 function findOnce(src: string, find: string, many = false): [number, number] | null {

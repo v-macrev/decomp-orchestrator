@@ -6,14 +6,17 @@
 // its note, and a label word inside prose is put in lower case (the lint's words are capitals).
 import { lex } from '../gatekeeper/cpp.js';
 
-const LABEL = String.raw`(?:COMMUNITY\([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{7,40}, [A-Za-z0-9.+-]+\)|SIBLING\((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+|fo4-private)@[0-9a-f]{7,40}, [A-Za-z0-9.+-]+\)|GUESS(?:\((?:low|medium|high)\))?|EXE_RTTI|STANDIN|OBSERVED)`;
+const LABEL = String.raw`(?:COMMUNITY\([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+@[0-9a-f]{7,40}, [A-Za-z0-9.+-]+\)|SIBLING\((?:[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+|fo4-private)@[0-9a-f]{7,40}, [A-Za-z0-9.+-]+\)|CRASHLOGGER_PDB\(59818@[0-9A-Za-z][0-9A-Za-z.+-]*\)|SYMBOLS\((?:tesv-2013-map|fo4-pdb|fnv-x360-pdb)\)|GUESS(?:\((?:low|medium|high)\))?|EXE_RTTI|STANDIN|OBSERVED)`;
 const LABEL_LINE = new RegExp(String.raw`^\s*\/\/\s*(?<names>\S(?:.*?\S)?)\s*:\s*(?<labels>${LABEL}(?:\s+${LABEL})*)\s*(?:;\s*(?<note>.*))?$`);
 const BARE = new RegExp(String.raw`^(${LABEL}(?:\s+${LABEL})*)(?![A-Za-z0-9_(])\s*[:;,.]?\s*(.*)$`);
 const NAMED = new RegExp(String.raw`^(\S(?:.*?\S)?)\s*:\s*(${LABEL}(?:\s+${LABEL})*)(?![A-Za-z0-9_(])\s*[;,.:–—-]*\s*(.*)$`);
 const NEXT_LABEL = new RegExp(String.raw`^(${LABEL})(?![A-Za-z0-9_(])\s*[;,.]?\s*`);
-const WORD = /(?<![A-Za-z0-9_])(?:COMMUNITY|SIBLING|GUESS|EXE_RTTI|STANDIN|OBSERVED)[A-Za-z0-9_]*|(?<![A-Za-z0-9_])(?:EXE[- ]RTTI|STAND[- _]IN)(?![A-Za-z0-9_])/;
+const WORD = /(?<![A-Za-z0-9_])(?:COMMUNITY|SIBLING|CRASHLOGGER_PDB|SYMBOLS(?=\()|GUESS|EXE_RTTI|STANDIN|OBSERVED)[A-Za-z0-9_]*|(?<![A-Za-z0-9_])(?:EXE[- ]RTTI|STAND[- _]IN)(?![A-Za-z0-9_])/;
 const WORDS = new RegExp(WORD.source, 'g');
 const HEADER_KEY = /^(?:Source exposure|Code origin|Adapted (?:bodies|code)|SPDX-License-Identifier|Licen[cs]e|Sibling source)$/i;
+
+/** A stand-in with made-up placeholder names (Slot06..Slot17, Unk_12, pad08): their origin is a guess. */
+const STANDIN_ONLY = /^(\s*\/\/\s*(?:(?:[A-Za-z_]\w*::)*(?:Slot|Unk_?|unk|unknown|pad|padding|field|Function|g_?[Uu]nk)_?[0-9A-Fa-f]+(?:\s*(?:,|\.\.|through|to|and)\s*)?)+\s*:\s*)(STANDIN)(\s*(?:;.*)?)$/;
 
 const plain = (s: string) => s.replace(WORDS, (w) => w.toLowerCase());
 const note = (s: string) => {
@@ -58,7 +61,7 @@ function fixLine(line: string, code: string[], i: number, header: boolean): stri
   }
   const [, indent, body] = at as unknown as [string, string, string];
   // "A: GUESS(low); B: GUESS(low)": one line each.
-  const parts = body.split(/[;,]\s+(?=[A-Za-z_~][\w:~, ]*:\s*(?:COMMUNITY|SIBLING|GUESS|EXE_RTTI|STANDIN|OBSERVED)\b)/);
+  const parts = body.split(/[;,]\s+(?=[A-Za-z_~][\w:~, ]*:\s*(?:COMMUNITY|SIBLING|CRASHLOGGER_PDB|SYMBOLS|GUESS|EXE_RTTI|STANDIN|OBSERVED)\b)/);
   if (parts.length > 1) return parts.map((p) => fixLine(`${indent}// ${p}`, code, i, header)).join('\n');
   const bare = BARE.exec(body);
   if (bare) {
@@ -95,6 +98,7 @@ export function repairLabels(path: string, content: string, base: string | null)
     if (had.has(line.trim())) return line;
     let next = line;
     if (MIT.test(line)) next = MIT_FULL;
+    else if (STANDIN_ONLY.test(line) && labelLineOk(line)) next = line.replace(STANDIN_ONLY, '$1STANDIN GUESS(low)$3');
     else if (!labelLineOk(line)) {
       next = fixLine(line, code, i, path.endsWith('.h'));
       if (!next.split('\n').every(labelLineOk)) next = plain(line);

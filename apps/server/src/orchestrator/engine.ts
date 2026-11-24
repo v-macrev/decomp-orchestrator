@@ -3232,12 +3232,15 @@ export class RunEngine {
     const { store, events } = this.deps;
     const n = opts.slotFault ? task.infraFailures : task.infraFailures + 1;
     const runId = run.row.id;
-    const dead = !opts.slotFault && n >= this.opts.maxInfraFailures;
+    // The reviewer's account is out (a quota, an outage): that passes by itself, so wait longer for it.
+    const review = verdict?.findings.some((f) => f.code === 'INFRA_REVIEW') ?? false;
+    const dead = !opts.slotFault && n >= (review ? Math.max(12, this.opts.maxInfraFailures) : this.opts.maxInfraFailures);
+    const backoff = review ? this.opts.infraBackoffMs * 20 : this.opts.infraBackoffMs * Math.max(1, n);
     // Every function matched and only the machinery failed (a preflight that timed out): the next
     // attempt gates that candidate again instead of paying a worker for the same code.
     const keep = verdict && (!task.fix || task.fix.check === 'regate') && this.matchedButBlocked(task, verdict) && store.getAttempt(verdict.attemptId)?.files?.length;
     const moved = store.tx(() => {
-      const ok = this.queue.transition(task.id, leaseId, ['leased', 'gating'], dead ? 'dead' : 'pending', dead ? { infraFailures: n } : { infraFailures: n, notBefore: Date.now() + this.opts.infraBackoffMs * Math.max(1, n) });
+      const ok = this.queue.transition(task.id, leaseId, ['leased', 'gating'], dead ? 'dead' : 'pending', dead ? { infraFailures: n } : { infraFailures: n, notBefore: Date.now() + backoff });
       if (verdict) store.insertVerdict({ ...verdict, route: ok ? (dead ? 'dead_letter' : 'retry') : 'stale' });
       if (ok && keep) {
         const fix: BatchFix = {

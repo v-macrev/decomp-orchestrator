@@ -267,9 +267,11 @@ export async function repairAnswer(
   for (const x of opts.untouched ?? []) {
     if (out.has(x.path) || x.current === null || x.current === x.base) continue;
     const r = repairHeader(x.path, x.current, x.base, { originHint: hint, adaptedHint: adapted, base: opts.base ? x.base : null, own: opts.own });
-    if (!r.changes.length) continue;
-    extra.push({ path: x.path, content: r.content });
-    changes.push(...r.changes.map((c) => `${x.path} (changed by prepare): ${c}`));
+    const l = repairLabels(x.path, r.content, x.base);
+    const done = [...r.changes, ...l.changes];
+    if (!done.length) continue;
+    extra.push({ path: x.path, content: l.content });
+    changes.push(...done.map((c) => `${x.path} (changed by prepare): ${c}`));
   }
   if (extra.length) return { files: [...files.map((f) => ({ path: f.path, content: out.get(f.path)! })), ...extra], changes };
   return { files: files.map((f) => ({ path: f.path, content: out.get(f.path)! })), changes };

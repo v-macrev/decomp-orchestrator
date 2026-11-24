@@ -24,7 +24,7 @@ import { STRIKE_CODES, cheatScan, leakScan } from './rules.js';
 import { DEFAULT_SCOPE_LIMITS, checkScope, type ScopeLimits } from './scope.js';
 
 export interface Reviewer {
-  review(input: { task: TaskRow; files: Array<{ path: string; content: string }>; compare: CompareFunctionResult[]; signal: AbortSignal }): Promise<Finding[]>;
+  review(input: { task: TaskRow; files: Array<{ path: string; content: string }>; before?: Map<string, string | null>; compare: CompareFunctionResult[]; signal: AbortSignal }): Promise<Finding[]>;
 }
 
 export interface GateInput {
@@ -228,9 +228,13 @@ export class GateKeeper {
     }))) return done('reject', 'retry');
 
     // 9: optional LLM review (block-only) ----------------------------------------------------------
-    if (!(await stage('review', checks.llmReview && !!this.reviewer, async () =>
-      this.reviewer!.review({ task, files: accepted, compare: compare ?? [], signal }),
-    ))) return rejectOrQuarantine();
+    if (!(await stage('review', checks.llmReview && !!this.reviewer, async () => {
+      const before = new Map(accepted.map((f) => [f.path, input.carried?.get(f.path) ?? bases.get(f.path) ?? null]));
+      const out = await this.reviewer!.review({ task, files: accepted, before, compare: compare ?? [], signal });
+      // The reviewer could not be reached: not a fault of the candidate, which is gated again later.
+      if (out.some((f) => f.code === 'INFRA_REVIEW')) infra = true;
+      return out;
+    }))) return rejectOrQuarantine();
 
     return done('pass', 'accept');
   }
