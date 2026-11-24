@@ -807,6 +807,7 @@ function batchView(b: Batch): { tone: Tone; title: string; why: string; action: 
   if (b.status === 'draft') return { tone: 'next', title: 'Being checked now', why: 'Re-verifying it in a clean tree; see the progress at the top.', action: 'none', steps };
   if (b.status === 'interrupted') return { tone: 'bad', title: 'Interrupted by a restart', why: 'A server restart stopped its check. Nothing was committed and nothing is lost: check it again.', action: 'restage', steps };
   if (b.status === 'failed') return { tone: 'bad', title: 'Its check failed', why: 'Some packets did not match in a clean tree. Check again (a restart or a flaky compile clears on its own), or let the AI agents fix the packets that fail.', action: 'restage', steps };
+  if (b.status === 'branch_deleted') return { tone: 'muted', title: 'Branch deleted', why: 'Its local branch was deleted before a pull request: its packets went back to the matched ones and are in a later batch, or wait for one.', action: 'none', steps };
   if (b.status === 'superseded') {
     const held = [
       d?.withheld ? `${d.withheld.taskIds.length} packet(s) held back for claims` : '',
@@ -1372,8 +1373,10 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
 
   const busyBatch = batches.some((b) => b.dryRunState);
   const locked = !!busy || busyBatch || !!op;
-  const current = batches.filter((b) => b.status !== 'superseded');
-  const history = batches.filter((b) => b.status === 'superseded').sort((x, y) => y.seq - x.seq);
+  // Replaced, or its branch deleted: such a batch holds nothing any more.
+  const gone = (b: Batch) => b.status === 'superseded' || b.status === 'branch_deleted';
+  const current = batches.filter((b) => !gone(b));
+  const history = batches.filter(gone).sort((x, y) => y.seq - x.seq);
   const views = new Map(current.map((b) => [b.id, batchView(b)]));
   const actionOf = (b: Batch) => views.get(b.id)!.action;
   const ready = current.filter((b) => actionOf(b) === 'submit');
@@ -1682,7 +1685,7 @@ function BatchesPanel({ runId, status, passed, withheld, setAside, heldFunctions
       )}
       {history.length > 0 && (
         <details className="panel flat history">
-          <summary>History: {history.length} replaced batch{history.length === 1 ? '' : 'es'}</summary>
+          <summary>History: {history.length} past batch{history.length === 1 ? '' : 'es'}</summary>
           <div style={{ overflowX: 'auto', marginTop: 10 }}>
             <table>
               <thead><tr><th>#</th><th>Functions</th><th>What happened</th></tr></thead>
