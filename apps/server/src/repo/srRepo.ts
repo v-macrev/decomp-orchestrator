@@ -1144,7 +1144,7 @@ export class SrRepo implements RepoAdapter {
         const claimUrls: string[] = [];
         if (out.pullRequest) {
           input.progress?.('Opening the claim issue for this pull request\'s functions', out.pullRequest, null, null);
-          const claim = await this.publishPrClaim(slot, input.tasks.flatMap((t) => t.functions.map((f) => f.rva)), out.pullRequest);
+          const claim = await this.publishPrClaim(slot, input.tasks.flatMap((t) => t.functions), out.pullRequest);
           claimUrls.push(...claim.urls);
           out.claims = claim.urls;
           if (claim.error) out.warnings.push(`claim issue: ${claim.error}`);
@@ -1171,11 +1171,12 @@ export class SrRepo implements RepoAdapter {
   }
 
   /** Publish the claim issue for a just-opened PR's functions (see CLAIM_PUBLISH_PY). */
-  private async publishPrClaim(slot: number, rvas: string[], pullRequest: string): Promise<{ urls: string[]; error: string | null }> {
-    const wanted = [...new Set(rvas)].filter((r) => /^0x[0-9a-f]+$/.test(r));
+  private async publishPrClaim(slot: number, functions: Array<{ rva: string; name?: string | null }>, pullRequest: string): Promise<{ urls: string[]; error: string | null }> {
+    const wanted = [...new Set(functions.map((f) => f.rva))].filter((r) => /^0x[0-9a-f]+$/.test(r));
     if (!wanted.length) return { urls: [], error: 'no functions to claim' };
+    const names = Object.fromEntries(functions.flatMap((f) => (f.name ? [[f.rva, f.name]] : [])));
     const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_NO_SIBLING_NAMES: '1', SR_UPSTREAM: this.upstream, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', GIT_TERMINAL_PROMPT: '0' };
-    const run = await this.srMutex.run('sr-local', () => this.host.run(this.cfg.python, ['-c', CLAIM_PUBLISH_PY, JSON.stringify({ rvas: wanted, pr: pullRequest })], { cwd: this.wt(slot), env, timeoutMs: 300_000, maxOutputBytes: 1024 * 1024 }));
+    const run = await this.srMutex.run('sr-local', () => this.host.run(this.cfg.python, ['-c', CLAIM_PUBLISH_PY, JSON.stringify({ rvas: wanted, pr: pullRequest, names })], { cwd: this.wt(slot), env, timeoutMs: 300_000, maxOutputBytes: 1024 * 1024 }));
     const j = parseJsonOutput(run.stdout) as { ok?: boolean; urls?: unknown; error?: unknown } | null;
     const urls = Array.isArray(j?.urls) ? j.urls.filter((u): u is string => typeof u === 'string' && /^https:\/\/github\.com\//.test(u)) : [];
     if (!j) return { urls, error: `could not open it (exit ${run.code}): ${(run.stderr || run.stdout).trim().slice(-300)}` };
@@ -1262,7 +1263,7 @@ export class SrRepo implements RepoAdapter {
       // An open PR from before claims were published with it gets its claim issue now.
       const claimUrls = [...(input.claimUrls ?? [])];
       if (input.openClaim && m && !claimUrls.length) {
-        const claim = await this.publishPrClaim(slot, input.tasks.flatMap((t) => t.functions.map((f) => f.rva)), input.pullRequest!);
+        const claim = await this.publishPrClaim(slot, input.tasks.flatMap((t) => t.functions), input.pullRequest!);
         claimUrls.push(...claim.urls);
         if (claim.error) warnings.push(`claim issue: ${claim.error}`);
       }
@@ -1637,7 +1638,12 @@ export const CLAIM_PUBLISH_PY = [
   "    build = functions[0]['build_id']",
   '    me = gh.user()',
   '    public = contrib.batch_claims.git_json(ctx.repo)',
-  "    counts = {e: sum(e[0] <= f['rva'] < e[1] and f['build_id'] == build for f in data['functions']) for e in entries}",
+  // A function of the published list is not in the inventory yet: it counts, and it is named, like the others.
+  "    counts = {e: sum(e[0] <= f['rva'] < e[1] for f in functions) for e in entries}",
+  "    known = {f['rva']: f for f in public['functions'] if f['build_id'] == build}",
+  "    named = [dict(f, build_id=build, name=a['names'].get('0x%x' % f['rva']) or f.get('name')) for f in functions if not (known.get(f['rva']) or {}).get('name')]",
+  "    drop = {f['rva'] for f in named}",
+  "    public = dict(public, functions=[f for f in public['functions'] if not (f['build_id'] == build and f['rva'] in drop)] + named)",
   '    urls = []',
   '    for title, text, chunk in contrib.batch_claims.parts(build, entries, public, me, counts=counts):',
   "        url = gh.create_issue(title, text.rstrip('\\n') + '\\n\\nPull request: ' + a['pr'] + '\\n')",

@@ -102,7 +102,7 @@ describe('submitting a batch of several units', () => {
       const gitCalls: string[][] = [];
       let unitDuringSubmit: string[] = [];
       let patch: { args: string[]; body: string } | null = null;
-      const claimCalls: Array<{ rvas: string[]; pr: string }> = [];
+      const claimCalls: Array<{ rvas: string[]; pr: string; names: Record<string, string> }> = [];
       let dryRun = true;
       vi.spyOn(repo.host, 'run').mockImplementation(async (cmd, args) => {
         if (args[1] === CLAIM_PUBLISH_PY) {
@@ -149,7 +149,7 @@ describe('submitting a batch of several units', () => {
       const r = await repo.submitBatch({ ...input, dryRun: false });
       expect(r).toMatchObject({ ok: true, title: 'Reconstruct First::Fn, Last::Fn (0x1234, 0x5678)', claims: ['https://github.com/Mudcrab-Team/skyrim_decomp/issues/42'] });
       // One claim, for exactly the PR's functions, naming the PR.
-      expect(claimCalls).toEqual([{ rvas: ['0x1234', '0x5678'], pr: 'https://github.com/Mudcrab-Team/skyrim_decomp/pull/9' }]);
+      expect(claimCalls).toEqual([{ rvas: ['0x1234', '0x5678'], pr: 'https://github.com/Mudcrab-Team/skyrim_decomp/pull/9', names: { '0x1234': 'First::Fn', '0x5678': 'Last::Fn' } }]);
       // sr committed the whole batch: its unit named every file while it ran; nothing was committed before it.
       expect(new Set(unitDuringSubmit)).toEqual(new Set(['last.cpp', 'first.cpp', 'first.h']));
       const commitIndex = gitCalls.findIndex((x) => x[0] === 'commit');
