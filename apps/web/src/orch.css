@@ -336,6 +336,11 @@
   .stack { gap: .875rem; }
   .cards, .grid2, .tiles, .kpis { gap: .875rem; }
   td { overflow-wrap: break-word; }
+  /* paths and statements have no spaces to wrap at */
+  ul.findings li, .bcard, .hero, .held, .notice, .explain { overflow-wrap: anywhere; }
+  .fns td { overflow-wrap: anywhere; }
+  .fns th, .fns td .chip, .bcard button, .hero button, .held button { overflow-wrap: normal; }
+  .fns button { white-space: nowrap; }
   /* one-column grids must not grow to the widest code line */
   .page, .stack, .panel, .panel > div, .run-head > *, .hero, .bcard, .held, .op-panel { min-width: 0; }
   .page, .stack, .panel, .hero, .bcard, .held, .op-panel, .run-list { grid-template-columns: minmax(0, 1fr); }
