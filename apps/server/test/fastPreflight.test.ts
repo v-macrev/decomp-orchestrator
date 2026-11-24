@@ -51,7 +51,7 @@ function repo() {
   return { put, commit, run, cached };
 }
 
-describe.skipIf(!python)('the gate preflight', () => {
+describe.skipIf(!python)('the gate preflight', { timeout: 60_000 }, () => {
   it('gives the same answers, reads the list once, and keeps it for the next run of the same revision', () => {
     const r = repo();
     expect(r.run()).toEqual({ status: 1, out: { argv: ['--json', 'preflight', 'x'], a: [[1, 'a.cpp']], b: ['a.cpp'], calls: 1 } });

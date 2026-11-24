@@ -4,7 +4,8 @@
 // form, and unit views that keep the packet's class in sight.
 import { describe, expect, it } from 'vitest';
 import { declareMembers, memberDefs } from '../src/orchestrator/classDecls.js';
-import { applyEdit, materialise } from '../src/orchestrator/edits.js';
+import { applyEdit, materialise, restoreAccepted } from '../src/orchestrator/edits.js';
+import { cheatScan } from '../src/gatekeeper/rules.js';
 import { repairLabels } from '../src/orchestrator/labelRepair.js';
 import { expandElisions, focusFile } from '../src/orchestrator/unitView.js';
 
@@ -65,6 +66,25 @@ describe('members named under the wrong file', () => {
     const m = await materialise({ edits: [{ path: 'a/Foo.cpp', members: [{ class: 'Foo', code: 'int Get();' }], functions: [{ name: 'Foo::Get', code: 'int Foo::Get()\n{\n    return x;\n}' }] }] }, async (p) => files[p] ?? null);
     expect(m.problems).toEqual([]);
     expect(m.files.find((f) => f.path === 'a/Foo.h')!.content).toContain('    int x;\n    int Get();\n};');
+  });
+});
+
+describe('accepted functions', () => {
+  const before = 'int A::F() const\n{\n    return 1;\n}\n\nint A::F()\n{\n    return 2;\n}\n\nint A::G()\n{\n    return 3;\n}\n';
+
+  it('are put back when an answer rewrites them; the packet\'s own are not', () => {
+    const r = restoreAccepted(before.replace('return 2;', 'return 9;').replace('return 3;', 'return 8;'), before, (n) => n === 'A::G');
+    expect(r.restored).toEqual(['A::F']);
+    expect(r.content).toBe(before.replace('return 3;', 'return 8;'));
+    expect(restoreAccepted(before, before, () => false).restored).toEqual([]);
+  });
+
+  it('the gate tells overloads apart: unchanged ones are no finding, a changed, swapped or removed one is', () => {
+    const scan = (after: string) => cheatScan({ path: 'a/A.cpp', before, after, targets: [{ rva: '0x1', name: 'A::G', size: 8 }] }).map((f) => f.code).filter((c) => c.startsWith('CHEAT_MATCHED'));
+    expect(scan(before)).toEqual([]);
+    expect(scan(before.replace('return 1;', 'return 7;'))).toEqual(['CHEAT_MATCHED_BODY_MODIFIED']);
+    expect(scan(before.replace('return 1;', 'return X;').replace('return 2;', 'return 1;').replace('return X;', 'return 2;'))).toHaveLength(2);
+    expect(scan(before.replace('int A::F()\n{\n    return 2;\n}\n', ''))).toEqual(['CHEAT_MATCHED_BODY_REMOVED']);
   });
 });
 

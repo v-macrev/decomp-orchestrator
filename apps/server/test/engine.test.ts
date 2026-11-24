@@ -305,6 +305,33 @@ describe('re-gating packets only foreign compare results killed', () => {
   }, 60_000);
 });
 
+describe('packets quarantined by mistake', () => {
+  it('are retried when the rules find no change of an accepted function; a real one stays quarantined', async () => {
+    const s = setup(tmpDb(), { slots: 2 });
+    const run = s.engine.createRun('q', { flowId: 'default', selection: { source: 'synthetic', count: 6, seed: 9 }, routing: { enabled: false } }, flow(4, 2));
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const all = s.store.listTasks(run.id, { limit: 100 });
+    // Units of one packet, so no other packet's accepted code is in play.
+    const [a, b] = all.filter((t) => all.filter((x) => x.unit === t.unit).length === 1 && t.lastVerdictId && s.store.getAttempt(s.store.getVerdict(t.lastVerdictId)!.attemptId)?.files?.length);
+    const base = s.repo.baseFile.bind(s.repo);
+    for (const t of [a!, b!]) {
+      const v = s.store.getVerdict(t.lastVerdictId!)!;
+      s.store.insertVerdict({ ...v, id: `vd_q_${t.id}`, decision: 'quarantine', route: 'quarantine', findings: [{ stage: 'cheat', code: 'CHEAT_MATCHED_BODY_MODIFIED', severity: 'block', message: 'x' }] });
+      s.store.db.prepare("UPDATE tasks SET state = 'quarantined', cheat_strikes = 2 WHERE id = ?").run(t.id);
+    }
+    // Upstream's file of b has a function its candidate lacks.
+    s.repo.baseFile = async (p: string) => (p === b!.unit ? 'int Kept()\n{\n    return 12;\n}\n' : base(p));
+    await s.engine.retryFailedTasks(run.id);
+    expect(s.store.getTask(a!.id)!).toMatchObject({ cheatStrikes: 0 });
+    expect(s.store.getTask(a!.id)!.state).not.toBe('quarantined');
+    expect(s.store.getTask(b!.id)!.state).toBe('quarantined');
+    await s.engine.waitFor(run.id);
+    s.pool.close();
+    s.engine.close();
+  }, 60_000);
+});
+
 describe('a check that cannot be run', () => {
   it('keeps a candidate whose functions all matched: the next attempt gates it again without a model call', async () => {
     const s = setup(tmpDb(), { slots: 2 });

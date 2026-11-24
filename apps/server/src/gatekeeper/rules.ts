@@ -215,13 +215,17 @@ export function cheatScan(ctx: CheatContext): Finding[] {
   }
   if (ctx.before) {
     const prev = extractFunctions(lex(ctx.before).code);
-    const now = new Map(defs.map((d) => [d.name, d]));
+    // Overloads share a name: each earlier one is looked for among all of them, by its own signature.
+    const now = new Map<string, typeof defs>();
+    for (const d of defs) now.set(d.name, [...(now.get(d.name) ?? []), d]);
+    const overloaded = new Set(prev.filter((p, i) => prev.some((q, k) => k !== i && q.name === p.name)).map((p) => p.name));
     // The packet's own targets are what it is here to write: an earlier body of one of them (an
     // upstream draft that never matched, a skeleton) is not someone else's matched code.
     const isTarget = (name: string) => byBase.has(name) || [...byBase.keys()].some((n) => n.endsWith(`::${name}`) || name.endsWith(`::${n}`));
     for (const p of prev) {
       if (!p.body || isTarget(p.name)) continue;
-      const cur = now.get(p.name);
+      const same = now.get(p.name) ?? [];
+      const cur = same.find((d) => d.signature === p.signature) ?? (overloaded.has(p.name) ? undefined : same.find((d) => normalise(d.body) === normalise(p.body)) ?? same[0]);
       if (!cur) push(f, 'CHEAT_MATCHED_BODY_REMOVED', 'block', path, p.line, `previously accepted function ${p.name} was removed; add new functions alongside matched ones`);
       else if (normalise(cur.body) !== normalise(p.body)) push(f, 'CHEAT_MATCHED_BODY_MODIFIED', 'block', path, cur.line, `previously accepted function ${p.name} was modified; never change matched bodies`);
     }

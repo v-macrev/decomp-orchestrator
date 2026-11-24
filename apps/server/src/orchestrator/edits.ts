@@ -138,6 +138,25 @@ export function applyEdit(src: string, e: UnitEdit): { content: string; problems
 
 const className = (s: string) => s.replace(/^(?:class|struct)\s+/, '').trim().split('::').pop()!.trim();
 
+/**
+ * Put back the bodies of accepted functions an answer rewrote without being asked to: they are kept
+ * verbatim whatever a worker returns. Only a definition with the same name and signature is restored.
+ */
+export function restoreAccepted(after: string, before: string | null, isTarget: (name: string) => boolean): { content: string; restored: string[] } {
+  if (before === null) return { content: after, restored: [] };
+  const src = before.replace(/\r\n/g, '\n');
+  let out = after.replace(/\r\n/g, '\n');
+  const restored: string[] = [];
+  for (const p of extractFunctions(lex(src).code)) {
+    if (!p.body || isTarget(p.name)) continue;
+    const d = extractFunctions(lex(out).code).filter((x) => x.name === p.name && x.signature === p.signature);
+    if (d.length !== 1 || d[0]!.body === p.body) continue;
+    out = `${out.slice(0, d[0]!.open)}${src.slice(p.open, p.close + 1)}${out.slice(d[0]!.close + 1)}`;
+    restored.push(p.name);
+  }
+  return restored.length ? { content: out, restored } : { content: after, restored };
+}
+
 /** Where `find` occurs in `src`, exactly or with other spacing; null unless it occurs exactly once (`many`: at least once). */
 function findOnce(src: string, find: string, many = false): [number, number] | null {
   const first = src.indexOf(find);

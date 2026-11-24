@@ -31,8 +31,9 @@ import type { EventBus } from '../telemetry/events.js';
 import { AbortedError, Notifier, Semaphore, newId } from '../util/async.js';
 import { ContextBuilder } from './context.js';
 import { TaskContextBuilder, shouldCacheTaskPrefix } from './contextBuilder.js';
+import { STRIKE_CODES, cheatScan } from '../gatekeeper/rules.js';
 import { declareMembers, memberDefs } from './classDecls.js';
-import { materialise } from './edits.js';
+import { materialise, restoreAccepted } from './edits.js';
 import type { Elision } from './unitView.js';
 import { repairAnswer } from './headerRepair.js';
 import { buildHistory, findRepeat, progressScore, type HistoryEntry } from './history.js';
@@ -476,6 +477,7 @@ export class RunEngine {
     const dead = store.db.prepare("SELECT MAX(tier) t FROM tasks WHERE run_id = ? AND state = 'dead'").get(runId) as { t: number | null };
     const tier = fromFast ? fast : Math.min(dead.t ?? 0, plan.tiers.length - 1);
     const tierLabel = fromFast ? plan.tiers[tier]!.node.data.label || plan.tiers[tier]!.node.id : 'the tier where each packet stopped';
+    await this.clearFalseQuarantines(runId);
     const requeued = this.queue.requeueDead(runId, fromFast ? tier : null);
     if (!requeued) return { ok: true, requeued: 0, tier, tierLabel, status: row.status };
 
@@ -494,6 +496,33 @@ export class RunEngine {
       await this.start(runId);
     }
     return { ok: true, requeued, tier, tierLabel, status: store.getRun(runId)?.status ?? 'running' };
+  }
+
+  /**
+   * Packets quarantined for changing an accepted function whose candidates did no such thing by the
+   * rules as they are now (overloads used to be mistaken for each other): dead instead, so a retry
+   * takes them. Any other strike, or one the rules still find, keeps the packet quarantined.
+   */
+  private async clearFalseQuarantines(runId: string) {
+    const { store, repo, events } = this.deps;
+    for (const t of store.listTasks(runId, { state: 'quarantined', limit: 10_000 })) {
+      const struck = store.verdictsForTask(t.id).filter((v) => v.findings.some((f) => f.severity === 'block' && STRIKE_CODES.has(f.code)));
+      if (!struck.length) continue;
+      const carried = new Map(this.carriedFiles(runId, t.unit).map((f) => [f.path, f.content]));
+      let holds = false;
+      for (const v of struck) {
+        const files = store.getAttempt(v.attemptId)?.files ?? [];
+        const only = v.findings.every((f) => f.severity !== 'block' || !STRIKE_CODES.has(f.code) || f.code === 'CHEAT_MATCHED_BODY_MODIFIED');
+        if (!only || !files.length) holds = true;
+        for (const f of files) {
+          const before = carried.get(f.path) ?? (await repo.baseFile(f.path));
+          if (cheatScan({ path: f.path, before, after: f.content, targets: t.functions as FunctionTarget[] }).some((x) => STRIKE_CODES.has(x.code))) holds = true;
+        }
+      }
+      if (holds) continue;
+      store.db.prepare("UPDATE tasks SET state = 'dead', cheat_strikes = 0, updated_at = ? WHERE id = ? AND state = 'quarantined'").run(Date.now(), t.id);
+      events.emit('task.released', `${t.functions.map((f) => f.name ?? f.rva).join(', ')}: its candidates changed no accepted function after all; out of quarantine`, { runId, taskId: t.id, level: 'warn' });
+    }
   }
 
   private async resumeRun(runId: string) {
@@ -3020,6 +3049,14 @@ export class RunEngine {
       if (mat.problems.length) {
         store.updateAttempt(attempt.id, { status: 'parse_error', error: mat.problems.join('; ').slice(0, 500), files: mat.files, finishedAt: Date.now() });
         return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_EDIT', mat.problems.join('; ').slice(0, 1_000)), { infra: false, strike: false }, tierIdx);
+      }
+      // Accepted functions stay as they are, also when the answer rewrote one.
+      const ownNames = task.functions.flatMap((f) => (f.name ? [f.name] : []));
+      for (const f of mat.files) {
+        const before = carried.find((c) => c.path === f.path)?.content ?? (await repo.baseFile(f.path));
+        const r = restoreAccepted(f.content, before, (n) => ownNames.some((o) => o === n || o.endsWith(`::${n}`) || n.endsWith(`::${o}`)));
+        f.content = r.content;
+        if (r.restored.length) ev('attempt.restored', `accepted function(s) put back as they were: ${r.restored.slice(0, 8).join(', ')}`, 'debug', { restored: r.restored });
       }
       // A member function the packet defines must be in its class: the declaration follows from the definition.
       const had = new Map<string, Set<string>>();
