@@ -25,6 +25,7 @@ python -m recon coverage  --worktree W --checkout C --unmatched --ir --jobs 3 --
 python tests/image_check.py --worktree W --checkout C --every 30              # real functions run as instructions and as IR; counts only
 python -m recon validate-lift [--only ADD] [--write]                          # differential tests on this processor; --write records the table
 python -m recon measure-compare --worktree W --checkout C --out <dir under .local> --units 5
+python -m recon reconstruct --pack pack.json --worktree W --recipe R --checkout C --work D --out D   # synthetic packs only: sources and result.json
 python -m recon serve                                                         # JSON Lines protocol on stdio
 ```
 
@@ -39,6 +40,8 @@ run `validate-lift --write` (about 6 minutes): until then the recorded table doe
 ```sh
 RECON_UPSTREAM_WORKTREE=<worktree> PYTHONPATH=<venv>/lib/python3.*/site-packages python3 -m pytest
 ```
+
+The end-to-end tests also need the pinned compiler: `RECON_CHECKOUT`, or `RECON_MSVC` for a toolset directory elsewhere.
 
 Without the worktree, the venv packages or the game image, the tests that need them are skipped with the reason
 (markers in `pyproject.toml`); everything else runs anywhere.

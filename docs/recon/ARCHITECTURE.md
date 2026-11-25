@@ -75,6 +75,27 @@ Analysis --build--> Fn (raw) --validate--> passes (simplify, merge, forward, pro
 
 `x64_msvc/eh.py` reads frame handler data. The IR names locations only as the strings an adapter's convention gives it; `core` still names no register.
 
+## From admitted IR to verified source (Phase 5)
+
+```text
+Fn (normal form) --inference/: signature, lower, types--> source-level SSA --structuring/: build, regions--> tree (ast.py) --emitter/cpp.py--> text
+      |                                                                                                        |
+      +---------------- structuring/evaluate.py: both run in the same worlds, must do the same ----------------+
+synthesis/candidates.py: choices in order --> x64_msvc/batch.py (namespaces, one process) --> distance --> exact unit --> skyrim/verify.py (upstream) --> BYTE_MATCHED
+```
+
+| Module | What it holds |
+|---|---|
+| `core/inference/` | `signature.py` parameters and results with their evidence; `lower.py` from locations to parameters; `types.py` classes, pointers, signs, open points |
+| `core/structuring/` | `rotate.py` loop rotation undone; `build.py` statements and variables; `regions.py` structure; `ast.py`, `evaluate.py` |
+| `core/emitter/cpp.py` | text, a pure function of the tree |
+| `core/synthesis/` | `candidates.py` the program, the choices, the checks; `search.py` the stages and the states |
+| `x64_msvc/{cl,coff,batch}.py` | the compiler as a process, objects, batches and distances (they rank, they decide nothing) |
+| `skyrim/{pack,verify}.py` | synthetic packs; upstream's comparator |
+
+The calling convention reaches `core` as data (`abi.SOURCE`). `BYTE_MATCHED` is given only when upstream's comparator passed the exact unit.
+The protocol's `solve` does not use any of this yet (Phase 6).
+
 ## Determinism contract (summary of section 21)
 
 * **Input digest** of a function covers: executable sha256, RVA and size, engine version, rule-store digest,

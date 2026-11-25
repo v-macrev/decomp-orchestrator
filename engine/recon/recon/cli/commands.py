@@ -170,3 +170,62 @@ def cmd_coverage(args) -> int:
                 f.write(json.dumps(r.__dict__, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0
+
+
+def cmd_reconstruct(args) -> int:
+    """Exit codes: 0 every function asked for is BYTE_MATCHED; 1 not every one is; 2 an input cannot be used; 3 an engine error."""
+    from recon import ENGINE_VERSION
+    from recon.adapters.skyrim import pack as pk
+    from recon.adapters.skyrim.verify import Verifier
+    from recon.adapters.x64_msvc import cl
+    from recon.adapters.x64_msvc import validate as v
+    from recon.core.canonical import digest
+    from recon.core.synthesis.search import BYTE_MATCHED
+
+    try:
+        recipe = Path(args.recipe).read_bytes()
+        rec = json.loads(recipe)
+        validated = v.load_validated()
+        if not validated:
+            raise ValueError("no usable lift_coverage.json: run validate-lift --write")
+        pack = pk.Pack.load(args.pack, args.worktree, validated)
+        pinned = json.loads((Path(args.worktree) / "builds/target.json").read_text(encoding="utf-8"))["image_sha256"]
+        if pack.image.sha256 == pinned:
+            raise ValueError("this command is for synthetic images; its output is not private")
+        tool = cl.discover(args.checkout, rec["compiler"]["binary_sha256"], args.toolset)
+        wanted = sorted(int(x, 0) for x in args.function) or sorted(pack.size)
+        if any(r not in pack.size for r in wanted):
+            raise ValueError("not a function of the pack")
+    except (OSError, ValueError, KeyError, cl.ToolchainUnavailable) as e:
+        print(f"cannot use the input: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    verifier = Verifier(Path(args.worktree), pack.build_id, pack.image.pe.blob, recipe)
+    program = pack.program()
+    rows = []
+    broken = 0
+    for rva in wanted:
+        row: dict = {"rva": f"0x{rva:x}", "size": pack.size[rva]}
+        rows.append(row)
+        try:
+            r, shop = pk.reconstruct(pack, program, rva, tool, rec["flags"], verifier, Path(args.work))
+        except Exception as e:  # noqa: BLE001 - a defect of the engine, which must not lose the other functions
+            broken += 1
+            row.update(state="NONE", reason="ENGINE_ERROR", detail=type(e).__name__)
+            continue
+        row.update(state=r.state, reason=r.reason, counters=r.counters, refused=r.refused, disagreed=r.disagreed, errors=r.errors, nearest=r.nearest,
+                   evidence=[list(e) for e in r.evidence])
+        if r.candidate is not None:
+            c = r.candidate
+            name = f"{c.unit.name}.cpp"
+            (out / name).write_bytes(c.unit.text.encode("ascii"))
+            row.update(source=name, tree=c.digest, changes=list(c.choice.changes()), assumptions=list(c.assumptions), function_assumptions=list(c.function_assumptions),
+                       rules=sorted(set(c.history)),
+                       execution={"runs": c.verdict.runs, "complete": c.verdict.complete, "signed_wraps": c.verdict.signed_wraps})
+    states = Counter(r["state"] for r in rows)
+    report = {"engine": ENGINE_VERSION, "build_id": pack.build_id, "functions": rows, "states": dict(sorted(states.items()))}
+    report["digest"] = digest(report)
+    (out / "result.json").write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8", newline="\n")
+    print(json.dumps({"states": report["states"], "functions": len(rows), "engine_errors": broken, "digest": report["digest"]}, sort_keys=True))
+    return 3 if broken else 0 if states == Counter({BYTE_MATCHED: len(rows)}) else 1

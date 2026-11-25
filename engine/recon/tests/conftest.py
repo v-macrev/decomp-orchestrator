@@ -31,6 +31,26 @@ def real_image(upstream_worktree):
 
 
 @pytest.fixture(scope="session")
+def toolchain(upstream_worktree):
+    """(compiler, recipe) the recipe pins; nothing else will do."""
+    from types import SimpleNamespace
+
+    from recon.adapters.x64_msvc import cl
+
+    path = upstream_worktree / "reconstruction/recipes/msvc-19.16.27054-o2.json"
+    if not path.is_file():
+        pytest.skip("the worktree has no recipe")
+    recipe = path.read_bytes()
+    rec = json.loads(recipe)
+    toolset = os.environ.get("RECON_MSVC")
+    try:
+        tool = cl.discover(None if toolset else CHECKOUT, rec["compiler"]["binary_sha256"], toolset)
+    except (OSError, cl.ToolchainUnavailable) as e:
+        pytest.skip(f"needs the pinned compiler (set RECON_MSVC or RECON_CHECKOUT): {e}")
+    return SimpleNamespace(tool=tool, recipe=recipe, path=path, flags=rec["flags"], location=["--toolset", toolset] if toolset else ["--checkout", str(CHECKOUT)])
+
+
+@pytest.fixture(scope="session")
 def iced():
     return pytest.importorskip("iced_x86", reason="needs the private venv (engine/recon/scripts/setup-venv.sh)")
 

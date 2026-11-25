@@ -105,10 +105,19 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--instances", type=int, default=24)
     v.add_argument("--states", type=int, default=16)
     v.add_argument("--write", action="store_true")
+    r = sub.add_parser("reconstruct", help="reconstruct functions of a synthetic pack: source, states and counts under --out")
+    r.add_argument("--pack", required=True, help="pack.json beside its image")
+    r.add_argument("--worktree", required=True, help="upstream worktree at the pinned base: the comparator")
+    r.add_argument("--recipe", required=True, help="the recipe file, which pins the compiler and its flags")
+    r.add_argument("--checkout", help="the checkout whose toolchain to use")
+    r.add_argument("--toolset", help="the toolset directory, when it is elsewhere")
+    r.add_argument("--work", required=True, help="scratch directory of the compiler")
+    r.add_argument("--out", required=True)
+    r.add_argument("--function", action="append", default=[], help="RVA; every function of the pack when not given")
     args = ap.parse_args(argv)
     if args.cmd == "serve":
         return serve(sys.stdin, sys.stdout, sys.stderr)
-    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare", "validate-lift", "coverage"):
+    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare", "validate-lift", "coverage", "reconstruct"):
         from recon.cli import commands
 
         return getattr(commands, "cmd_" + args.cmd.replace("-", "_"))(args)

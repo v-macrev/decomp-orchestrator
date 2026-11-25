@@ -204,3 +204,25 @@ it up); the function carries the state table. A call in a state that has a clean
 taken for dead. The cleanup funclets themselves are named by address and not analysed. Refused with a reason: try blocks (a
 catch comes back into the function), asynchronous exceptions, exception specifications, other handlers. The prologue's store of -2 into the
 runtime's own slot is an observation; its place is computed from the unwind codes and the table, and any other use of the slot is refused.
+
+## D-029 · 2026-11-25 · What is open stays open, and the compiler decides
+A function's code leaves points of its source open: which side of a comparison is written first, whether a value is read again, how a loop is written,
+signs. Inference takes the best-supported reading of each (the canonical form) and the rest become candidates, by number of changes, in a fixed order.
+No choice looks at the target's bytes; the compiler and the comparator alone tell candidates apart. Alternatives are general (they apply to any function) and few.
+
+## D-030 · 2026-11-25 · A candidate is run before it is compiled
+The tree is executed with C++'s meaning (`structuring/evaluate.py`, which shares nothing with how the tree was made) against the normal form, comparing calls, memory
+and result. Undefined behaviour rejects it. Signed overflow wraps, is counted, and is a stated assumption of the source. A difference means there is no candidate,
+whatever its bytes would be.
+
+## D-031 · 2026-11-25 · Namespaces in one file, then the exact unit
+200 candidates compile in 0.9 s as namespaces of one file, and in 9.5 s as 200 files in one process. A namespace changes only decorated names, which a test checks on
+every source written. Only the exact unit is verified, so the batch form cannot decide anything.
+
+## D-032 · 2026-11-25 · Native and Wine are one host
+Windows' own execution of the pinned compiler and the checkout's Wine wrappers gave identical code, relocations and unwind data on the synthetic corpus. Debug sections
+differ (paths). Development may use either; the same tests run on both.
+
+## D-033 · 2026-11-25 · Held-out functions
+`heldout.cpp` is written before the engine sees it. Its first score is reported as it is; a correction it leads to makes the next score an ordinary one, and a new
+set is written when a held-out number is wanted again.

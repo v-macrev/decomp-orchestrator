@@ -185,6 +185,56 @@ by name). Each rewrite rule passes its SMT check; the other passes do on small l
 * Whole-function SMT is for loop-free code. Loops rest on the proved rules, the validator and execution.
 * Which memory is volatile cannot be known from the code. One processor was tested.
 
+## Phase 5: first end-to-end reconstruction — status 2026-11-25
+
+**The vertical slice works on synthetic functions.** An image goes in, verified C++ comes out, and no source was written by hand.
+No function of the real target has been reconstructed or tried in this phase.
+
+| Deliverable | State |
+|---|---|
+| Type inference | Done, basic (`core/inference/`): parameters and results from the function's own code and its callees' (with a fixpoint for functions that call themselves or each other), classes from accesses, signs, pointers. What nothing decides is an *open* point, and no default rests on signed overflow |
+| Candidate generation | Done (`core/structuring/`, `core/synthesis/`): a canonical form, then single changes, then combinations (at most 160 tried, 48 kept). Each is **run against the normal form** in 96 made-up worlds before it counts; equal trees and equal code count once |
+| C++ emission | Done (`core/emitter/`): typed members, declared callees, neutral names. No casts of pointers, no comments, no `goto` in anything matched so far |
+| Compiler integration | Done (`x64_msvc/{cl,batch,coff}.py`): a namespace per candidate in one process; a candidate that does not compile is found by its error lines (or by halving) and loses nothing else. The compiler must be the one the recipe pins, by digest |
+| Independent verification | Done (`skyrim/verify.py`): upstream's `compare_runtime` on the exact unit. Its reason codes are read from its source (**R-6, done**); an unknown one is an engine error |
+| `recon reconstruct` | Done: a synthetic pack in, sources and `result.json` out. It refuses the pinned real image |
+
+**Measured** (compiler 19.16.27054, the recipe's own flags):
+
+| What | Result |
+|---|---|
+| Development functions (`targets.cpp`): the rules were written looking at these | **18 of 18** `BYTE_MATCHED`; 11 in the canonical form. The 4 functions they call: 3 of 4 |
+| Held-out functions (`heldout.cpp`): written before the engine saw them, **first run** | **9 of 16** matched; 1 compiled but differs; 1 did not compile; 4 refused; **1 crashed the engine** |
+| The same after correcting the two defects that run showed (endless type of a pointer to itself; a function's own parameters were not those it calls itself with) | 11 of 16. This second number is no longer a held-out one |
+| The gate's functions: `Total` (loop, branch, members, a call), `Withdraw` (short circuit, members, a call) | both verified, by the engine and again by the harness |
+| Cost | 1.5 to 6 s per function; 46 s for the 22 |
+
+What the harness does, for each of the 29 matches it checks: it takes only the source text, compiles it from scratch, makes its own symbol map (RVAs from the
+names, constants from the linker's map) and asks upstream's comparator. The engine runs as a process whose audit hook forbids the fixtures, the build
+directory and sockets; a test shows that the hook works.
+
+**It can fail**: 9 wrong sources, a call to another function, and 3 wrong extents of a function do not pass. 14 deliberate defects in the Phase 5 code: 12
+caught at once, the other 2 have a test now and are caught. The same input gives the same bytes under different hash seeds. **Native and Wine**: on the
+synthetic corpus (fixtures and every source written) the code, relocations and unwind data of 76 functions are identical, and so are all results.
+
+**Random functions**: 1,100 generated programs (most read registers nobody set, and are refused): 173 gave 371 candidates, 0 crashes, 0
+disagreements; 1 rejected because none of its runs ended. Tests found three text defects, now corrected and tested: negative 64-bit literals written
+as unsigned, the largest float, and a shift whose left literal had the wrong type.
+
+**Tests**: 449 engine tests pass on Windows and on Linux (through Wine), none skipped. `lift_coverage.json` is untouched. The server was not changed.
+
+**Gate: met.** Two nontrivial synthetic functions are reconstructed automatically and verified independently.
+
+**Limits**
+
+* Held-out failures name what is missing: an address carried through a loop (`ADDRESS_VALUE`, `CONVERSION`), variable division (`OPERATION_CAT`), vectorised loops
+  (`VECTOR_VALUE`), and values kept after a store (no match). Also not there: locals in memory, class results, vector parameters, indirect and virtual calls,
+  switches, catch blocks, strings.
+* The execution check is evidence, not proof: 96 worlds, memory that is mostly made up. `SEMANTICALLY_VALID` means no more than that.
+* A signature comes from the code alone: an unused trailing parameter cannot be seen. Headers, RTTI and upstream's declarations are not used yet.
+* The corpus is 34 small functions by one author, in the same C++ dialect.
+* A constant the object holds itself is bound where the target's own field leads, when the bytes there are equal. The harness checks that with the linker's map.
+
 ## Items found by the audit that block or shape later phases
 
 | Id | Item | Needed by |
@@ -195,14 +245,13 @@ by name). Each rewrite rule passes its SMT check; the other passes do on small l
 | R-4 | Provenance wording for engine output (D-006), a decision for the user | Phase 6 |
 | R-5 | ~~Hashed, locked venv~~ done, `z3` included (D-021) | - |
 | R-7 | The server runs the engine with the **venv's** Python for any command that decodes (`process.ts` defaults to `python3`); a config value for it | Phase 6 |
-| R-6 | Comparator reason-code list read from source into a mapping test | Phase 5 |
+| R-6 | ~~Comparator reason-code list read from source into a mapping test~~ done in Phase 5 | - |
 
 ## Next increments, in order
 
 1. ~~Phase 2, binary analysis~~ (done above).
 2. ~~Phase 3, integer lifting and analysis~~ (done above). ~~Phase 4, the IR~~ (done above).
-3. **Phase 5**, the vertical slice on a synthetic function (branches, member access, a call), which
-   builds on the measured local compare.
+3. ~~Phase 5, the vertical slice on synthetic functions~~ (done above).
 4. **Phase 6**, the deterministic tier in the orchestrator, ending at one unreconstructed target function
    that reaches packet `passed` through the unchanged Gate Keeper. Then stop: the user submits.
 
