@@ -181,6 +181,24 @@ describe('GateKeeper pipeline', () => {
     expect(r.verdict.findings.filter((x) => x.stage === 'preflight').map((x) => x.code)).toEqual(['PREFLIGHT_PROBLEM']);
   });
 
+  it('blocks a matching candidate whose names clash with an accepted function of the unit', async () => {
+    const t = task();
+    const clash = { symbol: '??_7A@@6B@', rva: t.functions[0]!.rva, address: '0x20', acceptedRva: '0x99', acceptedAddress: '0x30' };
+    class Clashing extends SimRepo {
+      override async compare(...a: Parameters<SimRepo['compare']>) {
+        return { ...(await super.compare(...a)), allPass: false, clashes: [clash] };
+      }
+    }
+    const repo = new Clashing({ slots: 1 });
+    const r = await run(repo, t, [{ path: t.unit, content: unit(repo, t) }], GateChecks.parse({ leak: false }));
+    expect(r.verdict.decision).toBe('reject');
+    expect(r.infra).toBe(false);
+    const f = r.verdict.findings.find((x) => x.code === 'UNIT_SYMBOL_CLASH');
+    expect(f?.message.startsWith(clash.rva)).toBe(true);
+    for (const part of ['??_7A@@6B@', '0x20', '0x99', '0x30']) expect(f?.message).toContain(part);
+    expect(r.verdict.compare?.every((x) => x.result === 'pass')).toBe(true);
+  });
+
   it('never calls a line inside the packet\'s own function pre-existing', () => {
     const src = 'int Foo::Bar()\n{\n    return 1;\n}\nint Foo::Baz()\n{\n    return 2;\n}\n';
     expect(lineInFile(src, 3)).toBe('    return 1;');

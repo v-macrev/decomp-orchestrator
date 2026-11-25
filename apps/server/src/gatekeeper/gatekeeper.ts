@@ -18,6 +18,7 @@
 import type { CompareFunctionResult, Finding, FunctionTarget, GateChecks, Verdict } from '@decomp/core';
 import type { TaskRow } from '../db/store.js';
 import type { PreparedTask, RepoAdapter } from '../repo/types.js';
+import { describeClash } from '../repo/symbolClash.js';
 import { Semaphore, newId } from '../util/async.js';
 import { extractFunctions, lex } from './cpp.js';
 import { STRIKE_CODES, cheatScan, leakScan } from './rules.js';
@@ -180,12 +181,16 @@ export class GateKeeper {
             message: errs.length ? `candidate failed to compile:\n${errs.map((e) => `  ${e}`).join('\n')}${hint}` : 'candidate failed to compile (the compiler gave no error lines)',
           }];
         }
-        return r.functions
+        const clashes = (r.clashes ?? []).map((c) => ({
+          stage: 'compare', code: 'UNIT_SYMBOL_CLASH', severity: 'block' as const,
+          message: `${describeClash(c)}. Each matches alone, but the project compares the whole unit with one address per name, so ${c.acceptedRva} would stop matching. Change the declarations so the two reference different names (the class of one of them is likely wrong: e.g. the accepted function stores a base class's vftable), without changing the accepted function's code`,
+        }));
+        return [...clashes, ...r.functions
           .filter((fn) => fn.result !== 'pass')
           .map((fn) => ({
             stage: 'compare', code: `COMPARE_${(fn.reason ?? 'MISMATCH').toUpperCase().replace(/[^A-Z0-9]+/g, '_')}`, severity: 'block' as const,
             message: `${fn.rva} ${fn.name ?? ''}: ${fn.result} ${fn.reason ?? ''}${fn.firstMismatch ? ` first mismatch at ${fn.firstMismatch}` : ''}; ${fn.exactBytes ?? '?'}/${fn.targetSize ?? fn.totalBytes ?? '?'} bytes exact${fn.alignedBytes != null ? `, ${fn.alignedBytes} bytes align${fn.alignedRegions != null ? ` in ${fn.alignedRegions} region(s)` : ''}` : ''}${fn.detail ? ` (${fn.detail})` : ''}${fn.hint ? `. Hint: ${fn.hint}` : ''}${fn.reason === 'function-symbol-missing' ? `. ${symbolMissingNote(fn.name, accepted)}` : ''}${fn.unbound?.length ? `. Still unbound (no target address could be paired with them): ${fn.unbound.join(', ')}; reference the same data or callee the target does at that instruction (see <compare_listing>)` : ''}`,
-          }));
+          }))];
       } finally {
         release();
       }

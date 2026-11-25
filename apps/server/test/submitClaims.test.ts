@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import type { TaskRow } from '../src/db/store.js';
+import { SYMBOL_CLASH_PY, symbolClashesOf } from '../src/repo/symbolClash.js';
 import { CLAIM_COLLISIONS_PY, FRESH_COMPARES_PY, SrRepo, claimCollisionResult, submitClaimsCheck } from '../src/repo/srRepo.js';
 import type { RunResult } from '../src/util/proc.js';
 
@@ -139,7 +140,8 @@ describe('fast re-verification', () => {
       vi.spyOn(repo, 'writeFiles').mockResolvedValue([]);
       const compare = vi.spyOn(repo, 'compare').mockResolvedValue({ completed: true, allPass: true, compileError: false, functions: [], infraError: null, durationMs: 1 });
       let fresh = '{}';
-      vi.spyOn(repo.host, 'run').mockImplementation(async (cmd, args) => (cmd === 'git' ? run('') : args[1] === FRESH_COMPARES_PY ? run(fresh) : run('{}')));
+      let clash = '{}';
+      vi.spyOn(repo.host, 'run').mockImplementation(async (cmd, args) => (cmd === 'git' ? run('') : args[1] === FRESH_COMPARES_PY ? run(fresh) : args[1] === SYMBOL_CLASH_PY ? run(clash) : run('{}')));
       // Two packets of one unit share its sr task; a dead packet's 0x3 is not the batch's.
       const tasks = [['p1', '0x1'], ['p2', '0x2']].map(([id, rva]) => ({ id: id!, srTaskId: 'unit-a', functions: [{ rva: rva!, name: null }] as TaskRow['functions'], task: { functions: [] } as unknown as TaskRow }));
       const r1 = await repo.stageBatch({ runId: 'r', seq: 1, files: [], tasks, message: 'm' });
@@ -153,6 +155,20 @@ describe('fast re-verification', () => {
       const r2 = await repo.stageBatch({ runId: 'r', seq: 2, files: [], tasks, message: 'm' });
       expect(r2).toMatchObject({ verified: true, compared: 0, reused: 1 });
       expect(compare).toHaveBeenCalledTimes(1);
+      // Nothing to recompile, yet a name of it clashes with an accepted function of the unit.
+      const notices: string[] = [];
+      repo.notice = (kind) => void notices.push(kind);
+      clash = JSON.stringify({ 'unit-a': { accepted: 1, clashes: [{ symbol: '??_7A@@6B@', rva: '0x1', address: '0x20', acceptedRva: '0x9', acceptedAddress: '0x30' }] } });
+      const r3 = await repo.stageBatch({ runId: 'r', seq: 3, files: [], tasks, message: 'm' });
+      expect(r3.verified).toBe(false);
+      expect(JSON.stringify(r3)).toContain('0x1 needs ??_7A@@6B@ at 0x20, and 0x9');
+      expect(notices).toEqual([]);
+      // A check that cannot run says so and blocks nothing.
+      clash = JSON.stringify({ 'unit-a': { error: 'ImportError: bind' } });
+      expect(await repo.stageBatch({ runId: 'r', seq: 4, files: [], tasks, message: 'm' })).toMatchObject({ verified: true });
+      expect(notices).toEqual(['repo.clash_unchecked']);
+      expect(symbolClashesOf({ clashes: [{ symbol: 'x' }] })).toEqual({ clashes: [], error: null });
+      expect(symbolClashesOf(undefined).error).toBe('no result');
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

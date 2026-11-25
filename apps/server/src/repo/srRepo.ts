@@ -29,6 +29,7 @@ import type { Backlog, BaseDrift, ClaimCollision, ClaimCollisionCheck, CompareOu
 import { batchPrText, withClaimLine, type CompareSummary } from './batchPr.js';
 import { autoBindHints, bindHintsPath, unboundNames, type AlignPair, type PackInstruction, type PackReference } from './binding.js';
 import { withRootIncludeRecipe } from './rootIncludes.js';
+import { SYMBOL_CLASH_PY, describeClash, symbolClashesOf, type SymbolClash } from './symbolClash.js';
 
 interface ProgressInventory {
   target_build_id?: string;
@@ -610,7 +611,25 @@ export class SrRepo implements RepoAdapter {
     });
     const expected = new Set(task.functions.map((f) => f.rva));
     const allPass = run.code === 0 && functions.length > 0 && functions.every((f) => f.result === 'pass') && [...expected].every((r) => functions.some((f) => f.rva === r));
-    return { ...base, completed: true, allPass, compileError: false, functions, infraError: null, ...(Object.keys(bound).length ? { bound } : {}) };
+    const matched = [...expected].every((r) => functions.some((f) => f.rva === r && f.result === 'pass'));
+    const clashes = matched && prep.srTaskId ? ((await this.symbolClashes(slot, [prep.srTaskId], opts.signal)).get(prep.srTaskId) ?? []) : [];
+    return { ...base, completed: true, allPass: allPass && !clashes.length, compileError: false, functions, infraError: null, ...(Object.keys(bound).length ? { bound } : {}), ...(clashes.length ? { clashes } : {}) };
+  }
+
+  /** Clashes of each sr task's last compare with its unit's accepted functions; a check that cannot run blocks nothing. */
+  private async symbolClashes(slot: number, srTaskIds: string[], signal?: AbortSignal): Promise<Map<string, SymbolClash[]>> {
+    const out = new Map<string, SymbolClash[]>();
+    if (!srTaskIds.length) return out;
+    const arg = { tasksDir: this.p.join(this.cfg.localDir, 'contrib', 'tasks'), tasks: srTaskIds };
+    const env = { SR_LOCAL_DIR: this.cfg.localDir, SR_CONTRIB_OFFLINE: '1', SR_NO_SIBLING_NAMES: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8', PYTHONDONTWRITEBYTECODE: '1' };
+    const run = await this.host.run(this.cfg.python, ['-c', SYMBOL_CLASH_PY, JSON.stringify(arg)], { cwd: this.wt(slot), env, signal, timeoutMs: 180_000, maxOutputBytes: 4 * 1024 * 1024 });
+    const json = parseJsonOutput(run.stdout) as Record<string, unknown> | null;
+    for (const id of srTaskIds) {
+      const r = symbolClashesOf(json?.[id]);
+      if (r.clashes.length) out.set(id, r.clashes);
+      if (r.error && !signal?.aborted) this.notice?.('repo.clash_unchecked', `${id}: not checked against the unit's accepted functions (${json ? r.error : (run.stderr || `exit ${run.code}`).trim().slice(-200)})`);
+    }
+    return out;
   }
 
   /** A path the compare output printed (inside the docker sandbox SR_LOCAL_DIR is /local). */
@@ -902,6 +921,11 @@ export class SrRepo implements RepoAdapter {
     opts.progress?.(`checking which packets' last compare still proves this tree (${groups.size} sr task(s))`, 0, groups.size);
     const fresh = await this.freshCompares(slot, groups, opts.stagedAt, opts.signal);
     for (const id of fresh) this.markVerified(id);
+    const clashed = (ts: SubmitBatchInput['tasks'], clashes: SymbolClash[]) => {
+      problems.push(`${ts.map((t) => t.id).join(',')}: ${clashes.map(describeClash).join('; ')}`);
+      failedTaskIds.push(...ts.map((t) => t.id));
+    };
+    for (const [id, clashes] of await this.symbolClashes(slot, [...fresh], opts.signal)) clashed(groups.get(id)!, clashes);
     let done = fresh.size;
     let compared = 0;
     const queue = [...groups].filter(([id]) => !fresh.has(id));
@@ -939,6 +963,10 @@ export class SrRepo implements RepoAdapter {
         say();
         if (r.allPass) {
           this.markVerified(id);
+          continue;
+        }
+        if (r.clashes?.length) {
+          clashed(ts, r.clashes);
           continue;
         }
         const mismatched = r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ');

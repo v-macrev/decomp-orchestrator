@@ -3,6 +3,7 @@
 // tooling in git worktrees; `SimRepo` is an in-memory stand-in for simulation and tests.
 import type { CompareFunctionResult, Finding, FunctionFeatures, FunctionTarget, SelectionSpec } from '@decomp/core';
 import type { TaskRow } from '../db/store.js';
+import type { SymbolClash } from './symbolClash.js';
 
 export interface DiscoveredFunction extends FunctionTarget {
   unit: string; // reconstruction/<area>/<Class>.cpp
@@ -59,6 +60,8 @@ export interface CompareOutcome {
   durationMs: number;
   /** Bind hints written before the final compare (name -> pack-listed target address). */
   bound?: Record<string, string>;
+  /** Names these matched functions and accepted functions of the unit need at different addresses (see symbolClash.ts). */
+  clashes?: SymbolClash[];
 }
 
 export interface PreflightOutcome {
