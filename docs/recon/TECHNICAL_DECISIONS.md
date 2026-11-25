@@ -112,3 +112,18 @@ as `other-data` so it is visible rather than silent.
 ## D-014 · 2026-11-25 · Aggregates only leave the engine
 Commands print counts; rows go only under a directory that has a `.local` component; the survey's mnemonic
 demand is private. Public documents carry totals and categories, never instruction names or per-function data.
+
+## D-015 · 2026-11-25 · Correction of D-003: the Windows host has Python; WSL stays the engine's host
+**Evidence.** `py -0p` lists 3.13 and 3.10; D-003 rested on a probe of `python` alone. **Decision.** The engine still
+runs in WSL in production, because the checkout, the toolchain wrapper and upstream's tools are there. It is also
+tested on Windows (same lock, second hash per package): the engine is plain Python, the image-only commands need only
+the pinned executable, and development does not depend on WSL being up. Whether compile batches run natively or
+through Wine is **still open** and is measured in Phase 5, as section 16.1 asks.
+
+## D-016 · 2026-11-25 · Correction of D-013: an ambiguous data reference blocks
+The first rule accepted any clean instruction boundary as a table start and, when it was none, silently read the
+range as code; a table after a decode error was "assumed data". Both chose between conflicting evidence, which
+section 8 forbids. Now the code before a table must end in a terminator and must not branch into it; otherwise
+the function is blocked (`ambiguous-data-reference`). An undecodable tail is an error, a branch into an instruction
+blocks, unidentified trailing data blocks, and an inventory that contradicts itself is refused. On the real image
+none of these occurs (62,247 of 62,247 still decode).

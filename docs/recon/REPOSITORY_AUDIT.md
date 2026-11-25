@@ -12,7 +12,8 @@ Overview: [PHASE5.md](../PHASE5.md).
 | game image | `builds/target.json`: build `sse-steam-1-7-104`, sha256 `846efccf…1402f` | `recon doctor` hashed the configured image and it **equals** the pin |
 
 Paths below are relative to the repository named in the heading. Upstream line numbers are at the pinned
-revision and move with the base; `recon audit` (Phase 2) re-checks them.
+revision and move with the base. A `recon audit` command that re-checks them **does not exist yet**
+(Phase 6); until then a base move means re-reading.
 
 ## Method and limits of this audit
 
@@ -32,6 +33,13 @@ Nothing game-derived was read: no pack, listing, byte run or decompiler output w
 ## Findings
 
 ### The comparator is a pure function we can call
+
+> **Corrected 2026-11-25.** The first version of this section named `tools/compare.py` 0.6.0 as the engine that
+> decides. It is not: `sr compare` runs **`tools/compare_runtime.py` (0.6.1-runtime)** on both of its paths
+> (`tools/contrib.py:2499-2531` `compare_with_local_dir`, used because this tool sets `SR_LOCAL_DIR`; and
+> `tools/verifier/verify_function.py` `run`, which starts `compare_runtime.py`). It also said the build record comes from
+> `unit_build.py`; on the `sr compare` path it is written by `contrib.compile_unit` (`tools/contrib.py:730-813`),
+> which uses `unit_build`'s checks. The engine now calls these (`adapters/skyrim/comparator.py`).
 
 `tools/compare.py:855` `compare(task, manifest, recipe_bytes, build_record, object_bytes, image_bytes,
 symbol_map, diagnostics=None, private_root=ROOT/'.local')` returns a sanitized report and never raises for
@@ -102,7 +110,9 @@ under `.local/orchestrator/recon/` and read by software.
 |---|---|---|
 | Checkout host | WSL distro `Ubuntu`, 4 CPUs, 7896 MB memory | `recon doctor` |
 | Python in WSL | 3.14.4; `pytest` present; `iced_x86`, `z3`, `capstone`, `hypothesis` absent; `pip` absent, `venv` present | probe |
-| Python on the Windows host | **absent** (`python` resolves to the Store stub) | probe. The prompt assumed 3.13; it is wrong on this machine. The engine therefore runs in WSL only (D-003). |
+| Python on the Windows host | 3.13 and 3.10, through the `py` launcher. **Corrected 2026-11-25**: the first probe tried only `python` (a Store stub) and wrongly reported "absent" | `py -0p` |
+| Memory of the host | 15.9 GB, with a fixed commit limit; WSL was stopped twice by Windows under memory pressure during measurement (event 2004). Engine jobs must stay small (D-010) | event log |
+| Pinned image on the Windows host | present in a Steam library, sha256 equals the pin, so the image-only commands also run there | hash |
 | Wine | `wine-10.0` | `recon doctor` |
 | `llvm-objdump` | present in WSL | probe |
 | MSVC toolchain directory | present (path in the private contrib config) | `recon doctor` |
@@ -171,7 +181,7 @@ before and after (`:139`, `:202`). A body trivial for a target of 24 bytes or mo
 
 | # | Prompt says | Found | Effect |
 |---|---|---|---|
-| 1 | The Windows host has Python 3.13 and a native `cl` | No Python on the Windows host | Engine in WSL only (D-003) |
+| 1 | The Windows host has Python 3.13 and a native `cl` | Python 3.13 **is** there (first audit was wrong); a native run of the *pinned* compiler is not measured | D-015 |
 | 2 | `Host.run` offers live progress and clean cancellation for the engine | Stdout is returned at exit; with stdin the WSL cancel handshake is off | R-1 in the roadmap |
 | 3 | Counts of section 4.4 | `data/progress.json`: 42,221 functions, 41,235 matched, 986 mapped: **equal** | none |
 | 4 | Slot worktrees stand on the base | They stand on `dc1b52fddc`; `origin/main` is `39e7cb38b1` | The input digest names the unit content and the upstream files actually imported, not the ref |
@@ -182,11 +192,15 @@ Answers to section 4.3, point 1 (discovery and identity) and parts of 2, 15, 17.
 
 * **Offered targets** are `data/target-hashes/contributor-targets-part-NNN.json` (22 parts, `functions[]` of
   `{rva, size, extent_source, window}`): **64,010 distinct functions**. The index `contributor-targets.json` states
-  `next_candidate_count 64197`, 187 more than the parts hold; the difference is **not explained** (it may count
-  claimed functions or duplicates) and the engine uses the parts.
+  `next_candidate_count 64197`, 187 more than the parts hold. **Explained 2026-11-25** from
+  `tools/target_hash_offers.py:276-303`: the count is `len(next_)`, which includes startable functions that already have
+  a progress entry, while the rows are `(wanted | next_) - known`. 63,771 rows carry the window flag and 239 (claimed or
+  on demand) do not, so 426 recorded candidates are counted and not listed: 63,771 + 426 = 64,197 and
+  63,771 + 239 = 64,010. The parts are the right list.
 * **Progress entries**: `data/progress.json` holds 42,221 functions (41,235 matched, 986 mapped; fields `rva, size,
   status, name, name_origin, name_source, owner, evidence, report`). **None of the 62,247 unmatched offered
-  targets has an entry**, and none of the 986 `mapped` entries is an offered target. A target without an entry
+  targets has an entry**; that is by construction (the list is `... - known`), not a finding. The 986 `mapped` entries are
+  therefore unmatched work outside the offered list; the inventory now carries them as a population of their own. A target without an entry
   has no recorded name, owner or status; its unit and class come from `sr next` and the facts files, which
   Phase 6 reads.
 * **Boundaries**: the inventory range equals the contiguous `.pdata` coverage for all 55,265 unmatched functions

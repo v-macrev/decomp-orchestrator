@@ -4,6 +4,7 @@ writes it under a private `.local` directory and refuses any other place (specif
 """
 from __future__ import annotations
 
+import bisect
 import json
 import sys
 import time
@@ -42,6 +43,7 @@ def cmd_inventory(args) -> int:
         "build_id": inv.build_id, "targets": len(inv.targets), "selected": len(ts), "selected_bytes": sum(t.size for t in ts),
         "selected_with_progress_entry": with_entry, "selected_without_progress_entry": len(ts) - with_entry,
         "progress_entries": inv.progress_entries, "progress_matched": inv.progress_matched,
+        "recorded_unmatched_not_offered": len(inv.recorded_unmatched),
         "by_size_bucket": dict(sorted(buckets.items(), key=lambda kv: (len(kv[0]), kv[0]))),
     }, indent=2, sort_keys=True))
     return 0
@@ -87,9 +89,16 @@ def cmd_rtti(args) -> int:
     t0 = time.monotonic()
     vts = rtti.find_vtables(img.segments, img.image_base)
     named = sum(1 for v in vts if rtti.type_name(img.read_cstr, v.type_descriptor))
-    starts = {b for b, _e, _u in img.runtime_functions()} | {t.rva for t in load_inventory(args.worktree).targets}
+    inv = load_inventory(args.worktree)
+    starts = {b for b, _e, _u in img.runtime_functions()} | inv.known_starts
     slots = [s for v in vts for s in v.slots]
+    unknown = sorted(set(slots) - starts)
+    # an unknown slot target inside a known function would mean the scan ran past a vtable's end (or a wrong boundary)
+    extents = sorted([(b, e) for b, e, _u in img.runtime_functions()] + [(t.rva, t.rva + t.size) for t in inv.targets + inv.recorded_unmatched])
+    begins = [b for b, _e in extents]
+    inside = sum(1 for s in unknown if (k := bisect.bisect_right(begins, s) - 1) >= 0 and extents[k][0] < s < extents[k][1])
     print(json.dumps({"vtables": len(vts), "with_class_name": named, "slots": len(slots), "slots_at_known_function_start": sum(1 for s in slots if s in starts), "distinct_slot_targets": len(set(slots)),
+                      "distinct_targets_at_known_function_start": len(set(slots) & starts), "distinct_targets_unknown": len(unknown), "unknown_inside_a_known_function": inside,
                       "secondary_base_vtables": sum(1 for v in vts if v.offset), "seconds": round(time.monotonic() - t0, 1)}, indent=2, sort_keys=True))
     return 0
 
@@ -108,3 +117,13 @@ def cmd_analyze(args) -> int:
     d["mnemonics"] = len(f.mnemonics)  # counts only: the distinct forms, not their names
     print(json.dumps(d, indent=2, sort_keys=True))
     return 0
+
+
+def cmd_measure_compare(args) -> int:
+    from recon.adapters.skyrim import measure as ms
+
+    base = _private_dir(args.out)
+    res = ms.measure(args.worktree, args.checkout, locate_image(args.checkout), base, args.units)
+    print(json.dumps(res, indent=2, sort_keys=True))
+    ok = res["functions"] > 0 and res["equal"] == res["functions"] and res["cross_equal"] == res["cross_pairs"]
+    return 0 if ok else 1

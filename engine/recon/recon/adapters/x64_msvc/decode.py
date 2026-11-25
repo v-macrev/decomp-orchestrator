@@ -7,7 +7,7 @@ function stops, and the stop is counted).
 """
 from __future__ import annotations
 
-from recon.core.model import DecodeResult, Flow, FunctionDecode, Insn
+from recon.core.model import TERMINATORS, DecodeResult, Flow, FunctionDecode, Insn
 
 
 class DecoderUnavailable(RuntimeError):
@@ -17,6 +17,18 @@ class DecoderUnavailable(RuntimeError):
 _MNEMONIC_NAMES: dict[int, str] | None = None
 # A base-register displacement below this cannot be an image-relative address of code in any function of a real image.
 MIN_IMAGE_DISP = 0x1000
+# Alignment padding between the last instruction and a table.
+PADDING = frozenset({"NOP"})
+
+
+def misdirected_branches(insns) -> int:
+    """How many direct branches land inside the decoded range but not on an instruction start: the linear sweep and
+    the code's own control flow then disagree about where instructions begin, which is conflicting evidence."""
+    starts = {i.rva for i in insns}
+    if not insns:
+        return 0
+    lo, hi = insns[0].rva, insns[-1].end
+    return sum(1 for i in insns if i.flow in (Flow.JUMP, Flow.BRANCH, Flow.CALL) and i.target is not None and lo <= i.target < hi and i.target not in starts)
 
 
 def _iced():
@@ -85,7 +97,9 @@ def decode_function(code: bytes, rva: int, image_base: int) -> FunctionDecode:
     MSVC places switch tables after a function's code, inside its range. A linear sweep reads them as
     instructions, so the data start is taken from the code itself: the lowest address after an instruction that a
     RIP-relative operand or an image-relative displacement points at inside the range. The code before it must then
-    decode cleanly to exactly that address; the rest is table data. A range with no such reference is all code.
+    decode cleanly to exactly that address, must not fall through into it and must not branch into it; the rest is
+    table data. A range with no such reference is all code. A reference that fails those checks is conflicting
+    evidence: the error is `ambiguous-data-reference` and the caller blocks the function (it is never read as all code).
     """
     end = rva + len(code)
     first = decode_range(code, rva, image_base)
@@ -99,9 +113,11 @@ def decode_function(code: bytes, rva: int, image_base: int) -> FunctionDecode:
     if cut is None:
         return FunctionDecode(first.insns, None, end, first.stop, first.error)
     head = decode_range(code[: cut - rva], rva, image_base)
-    if head.error is not None or head.stop != cut:
-        # the reference did not land on an instruction boundary of clean code: not a table start
-        return FunctionDecode(first.insns, None, end, first.stop, first.error or None)
+    last = next((i for i in reversed(head.insns) if i.mnemonic not in PADDING), None)
+    falls_in = last is None or last.flow not in TERMINATORS
+    branches_in = any(i.flow in (Flow.JUMP, Flow.BRANCH, Flow.CALL) and i.target is not None and cut <= i.target < end for i in head.insns)
+    if head.error is not None or head.stop != cut or falls_in or branches_in:
+        return FunctionDecode(first.insns, None, end, cut, "ambiguous-data-reference")
     first_entry = int.from_bytes(code[cut - rva : cut - rva + 4], "little")
     kind = "rva-table" if rva <= first_entry < end else "other-data"
     return FunctionDecode(head.insns, cut, end, cut, None, kind)

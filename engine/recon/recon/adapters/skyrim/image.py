@@ -42,17 +42,25 @@ class PinnedImage:
         except self.up.pecoff.Reject as e:
             raise ValueError(e.reason) from None
 
-    def file_offset(self, rva: int) -> int:
+    def _backed(self, rva: int):
+        """The section of `rva` and how many file-backed bytes it has; ValueError when the address is not file content."""
         try:
             sec = self.pe.section_for(rva)
         except self.up.pecoff.Reject as e:
             raise ValueError(e.reason) from None
+        backed = min(sec.raw_size, sec.vsize or sec.raw_size)
+        if rva - sec.vaddr >= backed:
+            raise ValueError("target-range-not-file-backed")
+        return sec, backed
+
+    def file_offset(self, rva: int) -> int:
+        sec, _ = self._backed(rva)
         return sec.raw_ptr + (rva - sec.vaddr)
 
     def read_cstr(self, rva: int, limit: int = 512) -> bytes:
-        sec = self.pe.section_for(rva)
+        sec, backed = self._backed(rva)
         start = sec.raw_ptr + (rva - sec.vaddr)
-        end = min(start + limit, sec.raw_ptr + sec.raw_size)
+        end = min(start + limit, sec.raw_ptr + backed)
         chunk = self.pe.blob[start:end]
         nul = chunk.find(b"\0")
         if nul < 0:

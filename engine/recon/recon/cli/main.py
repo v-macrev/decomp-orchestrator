@@ -90,13 +90,17 @@ def main(argv: list[str] | None = None) -> int:
     a = sub.add_parser("analyze", help="counts-only facts of one target")
     common(a, with_select=False)
     a.add_argument("--address", required=True)
+    m = sub.add_parser("measure-compare", help="in-process compare against sr compare on accepted units: equality and cost")
+    common(m, with_select=False)
+    m.add_argument("--out", required=True, help="private working directory under .local")
+    m.add_argument("--units", type=int, default=5)
     args = ap.parse_args(argv)
     if args.cmd == "serve":
         return serve(sys.stdin, sys.stdout, sys.stderr)
-    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze"):
+    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare"):
         from recon.cli import commands
 
-        return getattr(commands, f"cmd_{args.cmd}")(args)
+        return getattr(commands, "cmd_" + args.cmd.replace("-", "_"))(args)
     from recon.adapters.skyrim.environment import run_doctor
 
     report = run_doctor(args.worktree, args.checkout, args.data_dir)

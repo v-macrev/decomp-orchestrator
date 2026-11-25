@@ -23,11 +23,18 @@ def _upstream_sequence(img: PinnedImage, code: bytes, rva: int):
     try:
         while p < len(code):
             ins = x64.decode(code, p, rva + p, len(code))
-            out.append((rva + p, ins.length, getattr(ins, "target", None), getattr(ins, "rip_target", None)))
+            out.append((rva + p, ins.length, ins.target, ins.rip_target, ins.flow))
             p += ins.length
         return out, None
     except x64.DecodeError as e:
-        return out, f"upstream-decode-error"
+        return out, "upstream-decode-error"
+
+
+def _upstream_flow(img: PinnedImage, flow: int) -> Flow | None:
+    """Upstream's flow class as ours; None for the classes it does not tell apart (everything else, padding)."""
+    x = img.up.x64
+    return {x.CALL: Flow.CALL, x.JMP: Flow.JUMP, x.JCC: Flow.BRANCH, x.RET: Flow.RETURN, x.INT3: Flow.TRAP,
+            x.ICALL: Flow.CALL_INDIRECT, x.IJMP: Flow.JUMP_INDIRECT, x.NOP: Flow.FALL, x.OTHER: None}[flow]
 
 
 def compare_upstream(img: PinnedImage, t: Target) -> str:
@@ -41,15 +48,16 @@ def compare_upstream(img: PinnedImage, t: Target) -> str:
     for a, b in zip(ours.insns[:n], theirs[:n]):
         if (a.rva, a.length) != (b[0], b[1]):
             return "boundary-differs"
-        if a.flow in (Flow.JUMP, Flow.BRANCH, Flow.CALL) and b[2] is not None and a.target != b[2]:
+        # a reference only one of the two sees is a difference too
+        if (a.target if a.flow in (Flow.JUMP, Flow.BRANCH, Flow.CALL) else None) != b[2]:
             return "branch-target-differs"
-        if a.data_ref is not None and b[3] is not None and a.data_ref != b[3]:
+        if a.data_ref != b[3]:
             return "rip-target-differs"
-        if a.data_ref is not None and b[3] is None:
-            return "rip-target-missing-upstream"
+        if _upstream_flow(img, b[4]) is not None and _upstream_flow(img, b[4]) is not a.flow:
+            return "flow-differs"
     if ours.data_start is not None:
         # table data follows the code: a linear sweep reads it as instructions, so only the code prefix is compared
-        return AGREE if len(theirs) >= len(ours.insns) or err else "one-stops-early"
+        return AGREE if len(theirs) >= len(ours.insns) else "one-stops-early"
     if ours.error is None and err is None and len(ours.insns) != len(theirs):
         return "count-differs"
     if (ours.error is None) != (err is None):
@@ -72,6 +80,8 @@ def compare_capstone(img: PinnedImage, t: Target) -> str:
         if (a.rva, a.length) != b:
             return "boundary-differs"
     if ours.data_start is None and (ours.error is None) != bool(theirs and theirs[-1][0] + theirs[-1][1] == t.rva + t.size):
+        return "one-stops-early"
+    if ours.data_start is not None and len(theirs) < len(ours.insns):
         return "one-stops-early"
     return AGREE
 

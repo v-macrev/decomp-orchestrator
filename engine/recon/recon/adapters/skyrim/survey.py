@@ -18,11 +18,10 @@ from recon.adapters.x64_msvc import decode as x64decode
 from recon.adapters.x64_msvc import unwind as x64unwind
 from recon.adapters.skyrim.image import PinnedImage
 from recon.adapters.skyrim.inventory import Target, size_bucket
-from recon.core.model import TERMINATORS, Flow
+from recon.core.model import Flow
 
 # status of a function after analysis
-DECODED = "decoded"            # decoding ends exactly on the inventory range's end
-TAIL_DATA = "tail-data"        # decoding stops after a terminator and the rest is data (jump tables, constants)
+DECODED = "decoded"            # every byte of the range is an instruction or identified table data
 INVALID = "invalid-instruction"
 UNREADABLE = "unreadable"      # the range is not all file content (upstream's target-range-* reasons)
 BLOCKED = "blocked"            # an upstream refusal applies: no search can end in a match
@@ -40,12 +39,12 @@ class FunctionFacts:
     flows: dict[str, int] = field(default_factory=dict)
     calls_direct: int = 0
     calls_indirect: int = 0
-    jumps_out: int = 0        # direct jumps leaving the range (tail calls)
+    jumps_out: int = 0        # direct jumps leaving the range (tail calls), conditional ones included
     jumps_indirect: int = 0   # switch dispatch and tail calls through a pointer
     data_refs: dict[str, int] = field(default_factory=dict)  # by section of the target
     pdata_entries: int = 0
     unwind: str = "none"      # none | plain | handler | chained | refused
-    handler_data: str = "none"  # none | funcinfo | funcinfo-unsupported-magic | other
+    handler_data: str = "none"  # none | funcinfo | other | mixed
     data_bytes: int = 0       # table data after the code, inside the range
     data_kind: str = "none"   # none | rva-table | other-data
     extent: str = "none"      # .pdata against the inventory range: exact | prefix | leaf | misaligned (see pdata_extent)
@@ -100,6 +99,7 @@ def analyse_function(img: PinnedImage, rva: int, size: int, *, _pdata=None, _sta
             f.status, f.reason = BLOCKED, "unwind-entry-overlap"
     if f.status != BLOCKED:
         kinds: set[str] = set()
+        handlers: set[str] = set()
         for _b, _e, u in entries:
             try:
                 info = x64unwind.read_unwind(img.read, u)
@@ -115,15 +115,12 @@ def analyse_function(img: PinnedImage, rva: int, size: int, *, _pdata=None, _sta
             elif info.handler is not None:
                 kinds.add("handler")
                 magic = x64unwind.funcinfo_magic(img.read, info)
-                if magic == x64unwind.FUNCINFO_MAGIC:
-                    f.handler_data = "funcinfo"
-                elif magic is None:
-                    f.handler_data = "other"
-                else:
-                    f.handler_data = "other" if f.handler_data == "none" else f.handler_data
+                handlers.add("funcinfo" if magic == x64unwind.FUNCINFO_MAGIC else "other")
             else:
                 kinds.add("plain")
         else:
+            # the answer must not depend on the order of the entries: a range with both kinds says so
+            f.handler_data = "none" if not handlers else handlers.pop() if len(handlers) == 1 else "mixed"
             f.unwind = "handler" if "handler" in kinds else "chained" if "chained" in kinds else "plain" if kinds else "none"
 
     res = x64decode.decode_function(code, rva, img.image_base)
@@ -140,7 +137,7 @@ def analyse_function(img: PinnedImage, rva: int, size: int, *, _pdata=None, _sta
             f.calls_direct += 1
         elif i.flow is Flow.CALL_INDIRECT:
             f.calls_indirect += 1
-        elif i.flow is Flow.JUMP and i.target is not None and not (rva <= i.target < end):
+        elif i.flow in (Flow.JUMP, Flow.BRANCH) and i.target is not None and not (rva <= i.target < end):
             f.jumps_out += 1
         elif i.flow is Flow.JUMP_INDIRECT:
             f.jumps_indirect += 1
@@ -149,12 +146,13 @@ def analyse_function(img: PinnedImage, rva: int, size: int, *, _pdata=None, _sta
     f.mnemonics, f.flows, f.data_refs = dict(mn), dict(fl), dict(refs)
     if res.error is not None:
         f.stop_offset = res.stop - rva
-        last = res.insns[-1] if res.insns else None
-        # data after code: a jump table or constants follow a terminator; anything else is a decode failure
-        if last is not None and last.flow in TERMINATORS and res.stop >= rva and f.status != BLOCKED:
-            f.status, f.reason = TAIL_DATA, "decoding stops after a terminator"
-        elif f.status != BLOCKED:
-            f.status, f.reason = INVALID, res.error
+        if f.status != BLOCKED:
+            # an undecodable tail is never assumed to be data: only a table the code itself references is
+            f.status, f.reason = (BLOCKED if res.error == "ambiguous-data-reference" else INVALID), res.error
+    elif f.status != BLOCKED and x64decode.misdirected_branches(res.insns):
+        f.status, f.reason = BLOCKED, "branch-into-instruction"
+    elif f.status != BLOCKED and f.data_kind == "other-data":
+        f.status, f.reason = BLOCKED, "unidentified-data-in-range"
     return f
 
 
@@ -205,7 +203,7 @@ def coverage_if(rows: list[FunctionFacts], supported: set[str]) -> dict:
     full = 0
     sole: Counter[str] = Counter()
     for r in rows:
-        if r.status not in (DECODED, TAIL_DATA):
+        if r.status != DECODED:
             continue
         missing = [m for m in r.mnemonics if m not in supported]
         if not missing:
