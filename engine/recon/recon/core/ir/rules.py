@@ -328,5 +328,3 @@ def value_of(x: Term, env: dict[str, int]) -> int:
 
 def constant(x: Term) -> bool:
     return isinstance(x, (K, N)) or isinstance(x, T) and all(map(constant, x.args))
-
-

@@ -16,7 +16,7 @@ from recon.core.ir import interp
 from recon.core.ir.model import Fn
 from recon.core.sem import OPAQUE, CallTo, Let, Lifted
 
-STACK = 0x7000_0008  # a return address has just been pushed
+STACK = 0x7A3B_5C6D_0008  # a return address has just been pushed; made-up memory, mostly zeros, must not hold a value near it by chance
 HEAP = 0x5000_0000
 OUT = -1  # out of steps
 #: parts of the frame that are no stack arguments, whatever lies above the home space: saved registers, the exception runtime's place
@@ -51,6 +51,10 @@ def mix(*xs: int) -> int:
     return h
 
 
+class Full(Exception):
+    """A block operation with an absurd count: what was done until then is compared, as when the steps run out."""
+
+
 class Env:
     """One world, the same for every execution made from the same seed."""
 
@@ -77,6 +81,8 @@ class Env:
         return v
 
     def write(self, a: int, n: int, v) -> None:
+        if len(self.memory) > 200_000:
+            raise Full
         for k in range(n):
             self.memory[(a + k) & (2**64 - 1)] = ev.UNDEF if v is ev.UNDEF else v >> 8 * k & 255
         if not STACK - 0x10000 <= a < STACK + 40:
@@ -112,6 +118,8 @@ def run_lifted(an: pg.Analysis, seed: int, steps: int = 600):
     for _ in range(steps):
         try:
             out = _step(i, m, e)
+        except Full:
+            return OUT, e.trace, e.final()
         except ev.Trapped as t:
             return ("trap", t.kind), e.trace, e.final()
         except ev.UndefinedControl:
@@ -155,6 +163,8 @@ def run_ir(fn: Fn, seed: int, steps: int = 1200, cleanups: bool = False):
     w = interp.World(e.read, e.write, dict(e.entry), STACK, e.call, sees, e.opaque)
     try:
         x = interp.run(fn, w, steps)
+    except Full:
+        return OUT, e.trace, e.final()
     except ev.Trapped as t:
         return ("trap", t.kind), e.trace, e.final()
     except ev.UndefinedControl:

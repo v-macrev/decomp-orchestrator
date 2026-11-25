@@ -131,11 +131,11 @@ execution-based tests on this machine's processor.
 * ~~Vector registers are not modelled~~ (modelled since Phase 4).
 * Functions with exception handlers are analysed along ordinary edges only; Phase 4 adds the cleanup states and refuses catch blocks.
 
-## Phase 4: semantic IR — status 2026-11-25, in progress
+## Phase 4: semantic IR — status 2026-11-25
 
 | Deliverable | State |
 |---|---|
-| Floating-point and vector lifting | Done for the forms the demand report asked for (`lift_sse.py`, own arithmetic on integers in `core/softfloat.py`). Together with the integer subset: **1,607 forms pass, 528,590 vectors, 0 differences, 580 predicted traps confirmed** (`lift_coverage.json`, 373 s, natively on Windows; not repeated on Linux since Phase 3). Refused: 143 operand kinds, 14 operand sizes, 12 other encodings, 4 prefixes, 2 the encoder cannot make, 2 outside the subset |
+| Floating-point and vector lifting | Done for the forms the demand report asked for (`lift_sse.py`, own arithmetic on integers in `core/softfloat.py`). Together with the integer subset: **1,607 forms pass, 528,590 vectors, 0 differences, 580 predicted traps confirmed** (`lift_coverage.json`, 373 s, Windows). On Linux the same 1,607 forms pass, 580 traps confirmed; 528,574 vectors, the difference being the four thread-block loads, whose address differs per process). Refused: 143 operand kinds, 14 operand sizes, 12 other encodings, 4 prefixes, 2 the encoder cannot make, 2 outside the subset |
 | Are the vector vectors able to notice a mistake? | 4,304 of 5,531 deliberately wrong semantics of XMM forms noticed (77.8%). Survivors were sampled, mostly equivalent; **not** all reviewed |
 | Semantic IR, SSA, memory model | Done: `core/ir/{model,memory,build}.py`; versioned, canonical bytes, digest. Unknown aliasing is kept unknown |
 | Cleanup-only C++ exceptions | Done (`x64_msvc/eh.py`): states at calls, what a cleanup may read. Catch blocks and other handlers are refused by name |
@@ -144,34 +144,38 @@ execution-based tests on this machine's processor.
 | Compiler-undo | Division and remainder by constants (theorems, checked for every input at 4 and 6 bits in the tests, once at 8), multiplication, masks, ranges, minimum, maximum, absolute value, conditional values, copies, fills, rotated loops. Kept **beside** the function as proved hypotheses, never put in its place unasked |
 | Aliasing and side effects | Done: `effects.py` |
 
-**Measured so far** on the pinned image, over the **62,247** unmatched targets (3,095 s, 3 processes). This run preceded the last four
-corrections below; a run with them is under way and replaces it.
+**Measured** on the pinned image, over the **62,247** unmatched targets (3,296 s, 3 processes):
 
 | What | Count |
 |---|---|
 | Lift completely | **61,875 of 62,247 (99.4%)**; 43,247 after Phase 3. 372 lack a form (16 distinct forms) |
 | Frame recovered | 61,751; 122 refused (`stack-pointer-unknown`); 20,069 with a stated assumption |
-| Unwind facts compared | 367,244 in 61,750 functions; **1 function conflicts** (no unwind data, but a frame) |
-| **IR admitted in normal form** | **61,380 of 62,247 (98.6%)** |
-| Refused | 343 catch blocks, 122 no frame, 7 other handlers, 6 unresolved jumps, 2 no control-flow graph |
-| Rejected by the validator | 15, all one fault of the engine (first correction below) |
-| With exception states / an open frame / a stated assumption | 21,546 / 21,720 / 23,602 |
-| Operations | 8,792,237 before, 4,496,605 in normal form |
-| Functions with at least one proved hypothesis | 38,639 |
+| Unwind facts compared | 367,244 in 61,750 functions; **1 function conflicts** (no unwind data, but a frame) and is refused |
+| **IR admitted in normal form** | **61,394 of 62,247 (98.6%)** |
+| Refused | 343 catch blocks, 122 no frame, 7 other handlers, 6 unresolved jumps, 1 unwind conflict; 2 have no control-flow graph |
+| Rejected by the validator, or not settling | **0** |
+| With exception states / an open frame / a stated assumption | 21,558 / 21,720 / 23,605 |
+| Operations | 8,792,972 before, 4,493,128 in normal form |
+| Functions with at least one proved hypothesis | 38,648 |
 
-"Admitted" means valid and covered by the checks above. It says nothing about matching: no source is produced yet.
+"Admitted" means valid and covered by the checks above. It says nothing about matching: no source is produced yet. An earlier full run rejected 15
+functions, all for one fault (memory was re-cut once, not until no address became clearer); it was corrected and the run repeated.
 
-Corrections since that run, each with a test: memory is re-cut until no address becomes clearer (all 15 rejected functions are now
-admitted); a frame that contradicts the unwind data is refused; a 128-bit product of which only the lower part is used is narrowed;
-the proof of a division checks that its numbers are those of the value's own operations.
+**Real functions**: every 30th target run from 4 random states as instructions, raw IR and normal IR: **normal IR agrees in 8,396 of 8,396 runs, raw IR in
+8,394**, in 2,099 functions (6,070 runs returned, 834 left by a tail call, 211 trapped, 1,281 ran out of steps and are compared up to there; 35 more of the
+sample are not represented). The other 2 runs are one function from two states: a store through a pointer that walks the open frame reached its
+saved-register slot and return address. The function states the assumption that this does not happen (`indexed-and-escaped-stores-miss-saved-registers`);
+the raw run stops there because the claim is checked while it runs. A first run showed 9 broken claims and 1 difference: in the others the
+harness's made-up memory held, by chance, the round address it had given the stack; it now uses one that cannot occur that way.
 
-Tests: 390 engine tests pass on Windows (with the image and the worktree). Server: 357 of 360 while the machine was busy with the measurement; the other 3
-(the engine through WSL) exceeded their 5 s limit and pass with a longer one. Generated programs run as instructions, raw IR and normal IR agree; on 160 real functions from 4 states each, 640 of 640 runs agree
-raw and normal. 58 deliberate defects were put into the IR code one at a time: 42 were caught at once. Of the 16 others, 13 now have a test,
-2 changed nothing (one of them led to the removal of a redundant condition), 1 led to the stronger proof above.
+**Tests**: 390 engine tests pass on Windows with the image and the worktree; 371 pass and 19 are skipped on Linux without them. Server: 360 of 360. Generated programs run as instructions, raw IR and normal IR agree. 58 deliberate defects
+were put into the IR code one at a time: 42 were caught at once. Of the 16 others, 13 now have a test and were confirmed caught by it, 2 changed
+nothing (one of them led to the removal of a redundant condition), 1 led to a stronger proof (a division's numbers must be those of the value's own
+operations).
 
-**Still to do for the gate**: the repeated full measurement; the 13 defects run again against the new tests (the first 6 are caught, the rest running); the
-comparison on about 2,100 real functions; `validate-lift` and the suite on Linux with `z3`.
+**Gate: met** for what is represented. Supported instruction semantics are preserved and tested (execution per form on two systems; instructions, raw and
+normal IR compared on generated and real functions). Invalid IR cannot enter reconstruction (`admit`/`require`; unsupported input is refused
+by name). Each rewrite rule passes its SMT check; the other passes do on small loop-free functions, and are otherwise covered by execution and the validator.
 
 **Limits**
 
@@ -196,7 +200,7 @@ comparison on about 2,100 real functions; `validate-lift` and the suite on Linux
 ## Next increments, in order
 
 1. ~~Phase 2, binary analysis~~ (done above).
-2. ~~Phase 3, integer lifting and analysis~~ (done above). **Phase 4** is built; what its gate still needs is listed above.
+2. ~~Phase 3, integer lifting and analysis~~ (done above). ~~Phase 4, the IR~~ (done above).
 3. **Phase 5**, the vertical slice on a synthetic function (branches, member access, a call), which
    builds on the measured local compare.
 4. **Phase 6**, the deterministic tier in the orchestrator, ending at one unreconstructed target function
