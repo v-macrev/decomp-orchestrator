@@ -3,7 +3,7 @@
 
 For every instruction form the lifter accepts in 64-bit mode, instances are generated from the form's own
 operand description (registers, high bytes, every addressing shape, edge immediates), run on the processor and
-compared with the evaluated semantics: sixteen registers, seven flags, the memory and stack windows and where
+compared with the evaluated semantics: sixteen general and sixteen vector registers, seven flags, the memory and stack windows and where
 control goes. What the semantics call undefined is not compared, and how often that happened is counted.
 
 Generation uses a fixed seed and the form's name only, so a failure reproduces. `write_table` records the
@@ -22,7 +22,7 @@ from pathlib import Path
 
 from recon.adapters.x64_msvc import hwexec
 from recon.adapters.x64_msvc.decode import _iced, mnemonic_name
-from recon.adapters.x64_msvc.lift import FLAGS, GPR, HANDLERS, SHARED, _tables, form_of, lift
+from recon.adapters.x64_msvc.lift import FLAGS, GPR, GS_BASE, HANDLERS, XMM, _tables, form_of, lift, xmm_of
 from recon.core import evaluate as ev
 from recon.core.sem import Lifted, Unsupported
 
@@ -30,7 +30,7 @@ SEED = 20261125
 TABLE = Path(__file__).with_name("lift_coverage.json")
 HERE = Path(__file__).resolve().parent
 #: every file whose meaning the recorded result depends on
-DIGESTED = (HERE / "lift.py", HERE / "hwexec.py", HERE / "validate.py", HERE.parents[1] / "core/sem.py", HERE.parents[1] / "core/evaluate.py")
+DIGESTED = (HERE / "lift.py", HERE / "lift_sse.py", HERE.parents[1] / "core/softfloat.py", HERE / "hwexec.py", HERE / "validate.py", HERE.parents[1] / "core/sem.py", HERE.parents[1] / "core/evaluate.py")
 
 MEM_WINDOW = 0x200
 STACK_WINDOW = 0x100
@@ -80,11 +80,16 @@ class Gen:
         g = [v for v in self.names if ix.RegisterExt.is_gpr(v)]
         self.by_width = {w: [v for v in g if ix.RegisterExt.size(v) * 8 == w] for w in (8, 16, 32, 64)}
         self.by_width[8] = sorted(self.by_width[8])
+        self.by_width[128] = [R.XMM0 + k for k in range(16)]
+        self.vector = False
         self.full = lambda v: GPR[ix.RegisterExt.number(ix.RegisterExt.full_register(v))]
-        self.safe = {w: [v for v in vs if self._full(v) != "rsp"] for w, vs in self.by_width.items()}
+        self.safe = {w: [v for v in vs if w == 128 or self._full(v) != "rsp"] for w, vs in self.by_width.items()}
 
     def _full(self, v: int) -> str:
         n = self.names[v]
+        x = xmm_of(self.ix, v)
+        if x is not None:
+            return x
         return {"AH": "rax", "CH": "rcx", "DH": "rdx", "BH": "rbx"}.get(n) or GPR[self.ix.RegisterExt.number(self.ix.RegisterExt.full_register(v))]
 
     def pick(self, w: int) -> int:
@@ -97,7 +102,7 @@ class Gen:
         self.imms += 1
         return edge[self.imms // 2 % len(edge)] if self.imms % 2 else self.r.getrandbits(w)
 
-    def build(self, code: int, mem: bool, lock: bool, rep: bool):
+    def build(self, code: int, mem: bool, lock: bool, rep: bool, gs: bool = False):
         """One instance of the form, with how to aim its memory operand, or CannotBuild."""
         ix, r = self.ix, self.r
         K, O = ix.OpKind, ix.OpCodeOperandKind
@@ -105,9 +110,10 @@ class Gen:
         i = ix.Instruction()
         i.code = code
         used_mem = False
-        widths = {O.R8_OR_MEM: 8, O.R16_OR_MEM: 16, O.R32_OR_MEM: 32, O.R64_OR_MEM: 64}
+        widths = {O.R8_OR_MEM: 8, O.R16_OR_MEM: 16, O.R32_OR_MEM: 32, O.R64_OR_MEM: 64, O.XMM_OR_MEM: 128}
+        self.vector = any(info.op_kind(k) in (O.XMM_OR_MEM, O.XMM_REG, O.XMM_RM) for k in range(info.op_count))
         plain = {O.R8_REG: 8, O.R8_OPCODE: 8, O.R16_REG: 16, O.R16_RM: 16, O.R16_OPCODE: 16, O.R32_REG: 32, O.R32_RM: 32, O.R32_OPCODE: 32,
-                 O.R64_REG: 64, O.R64_RM: 64, O.R64_OPCODE: 64}
+                 O.R64_REG: 64, O.R64_RM: 64, O.R64_OPCODE: 64, O.XMM_REG: 128, O.XMM_RM: 128}
         fixed = {O.AL: "AL", O.CL: "CL", O.AX: "AX", O.DX: "DX", O.EAX: "EAX", O.RAX: "RAX"}
         imms = {O.IMM8: ("IMMEDIATE8", "immediate8", 8), O.IMM8SEX16: ("IMMEDIATE8TO16", "immediate8to16", 8),
                 O.IMM8SEX32: ("IMMEDIATE8TO32", "immediate8to32", 8), O.IMM8SEX64: ("IMMEDIATE8TO64", "immediate8to64", 8),
@@ -125,6 +131,8 @@ class Gen:
                 used_mem = True
                 i.set_op_kind(k, K.MEMORY)
                 self._memory(i, o == O.MEM_OFFS)
+                if gs:
+                    self._through_gs(i, read=k > 0)
             elif o in plain:
                 i.set_op_kind(k, K.REGISTER)
                 i.set_op_register(k, self.pick(plain[o]))
@@ -165,6 +173,17 @@ class Gen:
             raise CannotBuild("another encoding")
         return d, data
 
+    def _through_gs(self, i, read: bool) -> None:
+        i.segment_prefix = self.ix.Register.GS
+        if i.memory_base == self.ix.Register.RIP or i.memory_index == self.ix.Register.NONE and self.r.random() < 0.3:
+            # no register: the operand lies in the thread block itself, which is only read (its own address, and others that stay put)
+            if not read:
+                raise CannotBuild("the thread block is not written")
+            i.memory_base = i.memory_index = self.ix.Register.NONE
+            i.memory_index_scale = 1
+            i.memory_displacement = self.r.choice((0x30, 0x40, 0x48, 0x58, 0x60)) if self.p._win else hwexec.MEM + self.r.randrange(64)
+            i.memory_displ_size = 4
+
     def _memory(self, i, offs: bool) -> None:
         ix, r = self.ix, self.r
         R = ix.Register
@@ -178,7 +197,8 @@ class Gen:
         shape = r.choice(("base", "base", "disp8", "disp32", "index", "index", "index-disp", "rip"))
         if shape == "rip":
             i.memory_base = R.RIP
-            i.memory_displacement = self.p.mem + MEM_WINDOW // 2 + r.randrange(-32, 32)
+            at = self.p.mem + MEM_WINDOW // 2 + r.randrange(-32, 32)
+            i.memory_displacement = at & ~15 if self.vector and r.random() < 0.8 else at
             i.memory_displ_size = 8
             return
         base = r.choice(self.by_width[64])
@@ -204,6 +224,49 @@ def edge_value(r: random.Random) -> int:
     return r.getrandbits(64)
 
 
+_EDGE = {32: (0, 0x80000000, 0x3F800000, 0xBF800000, 0x7F800000, 0xFF800000, 0x7FC00000, 0xFFC00001, 0x7F800001, 0xFFA00003, 1, 0x80000001, 0x007FFFFF, 0x00800000,
+              0x7F7FFFFF, 0xFF7FFFFF, 0x3F000000, 0x3FC00000, 0x40200000, 0xC0200000, 0x4F000000, 0xCF000000, 0x4EFFFFFF, 0x5F000000, 0xDF000000, 0x4B000001, 0x34000000, 0x33800000),
+         64: (0, 1 << 63, 0x3FF << 52, 0xBFF << 52, 0x7FF << 52, 0xFFF << 52, 0x7FF8 << 48, 0xFFF8 << 48 | 1, 0x7FF << 52 | 1, 0xFFF4 << 48 | 3, 1, 1 << 63 | 1, (1 << 52) - 1, 1 << 52,
+              (0x7FF << 52) - 1, (0xFFF << 52) - 1, 0x3FE << 52, 0x3FF8 << 48, 0x4004 << 48, 0xC004 << 48, 0x41E << 52, 0xC1E << 52, 0x41DFFFFFFFC00000, 0x43E << 52, 0xC3E << 52,
+              0x433 << 52 | 1, 0x47EFFFFFF0000000, 0x47EFFFFFE0000000, 0x36A0000000000000, 0x3690000000000000, 0x3FF0000010000000, 0x3FF0000030000000)}
+
+
+def edge_float(r: random.Random, w: int) -> int:
+    x = r.random()
+    if x < 0.4:
+        return r.choice(_EDGE[w])
+    if x < 0.85:  # of ordinary size, so that sums, products and conversions do something
+        e, f = (8, 23) if w == 32 else (11, 52)
+        bias = (1 << (e - 1)) - 1
+        frac = r.getrandbits(f) if r.random() < 0.7 else r.getrandbits(6) << (f - 6)
+        return r.getrandbits(1) << (w - 1) | (bias + r.randrange(-6, 40 if r.random() < 0.3 else 7)) << f | frac
+    return r.getrandbits(w)
+
+
+def edge_vector(r: random.Random) -> int:
+    k = r.random()
+    if k < 0.35:
+        return sum(edge_float(r, 32) << 32 * n for n in range(4))
+    if k < 0.6:
+        return sum(edge_float(r, 64) << 64 * n for n in range(2))
+    w = r.choice((8, 16, 32, 64))
+    edge = (0, 1, (1 << w) - 1, 1 << (w - 1), (1 << (w - 1)) - 1, w - 1, w)
+    return sum((r.choice(edge) if r.random() < 0.5 else r.getrandbits(w)) << w * n for n in range(128 // w))
+
+
+def related_vector(r: random.Random, v: int) -> int:
+    """The same vector, or one that differs in a lane, a sign or a bit."""
+    k = r.random()
+    if k < 0.4:
+        return v
+    if k < 0.6:
+        return v ^ (1 << 31 | 1 << 63 | 1 << 95 | 1 << 127)
+    if k < 0.8:
+        return v ^ 1 << r.randrange(128)
+    o = 32 * r.randrange(4)
+    return v & ~(0xFFFFFFFF << o) | edge_float(r, 32) << o
+
+
 @dataclass
 class FormResult:
     vectors: int = 0
@@ -222,8 +285,9 @@ class HarnessError(RuntimeError):
 class _Memory:
     """The model's memory: the windows' bytes, plus which bytes are undefined."""
 
-    def __init__(self, windows: list[tuple[int, bytes]]) -> None:
+    def __init__(self, windows: list[tuple[int, bytes]], thread_block: int | None = None) -> None:
         self.w = [(a, bytearray(d)) for a, d in windows]
+        self.thread_block = thread_block
         self.undef: set[int] = set()
 
     def _at(self, addr: int, size: int):
@@ -233,6 +297,8 @@ class _Memory:
         raise HarnessError("an access outside the test windows")
 
     def read(self, addr: int, size: int) -> int:
+        if self.thread_block is not None and 0 <= addr - self.thread_block < 0x80:
+            return int.from_bytes(hwexec.peek(addr, size), "little")
         d, o = self._at(addr, size)
         return int.from_bytes(d[o:o + size], "little")
 
@@ -255,8 +321,12 @@ def make_state(g: Gen, ins, m: str) -> tuple[dict, dict, list[tuple[int, bytes]]
     pool = (0, x, x, -x & (2**64 - 1), ~x & (2**64 - 1), (x + 1) & (2**64 - 1), 1) if r.random() < 0.3 else None
     value = (lambda: r.choice(pool)) if pool else (lambda: edge_value(r))
     regs = {n: value() for n in GPR}
+    vec = edge_vector(r) if g.vector else 0
+    for n in XMM:
+        regs[n] = (related_vector(r, vec) if r.random() < 0.3 else edge_vector(r)) if g.vector else 0x0102030405060708 << 64 | int(n[3:])
     flags = {n: r.getrandbits(1) for n in FLAGS}
-    if m[:4] not in ("MOVS", "STOS", "LODS") or m in ("MOVSX", "MOVSXD"):
+    string = ins.is_string_instruction
+    if not string:
         if r.random() < 0.7:
             flags["df"] = 0
     mem = bytearray(r.randbytes(MEM_WINDOW))
@@ -299,7 +369,7 @@ def make_state(g: Gen, ins, m: str) -> tuple[dict, dict, list[tuple[int, bytes]]
         regs[g._full(ins.op_register(0))] = regs["rax"]
     if m == "JRCXZ" and r.random() < 0.5:
         regs["rcx"] = 0
-    if m[:4] in ("MOVS", "STOS", "LODS") and m not in ("MOVSX", "MOVSXD") and not has_mem:
+    if string and not has_mem:
         mid = mem_at + MEM_WINDOW // 2
         regs["rcx"] = r.randrange(0, 9)
         regs["rsi"] = mid + r.randrange(-40, 40)
@@ -314,13 +384,21 @@ def make_state(g: Gen, ins, m: str) -> tuple[dict, dict, list[tuple[int, bytes]]
 
     if has_mem:
         at = mem_at + MEM_WINDOW // 2 + r.randrange(-40, 40)
-        if ins.is_ip_rel_memory_operand or ins.memory_base == R.NONE:
+        aligned = g.vector and r.random() < 0.85
+        if aligned:
+            at &= ~15
+        gs = p.gs_base if ins.segment_prefix == R.GS else 0
+        if gs and ins.memory_base == R.NONE:
+            at = None if p._win else gs + ins.memory_displacement
+        elif ins.is_ip_rel_memory_operand or ins.memory_base == R.NONE:
             at = ins.ip_rel_memory_address if ins.is_ip_rel_memory_operand else ins.memory_displacement
-        elif m == "LEA" or m == "NOP":
+        elif m in ("LEA", "NOP") or m.startswith("PREFETCH"):
             pass  # the address is computed, never used
         else:
             b = g._full(ins.memory_base)
             disp = ins.memory_displacement
+            if b == "rsp" and gs:
+                return None
             if b == "rsp":  # the stack pointer is the base: aim inside the stack window, so the displacement must be small
                 if disp > 64 and disp < 2**64 - 64:
                     return None
@@ -329,13 +407,15 @@ def make_state(g: Gen, ins, m: str) -> tuple[dict, dict, list[tuple[int, bytes]]
                     regs[g._full(ins.memory_index)] = r.randrange(-2, 3) & (2**64 - 1)
                 if explicit_sp:
                     regs["rsp"] = sp
+                if aligned:
+                    regs["rsp"] -= (regs["rsp"] + disp + (regs[g._full(ins.memory_index)] * ins.memory_index_scale if ins.memory_index != R.NONE else 0)) & 15
             else:
                 if ins.memory_index != R.NONE:
                     idx = g._full(ins.memory_index)
                     x = r.randrange(-4, 5) & (2**64 - 1)
                     regs[idx] = x
                     disp += x * ins.memory_index_scale
-                regs[b] = (at - disp) & (2**64 - 1)
+                regs[b] = (at - disp - gs) & (2**64 - 1)
                 if b == "rcx" and m in ("JRCXZ",):
                     return None
             # a pop raises the stack pointer before the address is formed; a base of rsp is covered by the window
@@ -349,7 +429,7 @@ def make_state(g: Gen, ins, m: str) -> tuple[dict, dict, list[tuple[int, bytes]]
                 return None
             w = ix.RegisterExt.size(ins.op_register(1)) * 8
             regs[rr] = regs[rr] & ~((1 << w) - 1) & (2**64 - 1) | r.randrange(-500, 500) & ((1 << w) - 1)
-        if at is not None and m not in ("LEA", "NOP"):
+        if at is not None and m not in ("LEA", "NOP") and not m.startswith("PREFETCH"):
             o = at - mem_at
             if m in ("JMP", "CALL"):
                 mem[o:o + 8] = p.taken_ip.to_bytes(8, "little")
@@ -357,6 +437,10 @@ def make_state(g: Gen, ins, m: str) -> tuple[dict, dict, list[tuple[int, bytes]]
                 mem[o:o + 8] = regs["rax"].to_bytes(8, "little")
             elif divisor is not None:
                 mem[o:o + w // 8] = divisor.to_bytes(w // 8, "little")
+            elif g.vector:
+                other = related_vector(r, vec) if r.random() < 0.3 else edge_vector(r)
+                if o >= 0 and o + 16 <= len(mem):
+                    mem[o:o + 16] = other.to_bytes(16, "little")
             elif r.random() < 0.6:
                 mem[o:o + 8] = value().to_bytes(8, "little")
         elif m in ("JMP", "CALL"):
@@ -368,8 +452,8 @@ def make_state(g: Gen, ins, m: str) -> tuple[dict, dict, list[tuple[int, bytes]]
 
 def check_vector(proc: hwexec.Processor, lifted: Lifted, data: bytes, next_ip: int, state, res: FormResult, text: str) -> None:
     regs, flags, windows = state
-    mem = _Memory(windows)
-    mach = ev.Machine(mem.read, mem.write, {**regs, **flags})
+    mem = _Memory(windows, proc.gs_base if proc._win else None)
+    mach = ev.Machine(mem.read, mem.write, {**regs, **flags, GS_BASE: proc.gs_base})
     try:
         out = ev.run(lifted, mach)
     except ev.Trapped as t:
@@ -382,7 +466,7 @@ def check_vector(proc: hwexec.Processor, lifted: Lifted, data: bytes, next_ip: i
     hr, hf, mark, hw = proc.run(regs, flags, windows)
     res.vectors += 1
     bad = []
-    for n in GPR:
+    for n in (*GPR, *XMM):
         v = mach.locs[n]
         if v is ev.UNDEF:
             res.undefined += 1
@@ -407,8 +491,12 @@ def check_vector(proc: hwexec.Processor, lifted: Lifted, data: bytes, next_ip: i
         res.failures.append(f"{text}: {','.join(bad)}")
 
 
-def forms(ix) -> list[tuple[str, int, bool, bool, bool]]:
-    """(form name, code, memory, lock, rep) for every 64-bit form of a mnemonic the lifter knows."""
+#: forms whose memory operand is also taken through the segment of the thread block
+THROUGH_GS = ("MOV_R8_RM8", "MOV_R16_RM16", "MOV_R32_RM32", "MOV_R64_RM64", "MOV_RM8_R8", "MOV_RM16_R16", "MOV_RM32_R32", "MOV_RM64_R64")
+
+
+def forms(ix) -> list[tuple[str, int, bool, bool, bool, bool]]:
+    """(form name, code, memory, lock, rep, gs) for every 64-bit form of a mnemonic the lifter knows."""
     _r, codes = _tables(ix)
     out = []
     for code, name in sorted(codes.items()):
@@ -416,32 +504,34 @@ def forms(ix) -> list[tuple[str, int, bool, bool, bool]]:
         if not info.is_instruction or not info.mode64:
             continue
         m = mnemonic_name(ix, info.mnemonic)
-        if m not in HANDLERS or (m in SHARED and name != SHARED[m]):
+        if m not in HANDLERS:
             continue
         O = ix.OpCodeOperandKind
         kinds = [info.op_kind(i) for i in range(info.op_count)]
-        can_mem = any(o in (O.R8_OR_MEM, O.R16_OR_MEM, O.R32_OR_MEM, O.R64_OR_MEM, O.MEM, O.MEM_OFFS) for o in kinds)
+        can_mem = any(o in (O.R8_OR_MEM, O.R16_OR_MEM, O.R32_OR_MEM, O.R64_OR_MEM, O.XMM_OR_MEM, O.MEM, O.MEM_OFFS) for o in kinds)
         only_mem = any(o in (O.MEM, O.MEM_OFFS) for o in kinds)
         shapes = ([] if only_mem else [False]) + ([True] if can_mem else [])
         for mem in shapes:
-            out.append((name + (":mem" if mem else ""), code, mem, False, False))
+            out.append((name + (":mem" if mem else ""), code, mem, False, False, False))
+            if mem and name in THROUGH_GS:
+                out.append((name + ":mem:gs", code, mem, False, False, True))
             if mem and info.can_use_lock_prefix:
-                out.append((name + ":mem:lock", code, mem, True, False))
+                out.append((name + ":mem:lock", code, mem, True, False, False))
         if any(o in (O.SEG_RSI, O.ES_RDI, O.SEG_RDI) for o in kinds) or name in ("RETNQ",):
-            out.append((name + ":rep", code, False, False, True))
+            out.append((name + ":rep", code, False, False, True, False))
     return out
 
 
 def run_form(proc: hwexec.Processor, entry, instances: int, states: int, seed: int = SEED) -> FormResult | str:
     """The result of one form, or the reason it is refused or cannot be built."""
     ix = _iced()
-    name, code, mem, lock, rep = entry
+    name, code, mem, lock, rep, gs = entry
     g = Gen(ix, proc, random.Random(seed ^ zlib.crc32(name.encode())))
     res = FormResult()
     why = "cannot-build"
     for _ in range(instances):
         try:
-            ins, data = g.build(code, mem, lock, rep)
+            ins, data = g.build(code, mem, lock, rep, gs)
         except CannotBuild as e:
             why = f"cannot-build: {e}"
             continue
@@ -481,7 +571,7 @@ print("no-trap")
 
 
 #: how each trap ends a process: Windows exception status, POSIX signal
-TRAP_STATUS = {"divide-error": ({0xC0000094, 0xC0000095}, {8}), "breakpoint": ({0x80000003}, {5}), "invalid-opcode": ({0xC000001D}, {4})}
+TRAP_STATUS = {"divide-error": ({0xC0000094, 0xC0000095}, {8}), "breakpoint": ({0x80000003}, {5}), "invalid-opcode": ({0xC000001D}, {4}), "misaligned": ({0xC0000005}, {11})}
 
 
 def confirm_trap(base: int, sample) -> str:

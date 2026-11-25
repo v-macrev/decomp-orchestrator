@@ -71,11 +71,11 @@ def run_doctor(worktree: str | None, checkout: str | None, data_dir: str | None)
         venv_python = Path(data_dir) / "venv/bin/python"
         if venv_python.is_file():
             try:
-                r = subprocess.run([str(venv_python), "-c", "import iced_x86, capstone"], capture_output=True, text=True, timeout=60)
+                r = subprocess.run([str(venv_python), "-c", "import iced_x86, capstone, z3"], capture_output=True, text=True, timeout=60)
                 ok = r.returncode == 0
             except (OSError, subprocess.SubprocessError):
                 ok = False
-            checks.append(_check("venv", "ok" if ok else "error", "private venv imports iced_x86 and capstone" if ok else "private venv exists but does not import its packages",
+            checks.append(_check("venv", "ok" if ok else "error", "private venv imports iced_x86, capstone and z3" if ok else "private venv exists but does not import its packages",
                                  None if ok else "rerun engine/recon/scripts/setup-venv.sh <data dir>"))
         else:
             checks.append(_check("venv", "missing", "no private venv (decoding needs iced_x86)", "run engine/recon/scripts/setup-venv.sh <data dir>"))

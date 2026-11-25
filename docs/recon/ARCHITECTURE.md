@@ -55,6 +55,26 @@ decode (iced) -> lift (x64_msvc/lift.py) -> statements (core/sem.py) -> cfg -> d
 (stage, fixed code). `core/evaluate.py` runs semantics on concrete values: the differential tests compare it with the
 processor (`hwexec.py`, `validate.py`, only ever synthetic instructions), and the analysis tests use it as the oracle.
 
+## From analysis to admitted IR (Phase 4)
+
+```text
+Analysis --build--> Fn (raw) --validate--> passes (simplify, merge, forward, promote, dead-stores, dead; polarity, straighten)
+                                              each result validated --> admit --> Admitted --require--> reconstruction (Phase 5)
+                                                                                    |
+                                                                                    +--> idioms: proved hypotheses, beside the function
+```
+
+| Module of `core/ir/` | What it holds |
+|---|---|
+| `model.py` | `Fn`: values, memory tokens and regions, exception states, observations; canonical bytes, digest, semantic digest |
+| `memory.py`, `build.py` | following addresses, regions, aliasing; registers to SSA, the calling convention, memory threading |
+| `validate.py` | every rule as a fixed code; `admit` and `require`, the only way on |
+| `interp.py` | runs a function and checks its memory claims while it runs |
+| `rules.py`, `passes.py`, `smt.py` | rewrite rules as data, the transformations, the proofs |
+| `idioms.py`, `effects.py` | compiler-undo hypotheses; aliasing and side effects |
+
+`x64_msvc/eh.py` reads frame handler data. The IR names locations only as the strings an adapter's convention gives it; `core` still names no register.
+
 ## Determinism contract (summary of section 21)
 
 * **Input digest** of a function covers: executable sha256, RVA and size, engine version, rule-store digest,

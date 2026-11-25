@@ -157,7 +157,8 @@ def cmd_coverage(args) -> int:
     img = _image(args)
     ts = _select(args, inv)
     t0 = time.monotonic()
-    rows = cv.run(img, ts, validated, progress=lambda n: print(f"  {n}/{len(ts)}", file=sys.stderr))
+    ts = ts[:: args.every]
+    rows = cv.run(img, ts, validated, progress=lambda n: print(f"  {n}/{len(ts)}", file=sys.stderr), ir=args.ir, jobs=args.jobs)
     report = cv.aggregate(rows)
     report["validated_forms"] = len(validated)
     report["seconds"] = round(time.monotonic() - t0, 1)

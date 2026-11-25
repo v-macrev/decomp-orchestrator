@@ -30,7 +30,7 @@ from `requirements.lock`, `--require-hashes --no-deps`:
 
 Both wheels are manylinux x86-64 (`cp38-abi3` and `py3-none`), so they run on this machine's Python 3.14. Both
 have no dependencies. `capstone.__version__` reports `5.0.7` for the 5.0.9 wheel; the lock names the wheel.
-`z3-solver` is added when Phase 4 needs it.
+`z3-solver` was added in Phase 4 (D-021).
 
 ## D-003 · 2026-11-25 · The engine runs in WSL, beside the checkout
 **Evidence.** The checkout, packs and toolchain are in WSL (`config/orchestrator.json`, `repo.host`); the Windows
@@ -151,3 +151,56 @@ When only padding or nothing follows a call before the function's end, control c
 A store through a pointer that is not followed is taken to miss the saved registers' slots once a frame address has been indexed or has
 left the function; otherwise no function with a local array could be analysed. Results list the assumption when it was used, so a later
 phase can weigh it, and unwind data (which comes from the compiler) is compared independently.
+
+## D-021 · 2026-11-25 · `z3-solver` 4.13.4.0 joins the lock (update of D-002)
+
+| Package | Version | sha256 of the wheels | Licence | Compatible with AGPL-3.0-or-later | Reason |
+|---|---|---|---|---|---|
+| `z3-solver` | 4.13.4.0 | in `requirements.lock` (manylinux and Windows x86-64) | MIT (wheel metadata) | yes | Proves rewrite rules, transformations and compiler-undo hypotheses |
+
+One solver per question, one thread, fixed seed, budget in `rlimit` units (no wall clock), so an answer does not depend on the machine.
+"unknown" is never counted as proved. The module is imported only where a proof is made.
+
+## D-022 · 2026-11-25 · Floating point and vectors: own semantics again, on integers
+Phase 3's reason holds for vector code (D-017 asked to look again): what costs effort is validating forms, not writing them.
+`core/softfloat.py` computes binary32 and binary64 on bit patterns with integers only, so that no result depends on the host; it is checked
+against the host's arithmetic, z3's and, through every lifted form, the processor's. Operations are on lanes of a 128-bit value.
+**Fixed environment**, recorded as an assumption wherever it matters: round to nearest, subnormals kept, exceptions masked (what the Windows
+ABI promises at function entry). A function that changes the control register is refused. The reciprocal approximations are *opaque*: a
+function of their operand that is not computed, because their value differs between processors.
+In SMT comparisons of two functions a floating operation on non-constants is an uninterpreted function: equal operands give equal results,
+and nothing else is concluded.
+
+## D-023 · 2026-11-25 · The thread block is reached through a location of its own
+`gs:` is an address relative to a base that lives in a location, like any register's entry value. Nothing is known about the block; it is
+a memory region with that base. The validation harness never writes through it.
+
+## D-024 · 2026-11-25 · The IR
+SSA values and memory tokens in one form; registers and the stack pointer do not exist in it (frame addresses are `frame(offset)`).
+Memory is cut into regions: private frame slots, fields by offset from an entry value, globals, the open frame, everything else; an operation
+names each region it may touch and the token it reads and makes. Machine detail (instruction addresses, copies, stack adjustments, polarity)
+is kept beside the operations as *observations* and is no part of the semantic digest. Every instruction must become an operation
+or an observation from a closed list, or the validator refuses the function.
+**Assumptions are stated per function**, never global: the two of D-020, the aligned stack on entry, and the floating-point environment.
+
+## D-025 · 2026-11-25 · One gate into reconstruction
+`validate.admit` is the only maker of an `Admitted`; `validate.require` is what later phases call, and it checks the digest again.
+The normaliser runs the validator before the first transformation and after each one that changed anything.
+
+## D-026 · 2026-11-25 · A transformation is data where it can be, and is proved either way
+Rewrites are instances (explicit width, explicit operand order) of rules in `rules.py`; each instance is proved on its own, and what is
+applied is what is proved. The other transformations are checked by SMT on generated small functions and by execution on larger ones.
+Moving an address closer to its base can change which region it is in: memory is then cut and threaded anew, and validated.
+
+## D-027 · 2026-11-25 · Compiler-undo results are hypotheses
+A hypothesis names a value, an equal expression, every reading a source could have had, and how the equality was shown: an integer theorem
+whose premises are checked (division by multiplication; brute-forced over every input at 4 and 6 bits), SMT, or nothing more than a shape
+(`structure`: rotated loops, fills). It never changes the function. Nothing ranks the readings; Phase 5's compiler oracle decides.
+**Not covered**: switches lowered to comparisons, merged tails, inlined calls, vectorised or unrolled loops, division of 16-bit and narrower values.
+
+## D-028 · 2026-11-25 · Exceptions: cleanups are represented, catches are refused
+`FuncInfo` version 3 is read for functions with a frame handler. A call carries the state its *return address* is in (how the runtime looks
+it up); the function carries the state table. A call in a state that has a cleanup reads the frame, so that nothing a cleanup needs is
+taken for dead. The cleanup funclets themselves are named by address and not analysed. Refused with a reason: try blocks (a
+catch comes back into the function), asynchronous exceptions, exception specifications, other handlers. The prologue's store of -2 into the
+runtime's own slot is an observation; its place is computed from the unwind codes and the table, and any other use of the slot is refused.

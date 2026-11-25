@@ -39,14 +39,13 @@ def step(code: str, **locs):
 # ---------------------------------------------------------------- what is refused
 
 @pytest.mark.parametrize("code,reason", [
-    ("65488b042558000000", "segment-override"),        # mov rax, gs:[58h]
+    ("64488b042558000000", "segment-override"),        # mov rax, fs:[58h]
     ("678b01", "address-size-override"),                # mov eax, [ecx]
     ("6667e800", None),                                 # decodes to something else or nothing lifted
     ("6650", "operand-size"),                           # push ax
     ("f3ac", "prefix-not-modelled"),                    # rep lodsb
     ("f2a4", "prefix-not-modelled"),                    # repne movsb
-    ("0f58c1", "not-in-subset"),                        # addps
-    ("f20f100a", "not-in-subset"),                      # movsd xmm1, [rdx] shares its name with the string form
+    ("0f77", "not-in-subset"),                          # emms
     ("0fa2", "not-in-subset"),                          # cpuid
     ("8cd8", "operand-not-general-purpose"),            # mov eax, ds
     ("660fc8", None),
@@ -217,3 +216,39 @@ def test_a_dropped_effect_or_an_inverted_branch_is_always_noticed(name):
             # an effect can be invisible in one instance (a move of a register to itself): it must show in some instance
             killed[(what,)] = killed.get((what,), False) or bool(res.failures)
     assert killed and all(killed.values()), [k for k, x in killed.items() if not x]
+
+
+# ---------------------------------------------------------------- floating point, vectors, the thread block
+
+def run(code: str, locs: dict, memory: dict | None = None):
+    r = lift(dec(code), BASE)
+    assert isinstance(r, Lifted), r
+    m = ev.Machine(lambda a, n: (memory or {})[a][1], lambda a, n, x: None, {**{n: 0 for n in v.GPR}, **{n: 0 for n in v.FLAGS}, **locs})
+    return m, ev.run(r, m)
+
+
+def test_an_address_in_the_thread_block_is_relative_to_its_base_and_has_a_form_of_its_own():
+    r = lift(dec("65488b042558000000"), BASE)                       # mov rax, gs:[58h]
+    assert isinstance(r, Lifted) and r.form.endswith(":gs")
+    m, _out = run("65488b042558000000", {"gs_base": 0x7000}, {0x7058: (8, 0x1122334455667788)})
+    assert m.locs["rax"] == 0x1122334455667788
+
+
+@pytest.mark.parametrize("code,x,y,want", [
+    ("f30f58c1", 0x3F800000, 0x40000000, 0x40400000),               # addss
+    ("f30f5ec1", 0x3F800000, 0x40400000, 0x3EAAAAAB),               # divss
+    ("f30f5dc1", 0x7FC00000, 0x3F800000, 0x3F800000),               # minss: the second when either is no number
+    ("f30f5fc1", 0x00000000, 0x80000000, 0x80000000),               # maxss: the second of two zeros
+    ("f30f51c1", 0, 0x40800000, 0x40000000),                        # sqrtss
+])
+def test_scalar_operations_keep_the_upper_lanes(code, x, y, want):
+    upper = 0x1111111122222222 << 32
+    m, _out = run(code, {"xmm0": upper | x, "xmm1": 7 << 64 | y}, {})
+    assert m.locs["xmm0"] == upper | want
+
+
+def test_a_misaligned_vector_access_traps():
+    with pytest.raises(ev.Trapped):
+        run("0f2801", {"rcx": 0x1004}, {0x1004: (16, 0)})   # movaps xmm0, [rcx]
+    m, _out = run("0f1001", {"rcx": 0x1004}, {0x1004: (16, 5)})              # movups
+    assert m.locs["xmm0"] == 5

@@ -25,6 +25,8 @@ class Abi:
     stack: str
     word: int
     home: int
+    #: on entry the stack pointer plus align[1] is a multiple of align[0]
+    align: tuple[int, int] = (16, 8)
 
     @property
     def live_at_return(self) -> frozenset[str]:

@@ -140,7 +140,8 @@ TERMINATING = (Goto, Branch, CallTo, ReturnTo)
 #: op -> (arity, rule). Rules: same = all arguments and the result have one width; cmp = equal widths, result 1 bit;
 #: shift = the result has the first argument's width, the amount any width; ext/trunc = one argument, result width given;
 #: ite = condition 1 bit, arms equal; cat = (high, low), widths add up; un = one argument, same width; bit = one argument, 1 bit;
-#: undef = no argument, result width given.
+#: undef = no argument, result width given. Floating point works on bit patterns of 32 or 64 bits (`core/softfloat.py` fixes rounding
+#: and NaNs): fsame, fun and fcmp are the rules above; f2f, i2f and f2i convert, result width given; the integer side is signed.
 OPS: dict[str, tuple[int, str]] = {
     "add": (2, "same"), "sub": (2, "same"), "mul": (2, "same"), "udiv": (2, "same"), "urem": (2, "same"), "sdiv": (2, "same"), "srem": (2, "same"),
     "and": (2, "same"), "or": (2, "same"), "xor": (2, "same"), "not": (1, "un"), "neg": (1, "un"),
@@ -148,7 +149,16 @@ OPS: dict[str, tuple[int, str]] = {
     "eq": (2, "cmp"), "ne": (2, "cmp"), "ult": (2, "cmp"), "ule": (2, "cmp"), "slt": (2, "cmp"), "sle": (2, "cmp"),
     "zext": (1, "ext"), "sext": (1, "ext"), "trunc": (1, "trunc"), "cat": (2, "cat"), "ite": (3, "ite"),
     "popcount": (1, "un"), "clz": (1, "un"), "ctz": (1, "un"), "undef": (0, "undef"),
+    "fadd": (2, "fsame"), "fsub": (2, "fsame"), "fmul": (2, "fsame"), "fdiv": (2, "fsame"), "fsqrt": (1, "fun"),
+    "flt": (2, "fcmp"), "fle": (2, "fcmp"), "feq": (2, "fcmp"), "funo": (2, "fcmp"),
+    "fcvt": (1, "f2f"), "sitof": (1, "i2f"), "ftosi_zero": (1, "f2i"), "ftosi_near": (1, "f2i"),
+    "fround_near": (1, "fun"), "fround_zero": (1, "fun"), "fround_down": (1, "fun"), "fround_up": (1, "fun"),
+    # the processor's own approximation of 1/x and 1/sqrt(x): a function of its argument, and nothing more is known of it
+    "frcp_approx": (1, "fun"), "frsqrt_approx": (1, "fun"),
 }
+FLOAT_WIDTHS = (32, 64)
+#: operations that are functions of their arguments but whose value is not defined here
+OPAQUE = frozenset({"frcp_approx", "frsqrt_approx"})
 
 
 def result_width(op: str, args: tuple[Atom, ...], width: int | None) -> int:
@@ -158,6 +168,9 @@ def result_width(op: str, args: tuple[Atom, ...], width: int | None) -> int:
     if len(args) != arity:
         raise SemanticsError(f"{op} takes {arity} arguments")
     w = [a.width for a in args]
+    if rule in ("fsame", "fcmp", "fun", "f2f", "f2i") and any(x not in FLOAT_WIDTHS for x in w) or rule in ("f2f", "i2f") and width not in FLOAT_WIDTHS:
+        raise SemanticsError(f"{op}: not a floating-point width")
+    rule = {"fsame": "same", "fcmp": "cmp", "fun": "un"}.get(rule, rule)
     if rule in ("same", "cmp"):
         if w[0] != w[1]:
             raise SemanticsError(f"{op}: widths {w[0]} and {w[1]} differ")

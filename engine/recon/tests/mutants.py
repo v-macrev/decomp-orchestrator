@@ -8,7 +8,11 @@ from recon.core.sem import BlockCopy, BlockFill, Branch, Const, Let, Lifted, Loa
 
 SWAP = {"add": "sub", "sub": "add", "and": "or", "or": "xor", "xor": "or", "shl": "lshr", "lshr": "ashr", "ashr": "lshr", "ult": "ule", "ule": "ult",
         "slt": "ult", "sle": "ule", "eq": "ne", "ne": "eq", "zext": "sext", "sext": "zext", "mul": "add", "udiv": "sdiv", "sdiv": "udiv",
-        "urem": "srem", "srem": "urem", "clz": "ctz", "ctz": "clz"}
+        "urem": "srem", "srem": "urem", "clz": "ctz", "ctz": "clz",
+        "fadd": "fsub", "fsub": "fadd", "fmul": "fdiv", "fdiv": "fmul", "flt": "fle", "fle": "flt", "feq": "fle", "funo": "feq",
+        "ftosi_zero": "ftosi_near", "ftosi_near": "ftosi_zero", "fround_near": "fround_zero", "fround_zero": "fround_down", "fround_down": "fround_up", "fround_up": "fround_near",
+        "fsqrt": "fround_near"}
+ORDERED = ("fadd", "fmul", "flt", "fle")  # whose operands' order matters, for NaNs if for nothing else
 
 
 def mutants(lifted: Lifted):
@@ -42,6 +46,8 @@ def mutants(lifted: Lifted):
         elif s.op in ("not", "neg"):
             yield f"{s.op} dropped", rebuilt(k, dataclasses.replace(s, op="or", args=(s.args[0], s.args[0])))
         if isinstance(s, Let):
+            if s.op in ORDERED and s.args[0] != s.args[1]:
+                yield f"{s.op} operands swapped", rebuilt(k, dataclasses.replace(s, args=s.args[::-1]))
             for j, a in enumerate(s.args):
                 if isinstance(a, Const) and a.width > 1 and s.op != "undef":
                     off = Const((a.value + 1) & ((1 << a.width) - 1), a.width)

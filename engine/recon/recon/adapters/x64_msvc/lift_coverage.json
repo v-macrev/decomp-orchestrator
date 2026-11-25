@@ -226,6 +226,46 @@
    "undefined": 0,
    "vectors": 224
   },
+  "ADDPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADDPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 261
+  },
+  "ADDPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADDPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 261
+  },
+  "ADDSD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADDSD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ADDSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADDSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
   "ADD_AL_IMM8": {
    "traps": 0,
    "undefined": 0,
@@ -450,6 +490,46 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 320
+  },
+  "ANDNPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ANDNPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 285
+  },
+  "ANDNPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ANDNPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 263
+  },
+  "ANDPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ANDPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 241
+  },
+  "ANDPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ANDPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 309
   },
   "AND_AL_IMM8": {
    "traps": 0,
@@ -1601,6 +1681,46 @@
    "undefined": 0,
    "vectors": 240
   },
+  "CMPPD_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMPPD_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 223
+  },
+  "CMPPS_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMPPS_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 226
+  },
+  "CMPSD_XMM_XMMM64_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMPSD_XMM_XMMM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMPSS_XMM_XMMM32_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMPSS_XMM_XMMM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
   "CMPXCHG_RM16_R16": {
    "traps": 0,
    "undefined": 0,
@@ -1831,10 +1951,250 @@
    "undefined": 0,
    "vectors": 256
   },
+  "COMISD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "COMISD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "COMISS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "COMISS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
   "CQO": {
    "traps": 0,
    "undefined": 0,
    "vectors": 384
+  },
+  "CVTDQ2PD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTDQ2PD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CVTDQ2PS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTDQ2PS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 265
+  },
+  "CVTPD2DQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTPD2DQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 241
+  },
+  "CVTPD2PS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTPD2PS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 253
+  },
+  "CVTPS2DQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTPS2DQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 247
+  },
+  "CVTPS2PD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTPS2PD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CVTSD2SI_R32_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSD2SI_R32_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CVTSD2SI_R64_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSD2SI_R64_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CVTSD2SS_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSD2SS_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CVTSI2SD_XMM_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSI2SD_XMM_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CVTSI2SD_XMM_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSI2SD_XMM_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CVTSI2SS_XMM_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSI2SS_XMM_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CVTSI2SS_XMM_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSI2SS_XMM_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "CVTSS2SD_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSS2SD_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "CVTSS2SI_R32_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSS2SI_R32_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "CVTSS2SI_R64_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTSS2SI_R64_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "CVTTPD2DQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTTPD2DQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 242
+  },
+  "CVTTPS2DQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTTPS2DQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 196
+  },
+  "CVTTSD2SI_R32_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTTSD2SI_R32_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "CVTTSD2SI_R64_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTTSD2SI_R64_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CVTTSS2SI_R32_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTTSS2SI_R32_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CVTTSS2SI_R64_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CVTTSS2SI_R64_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
   },
   "CWD": {
    "traps": 0,
@@ -1906,6 +2266,46 @@
    "undefined": 0,
    "vectors": 240
   },
+  "DIVPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "DIVPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 180
+  },
+  "DIVPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "DIVPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 229
+  },
+  "DIVSD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "DIVSD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "DIVSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "DIVSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
   "DIV_RM16": {
    "traps": 4,
    "undefined": 1644,
@@ -1945,6 +2345,26 @@
    "traps": 4,
    "undefined": 1536,
    "vectors": 256
+  },
+  "EXTRACTPS_R64M32_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "EXTRACTPS_R64M32_XMM_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "EXTRACTPS_RM32_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "EXTRACTPS_RM32_XMM_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
   },
   "IDIV_RM16": {
    "traps": 4,
@@ -2371,6 +2791,11 @@
    "undefined": 0,
    "vectors": 384
   },
+  "LDDQU_XMM_M128:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
   "LEAVEQ": {
    "traps": 0,
    "undefined": 0,
@@ -2481,6 +2906,46 @@
    "undefined": 1344,
    "vectors": 336
   },
+  "MAXPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MAXPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 259
+  },
+  "MAXPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MAXPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 270
+  },
+  "MAXSD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MAXSD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "MAXSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MAXSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
   "MFENCE": {
    "traps": 0,
    "undefined": 0,
@@ -2521,6 +2986,296 @@
    "undefined": 0,
    "vectors": 384
   },
+  "MINPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MINPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 245
+  },
+  "MINPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MINPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 197
+  },
+  "MINSD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MINSD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MINSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MINSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVAPD_XMMM128_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVAPD_XMMM128_XMM:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 252
+  },
+  "MOVAPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVAPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 283
+  },
+  "MOVAPS_XMMM128_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVAPS_XMMM128_XMM:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 176
+  },
+  "MOVAPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVAPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 214
+  },
+  "MOVDDUP_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVDDUP_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVDQA_XMMM128_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVDQA_XMMM128_XMM:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 302
+  },
+  "MOVDQA_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVDQA_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 226
+  },
+  "MOVDQU_XMMM128_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVDQU_XMMM128_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVDQU_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVDQU_XMM_XMMM128:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 368
+  },
+  "MOVD_RM32_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVD_RM32_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "MOVD_XMM_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVD_XMM_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOVHLPS_XMM_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVHPD_M64_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "MOVHPD_XMM_M64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "MOVHPS_M64_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "MOVHPS_XMM_M64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOVLHPS_XMM_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVLPD_M64_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "MOVLPD_XMM_M64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "MOVLPS_M64_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "MOVLPS_XMM_M64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOVMSKPD_R32_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVMSKPD_R64_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVMSKPS_R32_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVMSKPS_R64_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVNTDQA_XMM_M128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 264
+  },
+  "MOVNTDQ_M128_XMM:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 271
+  },
+  "MOVNTI_M32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "MOVNTI_M64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "MOVNTPD_M128_XMM:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 287
+  },
+  "MOVNTPS_M128_XMM:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 213
+  },
+  "MOVQ_RM64_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVQ_RM64_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVQ_XMMM64_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVQ_XMMM64_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOVQ_XMM_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVQ_XMM_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "MOVQ_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVQ_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
   "MOVSB_M8_M8": {
    "traps": 0,
    "undefined": 0,
@@ -2541,6 +3296,46 @@
    "undefined": 0,
    "vectors": 384
   },
+  "MOVSD_XMMM64_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSD_XMMM64_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "MOVSD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVSHDUP_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSHDUP_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 295
+  },
+  "MOVSLDUP_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSLDUP_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 229
+  },
   "MOVSQ_M64_M64": {
    "traps": 0,
    "undefined": 0,
@@ -2550,6 +3345,26 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 384
+  },
+  "MOVSS_XMMM32_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSS_XMMM32_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "MOVSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
   },
   "MOVSW_M16_M16": {
    "traps": 0,
@@ -2650,6 +3465,46 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 272
+  },
+  "MOVUPD_XMMM128_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVUPD_XMMM128_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVUPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVUPD_XMM_XMMM128:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOVUPS_XMMM128_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVUPS_XMMM128_XMM:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOVUPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVUPS_XMM_XMMM128:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
   },
   "MOVZX_R16_RM16": {
    "traps": 0,
@@ -2761,6 +3616,11 @@
    "undefined": 0,
    "vectors": 320
   },
+  "MOV_R16_RM16:mem:gs": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
   "MOV_R32_IMM32": {
    "traps": 0,
    "undefined": 0,
@@ -2775,6 +3635,11 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 288
+  },
+  "MOV_R32_RM32:mem:gs": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
   },
   "MOV_R64_IMM64": {
    "traps": 0,
@@ -2791,6 +3656,11 @@
    "undefined": 0,
    "vectors": 256
   },
+  "MOV_R64_RM64:mem:gs": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
   "MOV_R8_IMM8": {
    "traps": 0,
    "undefined": 0,
@@ -2805,6 +3675,11 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 272
+  },
+  "MOV_R8_RM8:mem:gs": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
   },
   "MOV_RAX_MOFFS64:mem": {
    "traps": 0,
@@ -2831,6 +3706,11 @@
    "undefined": 0,
    "vectors": 272
   },
+  "MOV_RM16_R16:mem:gs": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 160
+  },
   "MOV_RM32_IMM32": {
    "traps": 0,
    "undefined": 0,
@@ -2850,6 +3730,11 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 304
+  },
+  "MOV_RM32_R32:mem:gs": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
   },
   "MOV_RM64_IMM32": {
    "traps": 0,
@@ -2871,6 +3756,11 @@
    "undefined": 0,
    "vectors": 256
   },
+  "MOV_RM64_R64:mem:gs": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 176
+  },
   "MOV_RM8_IMM8": {
    "traps": 0,
    "undefined": 0,
@@ -2890,6 +3780,51 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 240
+  },
+  "MOV_RM8_R8:mem:gs": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 160
+  },
+  "MULPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MULPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 249
+  },
+  "MULPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MULPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 249
+  },
+  "MULSD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MULSD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "MULSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MULSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
   },
   "MUL_RM16": {
    "traps": 0,
@@ -3095,6 +4030,26 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 304
+  },
+  "ORPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ORPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 174
+  },
+  "ORPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ORPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 272
   },
   "OR_AL_IMM8": {
    "traps": 0,
@@ -3321,10 +4276,700 @@
    "undefined": 240,
    "vectors": 240
   },
+  "PACKSSDW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PACKSSDW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 215
+  },
+  "PACKSSWB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PACKSSWB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 212
+  },
+  "PACKUSDW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PACKUSDW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 322
+  },
+  "PACKUSWB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PACKUSWB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 196
+  },
+  "PADDB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PADDB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 255
+  },
+  "PADDD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PADDD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 280
+  },
+  "PADDQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PADDQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 251
+  },
+  "PADDSB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PADDSB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 254
+  },
+  "PADDSW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PADDSW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 201
+  },
+  "PADDUSB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PADDUSB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 271
+  },
+  "PADDUSW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PADDUSW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 282
+  },
+  "PADDW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PADDW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 264
+  },
+  "PALIGNR_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PALIGNR_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 211
+  },
+  "PANDN_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PANDN_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 262
+  },
+  "PAND_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PAND_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 293
+  },
   "PAUSE": {
    "traps": 0,
    "undefined": 0,
    "vectors": 384
+  },
+  "PAVGB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PAVGB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 230
+  },
+  "PAVGW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PAVGW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 251
+  },
+  "PCMPEQB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PCMPEQB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 241
+  },
+  "PCMPEQD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PCMPEQD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 244
+  },
+  "PCMPEQQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PCMPEQQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 251
+  },
+  "PCMPEQW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PCMPEQW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 204
+  },
+  "PCMPGTB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PCMPGTB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 246
+  },
+  "PCMPGTD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PCMPGTD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 316
+  },
+  "PCMPGTQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PCMPGTQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 223
+  },
+  "PCMPGTW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PCMPGTW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 204
+  },
+  "PEXTRB_R32M8_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PEXTRB_R32M8_XMM_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "PEXTRB_R64M8_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PEXTRB_R64M8_XMM_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "PEXTRD_RM32_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PEXTRD_RM32_XMM_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "PEXTRQ_RM64_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PEXTRQ_RM64_XMM_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "PEXTRW_R32M16_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PEXTRW_R32M16_XMM_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "PEXTRW_R32_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PEXTRW_R64M16_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PEXTRW_R64M16_XMM_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "PEXTRW_R64_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PINSRB_XMM_R32M8_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PINSRB_XMM_R32M8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "PINSRB_XMM_R64M8_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PINSRB_XMM_R64M8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "PINSRD_XMM_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PINSRD_XMM_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "PINSRQ_XMM_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PINSRQ_XMM_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "PINSRW_XMM_R32M16_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PINSRW_XMM_R32M16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "PINSRW_XMM_R64M16_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PINSRW_XMM_R64M16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "PMADDWD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMADDWD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 296
+  },
+  "PMAXSB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMAXSB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 297
+  },
+  "PMAXSD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMAXSD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 180
+  },
+  "PMAXSW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMAXSW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 287
+  },
+  "PMAXUB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMAXUB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 190
+  },
+  "PMAXUD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMAXUD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "PMAXUW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMAXUW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 245
+  },
+  "PMINSB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMINSB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 243
+  },
+  "PMINSD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMINSD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 223
+  },
+  "PMINSW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMINSW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 270
+  },
+  "PMINUB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMINUB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 250
+  },
+  "PMINUD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMINUD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 219
+  },
+  "PMINUW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMINUW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 262
+  },
+  "PMOVMSKB_R32_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVMSKB_R64_XMM": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVSXBD_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVSXBD_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "PMOVSXBQ_XMM_XMMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVSXBQ_XMM_XMMM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "PMOVSXBW_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVSXBW_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "PMOVSXDQ_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVSXDQ_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "PMOVSXWD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVSXWD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "PMOVSXWQ_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVSXWQ_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "PMOVZXBD_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVZXBD_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "PMOVZXBQ_XMM_XMMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVZXBQ_XMM_XMMM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "PMOVZXBW_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVZXBW_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "PMOVZXDQ_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVZXDQ_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "PMOVZXWD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVZXWD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "PMOVZXWQ_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMOVZXWQ_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "PMULHUW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMULHUW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 200
+  },
+  "PMULHW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMULHW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 265
+  },
+  "PMULLD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMULLD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 208
+  },
+  "PMULLW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMULLW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 264
+  },
+  "PMULUDQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PMULUDQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 272
   },
   "POPCNT_R16_RM16": {
    "traps": 0,
@@ -3371,6 +5016,396 @@
    "undefined": 0,
    "vectors": 224
   },
+  "POR_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "POR_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 218
+  },
+  "PREFETCHNTA_M8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "PREFETCHRESERVED3_M8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "PREFETCHT0_M8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "PREFETCHT1_M8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "PREFETCHT2_M8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "PREFETCHW_M8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "PSADBW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSADBW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 237
+  },
+  "PSHUFB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSHUFB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 237
+  },
+  "PSHUFD_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSHUFD_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 228
+  },
+  "PSHUFHW_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSHUFHW_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 206
+  },
+  "PSHUFLW_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSHUFLW_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 217
+  },
+  "PSLLDQ_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSLLD_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSLLD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSLLD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 249
+  },
+  "PSLLQ_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSLLQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSLLQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 275
+  },
+  "PSLLW_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSLLW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSLLW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "PSRAD_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRAD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRAD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 268
+  },
+  "PSRAW_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRAW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRAW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 207
+  },
+  "PSRLDQ_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRLD_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRLD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRLD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 252
+  },
+  "PSRLQ_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRLQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRLQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 264
+  },
+  "PSRLW_XMM_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRLW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSRLW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 218
+  },
+  "PSUBB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSUBB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "PSUBD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSUBD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 191
+  },
+  "PSUBQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSUBQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 234
+  },
+  "PSUBSB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSUBSB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 257
+  },
+  "PSUBSW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSUBSW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 232
+  },
+  "PSUBUSB_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSUBUSB_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 285
+  },
+  "PSUBUSW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSUBUSW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 248
+  },
+  "PSUBW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PSUBW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 209
+  },
+  "PTEST_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PTEST_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 270
+  },
+  "PUNPCKHBW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUNPCKHBW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 265
+  },
+  "PUNPCKHDQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUNPCKHDQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 285
+  },
+  "PUNPCKHQDQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUNPCKHQDQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 229
+  },
+  "PUNPCKHWD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUNPCKHWD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 317
+  },
+  "PUNPCKLBW_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUNPCKLBW_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 285
+  },
+  "PUNPCKLDQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUNPCKLDQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 278
+  },
+  "PUNPCKLQDQ_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUNPCKLQDQ_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 237
+  },
+  "PUNPCKLWD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUNPCKLWD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 250
+  },
   "PUSHQ_IMM32": {
    "traps": 0,
    "undefined": 0,
@@ -3395,6 +5430,16 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 304
+  },
+  "PXOR_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PXOR_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 224
   },
   "RCL_RM16_1": {
    "traps": 0,
@@ -3515,6 +5560,26 @@
    "traps": 0,
    "undefined": 208,
    "vectors": 288
+  },
+  "RCPPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "RCPPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 234,
+   "vectors": 234
+  },
+  "RCPSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "RCPSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
   },
   "RCR_RM16_1": {
    "traps": 0,
@@ -3890,6 +5955,66 @@
    "traps": 0,
    "undefined": 192,
    "vectors": 256
+  },
+  "ROUNDPD_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROUNDPD_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 264
+  },
+  "ROUNDPS_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROUNDPS_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 253
+  },
+  "ROUNDSD_XMM_XMMM64_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROUNDSD_XMM_XMMM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "ROUNDSS_XMM_XMMM32_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROUNDSS_XMM_XMMM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "RSQRTPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "RSQRTPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 274,
+   "vectors": 274
+  },
+  "RSQRTSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "RSQRTSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
   },
   "SAHF": {
    "traps": 0,
@@ -4921,6 +7046,66 @@
    "undefined": 704,
    "vectors": 336
   },
+  "SHUFPD_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SHUFPD_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 246
+  },
+  "SHUFPS_XMM_XMMM128_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SHUFPS_XMM_XMMM128_IMM8:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 211
+  },
+  "SQRTPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SQRTPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 237
+  },
+  "SQRTPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SQRTPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 236
+  },
+  "SQRTSD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SQRTSD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SQRTSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SQRTSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
   "STC": {
    "traps": 0,
    "undefined": 0,
@@ -4970,6 +7155,46 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 384
+  },
+  "SUBPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUBPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 233
+  },
+  "SUBPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUBPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 229
+  },
+  "SUBSD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUBSD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SUBSS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUBSS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
   },
   "SUB_AL_IMM8": {
    "traps": 0,
@@ -5366,10 +7591,70 @@
    "undefined": 1344,
    "vectors": 336
   },
+  "UCOMISD_XMM_XMMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "UCOMISD_XMM_XMMM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "UCOMISS_XMM_XMMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "UCOMISS_XMM_XMMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
   "UD2": {
    "traps": 4,
    "undefined": 0,
    "vectors": 0
+  },
+  "UNPCKHPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "UNPCKHPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "UNPCKHPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "UNPCKHPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 279
+  },
+  "UNPCKLPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "UNPCKLPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 243
+  },
+  "UNPCKLPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "UNPCKLPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 215
   },
   "XADD_RM16_R16": {
    "traps": 0,
@@ -5505,6 +7790,26 @@
    "traps": 0,
    "undefined": 0,
    "vectors": 224
+  },
+  "XORPD_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "XORPD_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 199
+  },
+  "XORPS_XMM_XMMM128": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "XORPS_XMM_XMMM128:mem": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 251
   },
   "XOR_AL_IMM8": {
    "traps": 0,
@@ -5734,6 +8039,6 @@
  },
  "schema": 1,
  "seed": 20261125,
- "source_digest": "66658f8571c775420ecc8cdb7d93b5b37decdc1ca7ca14ecc2ec09608498f9c7",
- "vectors": 380335
+ "source_digest": "1d6507ef87b2d2c67c76e17d8637c18ff7dd4247a6604ffba5d6e8b5186eacb8",
+ "vectors": 528590
 }

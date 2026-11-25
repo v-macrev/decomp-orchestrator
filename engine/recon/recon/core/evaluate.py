@@ -10,8 +10,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Callable
 
+from recon.core import softfloat as sf
 from recon.core.sem import (
-    Atom, BlockCopy, BlockFill, Branch, CallTo, Const, Fence, Get, Goto, Let, Lifted, Load, Put, ReturnTo, Store, Trap, Val,
+    OPAQUE, Atom, BlockCopy, BlockFill, Branch, CallTo, Const, Fence, Get, Goto, Let, Lifted, Load, Put, ReturnTo, Store, Trap, Val,
 )
 
 
@@ -39,6 +40,31 @@ def signed(v: int, w: int) -> int:
     return v - (1 << w) if v >> (w - 1) & 1 else v
 
 
+_FLOAT2 = {"fadd": sf.add, "fsub": sf.sub, "fmul": sf.mul, "fdiv": sf.div}
+_FLOATCMP = {"flt": ("lt",), "fle": ("lt", "eq"), "feq": ("eq",), "funo": ("un",)}
+
+
+def _float(op: str, args: list, w: int, out: int):
+    a = args[0]
+    if op in _FLOAT2:
+        return _FLOAT2[op](a, args[1], w)
+    if op in _FLOATCMP:
+        return int(sf.cmp(a, args[1], w) in _FLOATCMP[op])
+    if op == "fsqrt":
+        return sf.sqrt(a, w)
+    if op == "fcvt":
+        return sf.convert(a, w, out)
+    if op == "sitof":
+        return sf.from_int(signed(a, w), out)
+    if op.startswith("ftosi_"):
+        return sf.to_int(a, w, out, op[6:])
+    if op.startswith("fround_"):
+        return sf.round_to_integral(a, w, op[7:])
+    if op in OPAQUE:
+        return UNDEF  # a function of its argument whose value is not defined here
+    raise AssertionError(op)
+
+
 def apply(op: str, args: list, widths: list[int], out: int):
     """One operation on integers that fit their widths."""
     m = (1 << out) - 1
@@ -48,6 +74,8 @@ def apply(op: str, args: list, widths: list[int], out: int):
         return UNDEF
     a = args[0]
     w = widths[0]
+    if op[0] == "f" or op == "sitof":
+        return _float(op, args, w, out)
     if len(args) == 1:
         if op == "not":
             return ~a & m

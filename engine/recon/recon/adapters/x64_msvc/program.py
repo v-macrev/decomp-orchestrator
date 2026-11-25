@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from recon.adapters.x64_msvc import eh
 from recon.adapters.x64_msvc import switch as sw
 from recon.adapters.x64_msvc import unwind as uw
 from recon.adapters.x64_msvc.abi import CALLING, CLOBBERED, WIDTHS
@@ -18,11 +19,14 @@ from recon.core.analysis import dataflow as df
 from recon.core.analysis import frame as fr
 from recon.core.analysis.values import Values
 from recon.core.canonical import digest
-from recon.core.sem import Branch, Const, Goto, Lifted, Unsupported
+from recon.core.ir import build as ib
+from recon.core.ir.model import Fn
+from recon.core.sem import Branch, CallTo, Const, Goto, Lifted, Unsupported
 
 UNSUPPORTED = "UNSUPPORTED_INSTRUCTION"
 INVALID = "INVALID_INSTRUCTION"
 CONFLICT = "CONFLICTING_EVIDENCE"
+NOT_REPRESENTED = "NOT_REPRESENTED"
 
 
 @dataclass(frozen=True)
@@ -117,6 +121,23 @@ def analyse(code: bytes, rva: int, image_base: int, validated: frozenset[str] | 
     if frame is not None and unwind_entries is not None:
         a.unwind_checked, a.unwind_conflicts = agreement(frame, unwind_entries, rva)
     return a
+
+
+def to_ir(a: Analysis, image_base: int, unwind_entries: list[UnwindEntry] | None = None, read: uw.Reader | None = None) -> Fn | Refusal:
+    """The IR of an analysed function, straight from its instructions (no transformation applied). `read`: the image, for exception data."""
+    try:
+        exceptions = None
+        if any(info.handler is not None for _b, _e, info in unwind_entries or []):
+            if read is None:
+                raise ib.BuildRefusal("exception-edges-not-represented")
+            exceptions = eh.unwinding(read, unwind_entries or [], a.rva, [i.end for i in a.insns if isinstance(i.terminator, CallTo)])
+        if a.frame is None:
+            raise ib.BuildRefusal(a.frame_refusal or "no-frame")
+        if a.unwind_conflicts:
+            raise ib.BuildRefusal("frame-contradicts-unwind-data")
+        return ib.build(a.cfg, a.flow, a.frame, CALLING, WIDTHS, image_base, a.rva, exceptions)
+    except (ib.BuildRefusal, eh.EhError) as e:
+        return Refusal("ir", NOT_REPRESENTED, e.reason)
 
 
 def agreement(frame: fr.Frame, entries: list[UnwindEntry], rva: int) -> tuple[int, tuple[str, ...]]:

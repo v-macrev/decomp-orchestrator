@@ -271,10 +271,10 @@ def test_falling_off_the_end_is_an_error_but_a_final_call_does_not_return():
 
 def test_an_unsupported_instruction_is_a_structured_refusal_with_every_missing_form():
     a = Asm()
-    a(I.create_reg_reg(C.ADDPS_XMM_XMMM128, R.XMM0, R.XMM1))(I.create(C.CPUID))(A.ret())
+    a(I.create(C.EMMS))(I.create(C.CPUID))(A.ret())
     r = run(a.assemble()[0])
     assert (r.stage, r.code) == ("lift", "UNSUPPORTED_INSTRUCTION")
-    assert r.missing == (("ADDPS_XMM_XMMM128", "not-in-subset"), ("CPUID", "not-in-subset"))
+    assert r.missing == (("CPUID", "not-in-subset"), ("EMMS", "not-in-subset"))
 
 
 def test_a_form_that_is_not_validated_is_refused():
@@ -379,9 +379,29 @@ def test_unwind_codes_are_decoded():
     raw = bytes([20, 0x04 | 6 << 4, 8, 0, 15, 0x01, 0x20, 0, 10, 0x02 | 4 << 4, 8, 0x03 | 2 << 4, 6, 0x08 | 7 << 4, 2, 0, 4, 0x00 | 3 << 4])
     assert uw._codes(raw, len(raw) // 2) == (
         UnwindCode(20, register="rsi", slot=64), UnwindCode(15, 0x100), UnwindCode(10, 40), UnwindCode(8, sets_frame=True),
-        UnwindCode(6, vector=True, slot=32), UnwindCode(4, 8, "rbx", push=True))
+        UnwindCode(6, register="xmm7", vector=True, slot=32), UnwindCode(4, 8, "rbx", push=True))
     assert uw._codes(bytes([1, 0x01]), 1) is None  # runs past the table
     assert uw._codes(bytes([1, 0x0A]), 1) is None  # a machine frame
+
+
+def vector_save(restore: bool = True) -> Asm:
+    a = Asm()
+    a(A.sub_rsp(0x38))(I.create_mem_reg(C.MOVAPS_XMMM128_XMM, mem(R.RSP, 0x20), R.XMM7))(I.create_reg_reg(C.MOVAPS_XMM_XMMM128, R.XMM7, R.XMM1))
+    if restore:
+        a(I.create_reg_mem(C.MOVAPS_XMM_XMMM128, R.XMM7, mem(R.RSP, 0x20)))
+    return a(A.add_rsp(0x38))(A.ret())
+
+
+def test_a_saved_vector_register_is_found_and_must_come_back():
+    r = run(vector_save().assemble()[0])
+    assert r.frame.saved == {"xmm7": 0x20 - 0x38}
+    assert run(vector_save(restore=False).assemble()[0]).frame_refusal == "preserved-register-not-restored"
+    at = r.insns[0].end - RVA
+    info = UnwindInfo(1, 0, 9, 3, None, None, None, None, (UnwindCode(at + 5, register="xmm7", vector=True, slot=0x20), UnwindCode(at, 0x38)))
+    checked, bad = pg.agreement(r.frame, [(RVA, RVA + 64, info)], RVA)
+    assert checked == 2 and bad == ()
+    wrong = UnwindInfo(1, 0, 9, 3, None, None, None, None, (UnwindCode(at + 5, register="xmm7", vector=True, slot=0x10), UnwindCode(at, 0x38)))
+    assert pg.agreement(r.frame, [(RVA, RVA + 64, wrong)], RVA)[1] == ("saved-register-slot",)
 
 
 # ---------------------------------------------------------------- generated programs

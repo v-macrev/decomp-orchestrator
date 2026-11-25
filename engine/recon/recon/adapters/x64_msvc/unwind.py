@@ -31,7 +31,7 @@ class UnwindCode:
     register: str | None = None     # the saved register
     push: bool = False
     slot: int = 0                   # saved by a move: its place above the stack pointer after the whole prologue
-    vector: bool = False            # a vector register saved (not modelled yet)
+    vector: bool = False            # the saved register is a vector register
     sets_frame: bool = False
 
 
@@ -82,7 +82,7 @@ def _codes(raw: bytes, count: int) -> tuple[UnwindCode, ...] | None:
             elif op in (8, 9):
                 used = op - 6
                 v = slots(used - 1)
-                out.append(UnwindCode(offset, vector=True, slot=v * 16 if op == 8 else v))
+                out.append(UnwindCode(offset, register=f"xmm{inf}", vector=True, slot=v * 16 if op == 8 else v))
             else:
                 return None  # a machine frame, or a code version 1 does not define
             k += used

@@ -14,7 +14,11 @@ from recon.adapters.skyrim.inventory import Target
 from recon.adapters.skyrim import survey as sv
 from recon.adapters.x64_msvc import program as pg
 from recon.adapters.x64_msvc import unwind as uw
+from recon.adapters.x64_msvc.abi import CALLING
 from recon.core.analysis import cfg as cf
+from recon.core.ir import idioms, passes
+from recon.core.ir import validate as va
+from recon.core.ir.model import Fn
 
 
 @dataclass
@@ -28,9 +32,47 @@ class Row:
     frame: str = ""                                # "" or the refusal
     unwind: tuple[int, tuple[str, ...]] = (0, ())
     facts: dict[str, int] = field(default_factory=dict)
+    handler: str = ""                              # "" or the kind of the language-specific handler's data
+    ir: str = ""                                   # "", "admitted", "refused: <reason>", "rejected: <validator codes>", "failed: <where>"
+    ir_facts: dict[str, int] = field(default_factory=dict)
+    hypotheses: dict[str, int] = field(default_factory=dict)   # proved, by kind
 
 
-def analyse_target(img: PinnedImage, t: Target, pdata, starts, validated: frozenset[str] | None) -> Row:
+def handler_kind(img: PinnedImage, entries) -> str:
+    kinds = set()
+    for _b, _e, info in entries:
+        if info.handler is not None:
+            kinds.add("cxx-frame-handler-3" if uw.funcinfo_magic(img.read, info) == uw.FUNCINFO_MAGIC else "other")
+    return "+".join(sorted(kinds))
+
+
+def ir_of(r: pg.Analysis, image_base: int, entries, row: Row, read=None) -> Fn | None:
+    """The admitted normal form, with what happened on the way to it recorded in the row."""
+    fn = pg.to_ir(r, image_base, entries, read)
+    if isinstance(fn, pg.Refusal):
+        row.ir = f"refused: {fn.detail}"
+        return None
+    try:
+        bad = va.problems(fn, CALLING)
+        if bad:
+            row.ir = "rejected: raw: " + ",".join(bad)
+            return None
+        out = passes.normalise(fn, CALLING)
+        admitted = va.require(va.admit(out, CALLING))
+    except va.InvalidIr as e:
+        row.ir = f"rejected: {e}"
+        return None
+    except passes.Unsettled:
+        row.ir = "failed: unsettled"
+        return None
+    row.ir = "admitted"
+    row.ir_facts = {"ops_raw": sum(1 for _ in fn.ops()), "ops": sum(1 for _ in admitted.ops()), "regions": len(admitted.regions), "observations": len(admitted.observations),
+                    "open_frame": int(any(x.name == "open-frame" for x in admitted.regions)), "assumptions": int(bool(admitted.assumptions)), "bytes": len(admitted.to_bytes()), "states": len(admitted.unwind)}
+    row.hypotheses = dict(sorted(Counter(h.kind for h in idioms.hypotheses(admitted)).items()))
+    return admitted
+
+
+def analyse_target(img: PinnedImage, t: Target, pdata, starts, validated: frozenset[str] | None, ir: bool = False) -> Row:
     seen = sv.analyse_function(img, t.rva, t.size, _pdata=pdata, _starts=starts)
     if seen.status != sv.DECODED:  # conflicting or unsupported evidence stops a function before any lifting
         return Row(t.rva, t.size, "survey", seen.reason or seen.status)
@@ -44,18 +86,58 @@ def analyse_target(img: PinnedImage, t: Target, pdata, starts, validated: frozen
              "tail": kinds[cf.TAIL] + kinds[cf.TAIL_INDIRECT] + sum(1 for b in r.cfg.blocks if b.end_kind == cf.BRANCH and b.leaves_to),
              "unreachable_blocks": len(r.cfg.blocks) - len(r.cfg.reachable), "insns": len(r.insns),
              "calls": len(r.frame.calls) if r.frame else 0, "assumed": len(r.frame.assumptions) if r.frame else 0}
-    return Row(t.rva, t.size, "analysed", digest=r.digest(), frame=r.frame_refusal or "", unwind=(r.unwind_checked, r.unwind_conflicts), facts=facts)
+    row = Row(t.rva, t.size, "analysed", digest=r.digest(), frame=r.frame_refusal or "", unwind=(r.unwind_checked, r.unwind_conflicts), facts=facts, handler=handler_kind(img, entries))
+    if ir:
+        ir_of(r, img.image_base, entries, row, img.read)
+    return row
 
 
-def run(img: PinnedImage, targets: list[Target], validated: frozenset[str] | None, progress=None) -> list[Row]:
+def run(img: PinnedImage, targets: list[Target], validated: frozenset[str] | None, progress=None, ir: bool = False, jobs: int = 1) -> list[Row]:
+    """Rows in the order of the targets, whatever the number of processes."""
+    if jobs > 1:
+        import multiprocessing as mp
+
+        with mp.get_context("spawn").Pool(jobs, _worker_start, (img.origin, validated, ir), maxtasksperchild=200) as pool:
+            rows = []
+            for row in pool.imap(_worker_run, targets, chunksize=16):
+                rows.append(row)
+                if progress and len(rows) % 2000 == 0:
+                    progress(len(rows))
+            return rows
     pdata = img.runtime_functions()
     starts = [p[0] for p in pdata]
     rows = []
     for n, t in enumerate(targets):
-        rows.append(analyse_target(img, t, pdata, starts, validated))
+        rows.append(analyse_target(img, t, pdata, starts, validated, ir))
         if progress and n % 2000 == 0:
             progress(n)
     return rows
+
+
+_WORKER: dict = {}
+
+
+def _worker_start(origin: tuple, validated: frozenset[str] | None, ir: bool) -> None:
+    img = PinnedImage(*origin)
+    pdata = img.runtime_functions()
+    _WORKER.update(img=img, pdata=pdata, starts=[p[0] for p in pdata], validated=validated, ir=ir)
+
+
+def _worker_run(t: Target) -> Row:
+    return analyse_target(_WORKER["img"], t, _WORKER["pdata"], _WORKER["starts"], _WORKER["validated"], _WORKER["ir"])
+
+
+def _ir_report(rows: list[Row]) -> dict:
+    tried = [r for r in rows if r.ir]
+    got = [r for r in tried if r.ir == "admitted"]
+    return {
+        "tried": len(tried), "by_result": dict(sorted(Counter(r.ir for r in tried).items())),
+        "operations_from_the_instructions": sum(r.ir_facts["ops_raw"] for r in got), "operations_in_normal_form": sum(r.ir_facts["ops"] for r in got),
+        "with_exception_states": sum(1 for r in got if r.ir_facts["states"]),
+        "with_open_frame": sum(r.ir_facts["open_frame"] for r in got), "with_a_stated_assumption": sum(r.ir_facts["assumptions"] for r in got),
+        "proved_hypotheses": dict(sorted(sum((Counter(r.hypotheses) for r in got), Counter()).items())),
+        "functions_with_a_hypothesis": sum(1 for r in got if r.hypotheses),
+    }
 
 
 def aggregate(rows: list[Row]) -> dict:
@@ -76,6 +158,7 @@ def aggregate(rows: list[Row]) -> dict:
         "switches_resolved": sum(r.facts["switches"] for r in done), "with_unresolved_jump": sum(1 for r in done if r.facts["unresolved"]),
         "with_tail_exit": sum(1 for r in done if r.facts["tail"]), "with_unreachable_blocks": sum(1 for r in done if r.facts["unreachable_blocks"]),
         "blocks": sum(r.facts["blocks"] for r in done), "instructions_analysed": sum(r.facts["insns"] for r in done),
+        "with_a_handler": dict(sorted(Counter(r.handler for r in done if r.handler).items())), "ir": _ir_report(rows),
     }
 
 

@@ -99,7 +99,7 @@ Found by re-reading the code and the audit against the specification before Phas
 | Stack and registers | Done (`frame.py`): height at every instruction, saved registers and their slots, home space, stack arguments, locals, frame addresses that leave, proof that preserved registers are restored; assumptions stated per function |
 | Agreement with unwind codes | Done: unwind codes decoded, compared with the recovered frame |
 | Coverage and demand report | Done: `recon coverage`; the demand by form ("how many functions would lift completely if X were added") is written privately |
-| Alias analysis, side-effect summaries, SSA, the versioned IR | **Not done**: Phase 4 |
+| Alias analysis, side-effect summaries, SSA, the versioned IR | Phase 4, below |
 
 Measured on the pinned image over the **62,247** unmatched offered targets (469 s, one process):
 
@@ -128,8 +128,58 @@ execution-based tests on this machine's processor.
 * One processor was tested (natively and under WSL). What an architecture calls undefined is never compared, so its breadth rests on the manual.
 * "Lifts completely" says nothing about matching; no source is produced yet.
 * The frame assumes indexed and escaped stores stay inside their own object, and says so per function.
-* Vector registers are not modelled; a function that uses one is refused, so no vector register's preservation is claimed.
-* Functions with exception handlers are analysed along ordinary edges only; the edges into handlers are not in the graph.
+* ~~Vector registers are not modelled~~ (modelled since Phase 4).
+* Functions with exception handlers are analysed along ordinary edges only; Phase 4 adds the cleanup states and refuses catch blocks.
+
+## Phase 4: semantic IR — status 2026-11-25, in progress
+
+| Deliverable | State |
+|---|---|
+| Floating-point and vector lifting | Done for the forms the demand report asked for (`lift_sse.py`, own arithmetic on integers in `core/softfloat.py`). Together with the integer subset: **1,607 forms pass, 528,590 vectors, 0 differences, 580 predicted traps confirmed** (`lift_coverage.json`, 373 s, natively on Windows; not repeated on Linux since Phase 3). Refused: 143 operand kinds, 14 operand sizes, 12 other encodings, 4 prefixes, 2 the encoder cannot make, 2 outside the subset |
+| Are the vector vectors able to notice a mistake? | 4,304 of 5,531 deliberately wrong semantics of XMM forms noticed (77.8%). Survivors were sampled, mostly equivalent; **not** all reviewed |
+| Semantic IR, SSA, memory model | Done: `core/ir/{model,memory,build}.py`; versioned, canonical bytes, digest. Unknown aliasing is kept unknown |
+| Cleanup-only C++ exceptions | Done (`x64_msvc/eh.py`): states at calls, what a cleanup may read. Catch blocks and other handlers are refused by name |
+| IR validator and the one gate | Done: `validate.py`; only `admit` then `require` lead on, and a changed function no longer passes |
+| Transformations | simplify (2,970 rule instances under 163 names, **each proved by SMT**), merge, forward, promote, dead-stores, dead, polarity, straighten. The passes that are not rules are checked by whole-function SMT on loop-free code and by running generated programs; each result is validated |
+| Compiler-undo | Division and remainder by constants (theorems, checked for every input at 4 and 6 bits in the tests, once at 8), multiplication, masks, ranges, minimum, maximum, absolute value, conditional values, copies, fills, rotated loops. Kept **beside** the function as proved hypotheses, never put in its place unasked |
+| Aliasing and side effects | Done: `effects.py` |
+
+**Measured so far** on the pinned image, over the **62,247** unmatched targets (3,095 s, 3 processes). This run preceded the last four
+corrections below; a run with them is under way and replaces it.
+
+| What | Count |
+|---|---|
+| Lift completely | **61,875 of 62,247 (99.4%)**; 43,247 after Phase 3. 372 lack a form (16 distinct forms) |
+| Frame recovered | 61,751; 122 refused (`stack-pointer-unknown`); 20,069 with a stated assumption |
+| Unwind facts compared | 367,244 in 61,750 functions; **1 function conflicts** (no unwind data, but a frame) |
+| **IR admitted in normal form** | **61,380 of 62,247 (98.6%)** |
+| Refused | 343 catch blocks, 122 no frame, 7 other handlers, 6 unresolved jumps, 2 no control-flow graph |
+| Rejected by the validator | 15, all one fault of the engine (first correction below) |
+| With exception states / an open frame / a stated assumption | 21,546 / 21,720 / 23,602 |
+| Operations | 8,792,237 before, 4,496,605 in normal form |
+| Functions with at least one proved hypothesis | 38,639 |
+
+"Admitted" means valid and covered by the checks above. It says nothing about matching: no source is produced yet.
+
+Corrections since that run, each with a test: memory is re-cut until no address becomes clearer (all 15 rejected functions are now
+admitted); a frame that contradicts the unwind data is refused; a 128-bit product of which only the lower part is used is narrowed;
+the proof of a division checks that its numbers are those of the value's own operations.
+
+Tests: 390 engine tests pass on Windows (with the image and the worktree). Server: 357 of 360 while the machine was busy with the measurement; the other 3
+(the engine through WSL) exceeded their 5 s limit and pass with a longer one. Generated programs run as instructions, raw IR and normal IR agree; on 160 real functions from 4 states each, 640 of 640 runs agree
+raw and normal. 58 deliberate defects were put into the IR code one at a time: 42 were caught at once. Of the 16 others, 13 now have a test,
+2 changed nothing (one of them led to the removal of a redundant condition), 1 led to the stronger proof above.
+
+**Still to do for the gate**: the repeated full measurement; the 13 defects run again against the new tests (the first 6 are caught, the rest running); the
+comparison on about 2,100 real functions; `validate-lift` and the suite on Linux with `z3`.
+
+**Limits**
+
+* Not represented: catch blocks, handlers other than frame handler version 3, asynchronous exceptions. Cleanup code itself is not analysed.
+* Not undone: switch lowering, tail merging, inlining, vectorised and unrolled loops.
+* Floating point assumes the default control word, and says so per function. `rcp` and `rsqrt` approximations are opaque values.
+* Whole-function SMT is for loop-free code. Loops rest on the proved rules, the validator and execution.
+* Which memory is volatile cannot be known from the code. One processor was tested.
 
 ## Items found by the audit that block or shape later phases
 
@@ -139,15 +189,14 @@ execution-based tests on this machine's processor.
 | R-2 | Factor the shared tail of `processTask` (`engine.ts:3031-3150`) into one function | Phase 6 |
 | R-3 | ~~Comparator-accepted build record from a scratch build, and the cost of the local compare~~ done, measured above | - |
 | R-4 | Provenance wording for engine output (D-006), a decision for the user | Phase 6 |
-| R-5 | ~~Hashed, locked venv~~ done for `iced_x86` and `capstone`; `z3` when Phase 4 needs it (D-002) | Phase 4 |
+| R-5 | ~~Hashed, locked venv~~ done, `z3` included (D-021) | - |
 | R-7 | The server runs the engine with the **venv's** Python for any command that decodes (`process.ts` defaults to `python3`); a config value for it | Phase 6 |
 | R-6 | Comparator reason-code list read from source into a mapping test | Phase 5 |
 
 ## Next increments, in order
 
 1. ~~Phase 2, binary analysis~~ (done above).
-2. ~~Phase 3, integer lifting and analysis~~ (done above). Then **Phase 4**: the versioned IR and its validator, first
-   transformations, and scalar floating point and vector moves in the order of the demand report, each with differential tests.
+2. ~~Phase 3, integer lifting and analysis~~ (done above). **Phase 4** is built; what its gate still needs is listed above.
 3. **Phase 5**, the vertical slice on a synthetic function (branches, member access, a call), which
    builds on the measured local compare.
 4. **Phase 6**, the deterministic tier in the orchestrator, ending at one unreconstructed target function

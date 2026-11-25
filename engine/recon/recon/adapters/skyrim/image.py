@@ -21,6 +21,7 @@ class ImageHashMismatch(RuntimeError):
 class PinnedImage:
     def __init__(self, image_path: str | Path, worktree: str | Path, expected_sha256: str | None = None):
         self.up = _up.load(worktree)
+        self.origin = (str(image_path), str(worktree), expected_sha256)  # what another process needs to open the same
         manifest = json.loads((Path(worktree) / "builds/target.json").read_text())
         self.build_id = manifest.get("build_id")
         want = expected_sha256 or manifest["image_sha256"]

@@ -42,7 +42,7 @@ class FrameError(ValueError):
 @dataclass
 class State:
     locs: dict[str, Value]
-    slots: dict[int, Value]          # entry-relative byte offset of a word-sized slot
+    slots: dict[int, tuple[Value, int]]          # entry-relative byte offset of a whole stored value -> it and its size in bytes
     escaped: bool = False            # a frame address went where this analysis cannot follow (memory outside, a callee)
     spilled: bool = False            # a frame address was stored in the frame
     crossed: frozenset[int] = frozenset()   # slots kept across a call that could be its stack arguments
@@ -105,6 +105,7 @@ class _Run:
         self.cfg, self.abi = cfg, abi
         self.bits = 8 * abi.word
         self.mask = (1 << self.bits) - 1
+        self.widths = widths
         self.entry = State({n: Sym(n, 0, w) for n, w in sorted(widths.items())}, {})
         self.frame = Frame()
         self.derived = Sym(abi.stack, 0, 0)
@@ -188,9 +189,15 @@ class _Run:
 
     def merge(self, into: State, o: State) -> bool:
         locs = {k: self.join(into.locs.get(k), o.locs.get(k)) for k in into.locs.keys() | o.locs.keys()}
-        slots = {k: self.join(into.slots.get(k), o.slots.get(k)) for k in into.slots.keys() | o.slots.keys()}
+        slots = {k: (self.join(into.slots[k][0], o.slots[k][0]), into.slots[k][1])
+                 for k in into.slots.keys() & o.slots.keys() if into.slots[k][1] == o.slots[k][1]}
+        # a frame address on one side only is still one
+        for a, b in ((into, o), (o, into)):
+            for k, (v, n) in a.slots.items():
+                if k not in slots and self.from_frame(v) and all(j >= k + n or j + m <= k for j, (_v, m) in slots.items()):
+                    slots[k] = (self.derived, n)
         locs = {k: v for k, v in locs.items() if v is not TOP}
-        slots = {k: v for k, v in slots.items() if v is not TOP}
+        slots = {k: v for k, v in slots.items() if v[0] is not TOP}
         esc, sp, cr = into.escaped or o.escaped, into.spilled or o.spilled, into.crossed | o.crossed
         changed = locs != {k: v for k, v in into.locs.items() if v is not TOP} or slots != into.slots or (esc, sp, cr) != (into.escaped, into.spilled, into.crossed)
         into.locs, into.slots, into.escaped, into.spilled, into.crossed = locs, slots, esc, sp, cr
@@ -233,11 +240,12 @@ class _Run:
                 return unknown
             return self.derived if st.escaped and width >= self.bits else TOP
         self.acc.add(Access(i.rva, h, width // 8, False))
-        if width != self.bits:
+        if width < self.bits:
             return TOP
-        if h in st.slots and h in st.crossed and h not in self.saved.values():
+        if h in st.slots and st.slots[h][1] == width // 8 and h in st.crossed and h not in self.saved.values():
             self.assumed.add(CALLEE_ARGS)
-        return st.slots.get(h, unknown)
+        v, size = st.slots.get(h, (unknown, width // 8))
+        return v if size == width // 8 else self.derived if st.spilled else TOP
 
     def store(self, i: Lifted, addr: Value, v: Value, size: int, st: State) -> None:
         abi = self.abi
@@ -258,12 +266,13 @@ class _Run:
         self.acc.add(Access(i.rva, h, size, True))
         if self.from_frame(v):
             st.spilled = True
-        for k in [k for k in st.slots if k < h + size and h < k + abi.word]:
+        hit = [k for k, (_v, n) in st.slots.items() if k < h + size and h < k + n]
+        for k in hit:
             del st.slots[k]
-        st.crossed -= {k for k in st.crossed if k < h + size and h < k + abi.word}
-        if size == abi.word and v is not TOP:
-            st.slots[h] = v
-            if v.base in abi.preserved and v.off == 0 and v.low == self.bits and v.base not in self.saved and h < abi.word + abi.home:
+        st.crossed -= set(hit) | {k for k in st.crossed if k < h + size and h < k + abi.word}
+        if size >= abi.word and v is not TOP:
+            st.slots[h] = (v, size)
+            if v.base in abi.preserved and v.off == 0 and v.low == 8 * size == self.widths[v.base] and v.base not in self.saved and h < abi.word + abi.home:
                 self.saved[v.base] = h
                 self.saved_at[v.base] = i.rva
 
@@ -308,7 +317,7 @@ class _Run:
         # from the home space down everything is the callee's
         hi = sp + abi.word + abi.home
         st.slots = {k: v for k, v in st.slots.items() if k >= hi}
-        for v in st.slots.values():
+        for v, _size in st.slots.values():
             self.escapes(v, st)  # it may be a stack argument
         st.crossed = frozenset(k for k in st.slots if k < 0)
         st.locs[abi.stack] = Sym(abi.stack, (sp + abi.word) & self.mask, self.bits)

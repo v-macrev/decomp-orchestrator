@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-"""Lifting of the general-purpose integer subset of x86-64 to `recon.core.sem`.
+"""Lifting of x86-64 to `recon.core.sem`: the general-purpose integer subset here, vector and floating point in `lift_sse.py`.
 
 Every register alias, implicit operand and flag is explicit. Flags the architecture leaves undefined become
 `undef`. An instruction outside the subset, or a form that has not passed the execution-based differential
@@ -11,12 +11,16 @@ from __future__ import annotations
 
 from typing import Callable
 
+from recon.adapters.x64_msvc import lift_sse
 from recon.adapters.x64_msvc.decode import _iced, mnemonic_name
 from recon.core.sem import Atom, Builder, Const, Lifted, Loc, Unsupported, Val
 
 GPR = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15")
+XMM = tuple(f"xmm{k}" for k in range(16))
+GS_BASE = "gs_base"  # the base of the thread block; only ever read
 FLAGS = ("cf", "pf", "af", "zf", "sf", "of", "df")
-REG = {n: Loc(n, 64) for n in GPR}
+REG = {n: Loc(n, 64) for n in (*GPR, GS_BASE)}
+VEC = {n: Loc(n, 128) for n in XMM}
 FLAG = {n: Loc(n, 1) for n in FLAGS}
 HIGH_BYTE = {"AH": "rax", "CH": "rcx", "DH": "rdx", "BH": "rbx"}
 
@@ -40,6 +44,7 @@ class _Regs:
 
     def __init__(self, ix) -> None:
         self.map: dict[int, tuple[str, int, int]] = {}
+        self.xmm = {getattr(ix.Register, n.upper()): n for n in XMM}
         names = {v: k for k, v in vars(ix.Register).items() if isinstance(v, int) and not k.startswith("_")}
         for v, name in names.items():
             if not ix.RegisterExt.is_gpr(v):
@@ -52,6 +57,11 @@ class _Regs:
 
 _regs: _Regs | None = None
 _codes: dict[int, str] | None = None
+
+
+def xmm_of(ix, register: int) -> str | None:
+    _tables(ix)
+    return _regs.xmm.get(register)  # type: ignore[union-attr]
 
 
 def _tables(ix):
@@ -151,6 +161,9 @@ class L:
             if scale > 1:
                 v = b.op("shl", v, self.c(scale.bit_length() - 1, 64))
             acc = v if acc is None else b.op("add", acc, v)
+        if ins.segment_prefix == self.ix.Register.GS and self.m not in ("LEA", "NOP"):
+            base = b.get(REG[GS_BASE])
+            acc = base if acc is None else b.op("add", base, acc)
         d = self.c(ins.memory_displacement, 64)
         if acc is None:
             acc = d
@@ -158,6 +171,43 @@ class L:
             acc = b.op("add", acc, d)
         self._ea = acc
         return acc
+
+    # -- vector operands ------------------------------------------------------------------------
+    def is_xmm(self, i: int) -> bool:
+        return self.ins.op_kind(i) == self.ix.OpKind.REGISTER and xmm_of(self.ix, self.ins.op_register(i)) is not None
+
+    def xloc(self, i: int) -> Loc:
+        n = xmm_of(self.ix, self.ins.op_register(i)) if self.ins.op_kind(i) == self.ix.OpKind.REGISTER else None
+        if n is None:
+            raise _Refuse(NOT_GP)
+        return VEC[n]
+
+    def xget(self, i: int) -> Val:
+        return self.b.get(self.xloc(i))
+
+    def xput(self, i: int, v: Atom) -> None:
+        self.b.put(self.xloc(i), v)
+
+    def check_aligned(self) -> None:
+        """A 16-byte operand of most instructions traps unless its address is a multiple of 16."""
+        self.b.trap("misaligned", self.b.op("ne", self.b.op("trunc", self.ea(), width=4), self.c(0, 4)))
+
+    def xrd(self, i: int, w: int, aligned: bool = False) -> Atom:
+        """The low `w` bits of a vector register, or that much memory."""
+        if self.is_mem(i):
+            if aligned:
+                self.check_aligned()
+            return self.b.load(self.ea(), w)
+        v = self.xget(i)
+        return v if w == 128 else self.b.op("trunc", v, width=w)
+
+    def xwr(self, i: int, v: Atom, aligned: bool = False) -> None:
+        if self.is_mem(i):
+            if aligned:
+                self.check_aligned()
+            self.b.store(self.ea(), v)
+        else:
+            self.xput(i, v)
 
     def width(self, i: int) -> int:
         k, K = self.ins.op_kind(i), self.ix.OpKind
@@ -746,6 +796,18 @@ def _total(l: L, n: Atom, size: int) -> Atom:
     return n if size == 1 else l.b.op("shl", n, l.c(size.bit_length() - 1, 8))
 
 
+def h_shared(string: Callable[[L], None] | None, vector: Callable[[L], None]) -> Callable[[L], None]:
+    """A mnemonic that names both a string and a vector instruction."""
+    def f(l: L) -> None:
+        if not l.ins.is_string_instruction:
+            vector(l)
+        elif string is not None:
+            string(l)
+        else:
+            raise _Refuse(NOT_IN_SUBSET)
+    return f
+
+
 def h_movs(size: int) -> Callable[[L], None]:
     def f(l: L) -> None:
         _string(l, "movs")
@@ -799,16 +861,13 @@ HANDLERS: dict[str, Callable[[L], None]] = {
     "CLC": h_flagop("cf", 0), "STC": h_flagop("cf", 1), "CMC": h_flagop("cf", None), "CLD": h_flagop("df", 0), "STD": h_flagop("df", 1),
     "LAHF": h_lahf, "SAHF": h_sahf, "NOP": h_nop, "PAUSE": h_fence("spin-hint"), "MFENCE": h_fence("full"), "LFENCE": h_fence("load"), "SFENCE": h_fence("store"),
     "INT3": h_trap("breakpoint"), "UD2": h_trap("invalid-opcode"),
-    "MOVSB": h_movs(1), "MOVSW": h_movs(2), "MOVSD": h_movs(4), "MOVSQ": h_movs(8),
+    "MOVSB": h_movs(1), "MOVSW": h_movs(2), "MOVSD": h_shared(h_movs(4), lift_sse.MOVSD), "CMPSD": h_shared(None, lift_sse.CMPSD), "MOVSQ": h_movs(8),
     "STOSB": h_stos(1), "STOSW": h_stos(2), "STOSD": h_stos(4), "STOSQ": h_stos(8),
     "LODSB": h_lods(1), "LODSW": h_lods(2), "LODSD": h_lods(4), "LODSQ": h_lods(8),
+    **lift_sse.HANDLERS,
 }
 for _cc in ("O", "NO", "B", "AE", "E", "NE", "BE", "A", "S", "NS", "P", "NP", "L", "GE", "LE", "G"):
     HANDLERS["J" + _cc], HANDLERS["SET" + _cc], HANDLERS["CMOV" + _cc] = h_jcc, h_setcc, h_cmovcc
-
-STRING = frozenset(n for n in HANDLERS if n[:4] in ("MOVS", "STOS", "LODS") and n not in ("MOVSX", "MOVSXD"))
-# mnemonics iced shares between a string form and a vector form: only the string codes are the subset
-SHARED = {"MOVSD": "MOVSD_M32_M32"}
 
 
 def form_of(ix, ins) -> str:
@@ -823,6 +882,8 @@ def form_of(ix, ins) -> str:
         f += ":rep"
     if ins.has_repne_prefix:
         f += ":repne"
+    if ins.segment_prefix == ix.Register.GS and f.find(":mem") > 0:
+        f += ":gs"
     return f
 
 
@@ -833,15 +894,15 @@ def lift(ins, image_base: int = 0, validated: frozenset[str] | None = None) -> L
     form = form_of(ix, ins)
     m = mnemonic_name(ix, ins.mnemonic)
     h = HANDLERS.get(m)
-    _r, codes = _tables(ix)
-    if h is None or (m in SHARED and codes[ins.code] != SHARED[m]):
+    if h is None:
         return Unsupported(rva, form, NOT_IN_SUBSET)
     mem_seg = any(ins.op_kind(i) == ix.OpKind.MEMORY for i in range(ins.op_count))
-    if ins.segment_prefix in (ix.Register.FS, ix.Register.GS) and (mem_seg or m in STRING):
-        if m not in ("LEA", "NOP"):
+    string = ins.is_string_instruction
+    if ins.segment_prefix in (ix.Register.FS, ix.Register.GS) and (mem_seg or string):
+        if m not in ("LEA", "NOP") and (ins.segment_prefix == ix.Register.FS or string):
             return Unsupported(rva, form, SEGMENT)
     rep = ins.has_rep_prefix or ins.has_repe_prefix
-    if (ins.has_repne_prefix or rep) and m not in STRING and not (m == "RET" and rep):
+    if (ins.has_repne_prefix or rep) and not string and not (m == "RET" and rep):
         return Unsupported(rva, form, PREFIX)
     l = L(ix, ins)
     try:

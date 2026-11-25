@@ -42,9 +42,9 @@ def test_report_differences_are_named_by_path_without_values():
 def img(tmp_path, upstream_worktree, iced):
     from recon.adapters.skyrim.image import PinnedImage
 
-    # push rbx; sub rsp,20h; mov rbx,rcx; add rsp,20h; pop rbx; ret | addps xmm0,xmm1; ret | a branch into an instruction
+    # push rbx; sub rsp,20h; mov rbx,rcx; add rsp,20h; pop rbx; ret | cpuid; ret | a branch into an instruction
     f1 = bytes.fromhex("40534883ec20488bd94883c4205bc3")
-    f2 = bytes.fromhex("0f58c1c3")
+    f2 = bytes.fromhex("0fa2c3")
     f3 = bytes([0x74, 0x01, 0xB8, 1, 0, 0, 0, 0xC3])
     text = f1.ljust(32, b"\xcc") + f2.ljust(16, b"\xcc") + f3
     # prologue of 6 bytes: alloc 32 at 6, push rbx at 2
@@ -66,3 +66,13 @@ def test_coverage_runs_every_stage_and_agrees_with_unwind_data(img):
     a = cv.aggregate(rows)
     assert a["lift_completely"] == 1 and a["frame"]["recovered"] == 1 and a["unwind"] == {"functions_checked": 1, "facts_checked": 3, "functions_agreeing": 1, "conflicts": {}}
     assert [r.digest for r in cv.run(image, targets, None)] == [r.digest for r in rows]
+
+
+def test_coverage_of_the_ir_is_the_same_however_many_processes_run(img):
+    pytest.importorskip("z3")
+    image, targets = img
+    one = cv.run(image, targets, None, ir=True)
+    assert [r.ir for r in one] == ["admitted", "", ""] and one[0].ir_facts["ops"] <= one[0].ir_facts["ops_raw"]
+    assert cv.run(image, targets, None, ir=True, jobs=2) == one
+    a = cv.aggregate(one)["ir"]
+    assert a["tried"] == 1 and a["by_result"] == {"admitted": 1} and a["with_exception_states"] == 0
