@@ -220,9 +220,11 @@ export class GateKeeper {
         // something the packet cannot change, e.g. an include that another function's body needs.
         const line = file ? lineInFile(accepted.find((a) => a.path === file[1])?.content, Number(file[2])) : null;
         const before = file ? (input.carried?.get(file[1]!) ?? bases.get(file[1]!) ?? null) : null;
-        const preexisting = line !== null && line.trim() !== '' && before !== null && before.split(/\r?\n/).some((l) => l.trim() === line.trim()) && !insideTargetBody(accepted.find((a) => a.path === file![1])!.content, Number(file![2]), task.functions as FunctionTarget[]);
+        // The repository reports what is wrong with a whole file at its first line: that line says nothing.
+        const whole = file && Number(file[2]) === 1 ? wholeFileProblem(p, before) : null;
+        const preexisting = whole ? whole.before : line !== null && line.trim() !== '' && before !== null && before.split(/\r?\n/).some((l) => l.trim() === line.trim()) && !insideTargetBody(accepted.find((a) => a.path === file![1])!.content, Number(file![2]), task.functions as FunctionTarget[]);
         return preexisting
-          ? { stage: 'preflight', code: 'PREFLIGHT_PREEXISTING', severity: 'block' as const, file: file![1], line: Number(file![2]), message: `${p} (this line was already in the file before this packet; change it only if nothing outside your functions needs it)` }
+          ? { stage: 'preflight', code: 'PREFLIGHT_PREEXISTING', severity: 'block' as const, file: file![1], line: Number(file![2]), message: `${p} (${whole ? whole.why : 'this line was already in the file before this packet; change it only if nothing outside your functions needs it'})` }
           : { stage: 'preflight', code: 'PREFLIGHT_PROBLEM', severity: 'block' as const, ...(file ? { file: file[1], line: Number(file[2]) } : {}), message: p };
       });
     }))) return done('reject', 'retry');
@@ -265,6 +267,27 @@ export function foreignErrorFiles(errors: string[], allowed: string[]): string[]
 export function lineInFile(content: string | undefined, n: number): string | null {
   if (content === undefined || !Number.isInteger(n) || n < 1) return null;
   return content.split(/\r?\n/)[n - 1] ?? null;
+}
+
+/** The repository's size caps for one source file (tools/contrib_screen.py). */
+const FILE_MAX_BYTES = 65_536;
+const FILE_MAX_LINES = 2_000;
+
+/**
+ * Whether a problem the preflight reports about a whole file (at its line 1) was there before the
+ * packet: the file was over the size cap already, or it already had the line the message says to
+ * drop. Anything else is what the packet's own change left wrong.
+ */
+export function wholeFileProblem(problem: string, before: string | null): { before: boolean; why: string } {
+  const NOT = { before: false, why: '' };
+  if (before === null) return NOT;
+  const cap = /\b(file-size-cap|line-count-cap)\b/.exec(problem)?.[1];
+  if (cap) {
+    const over = cap === 'file-size-cap' ? Buffer.byteLength(before) > FILE_MAX_BYTES : before.split(/\r?\n/).length > FILE_MAX_LINES;
+    return over ? { before: true, why: 'the file was already over the cap before this packet' } : NOT;
+  }
+  const drop = /\bdrop "([^"]+)"/.exec(problem)?.[1];
+  return drop && before.split(/\r?\n/).some((l) => l.trim() === drop.trim()) ? { before: true, why: 'the file already had that line before this packet' } : NOT;
 }
 
 /**

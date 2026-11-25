@@ -32,6 +32,8 @@ const DRAFTED_LINE = /^\/\/\s*Drafted by\b/i;
 const KEYED = /^\/\/\s*([A-Z][A-Za-z -]{1,40}):/;
 const COMPARED = /^\/\/\s*0x[0-9a-fA-F]+(?:\s|$)/;
 const PLACEHOLDER = /SKELETON_TODO\w*/;
+const CC0 = 'SPDX-License-Identifier: CC0-1.0';
+const GPL_LINE = /^\/\/\s*Licen[cs]e:.*GPL/i;
 /** The repo lint's header budget and what it does not count (labels, sibling sources, compared functions, SPDX). */
 const HEADER_BUDGET = 6;
 const LABEL_WORD = /(?<![A-Za-z0-9_])(?:COMMUNITY|SIBLING|GUESS|EXE_RTTI|STANDIN|OBSERVED)[A-Za-z0-9_]*/;
@@ -120,6 +122,16 @@ export function repairHeader(path: string, after: string, before: string | null,
     es = es.filter((e) => !drop.includes(e));
     const ph = drop.filter((e) => e.placeholder).length;
     changes.push(`${key}: ${ph ? `replaced the skeleton placeholder with the worker's statement` : ''}${ph && drop.length > ph ? ' and ' : ''}${drop.length > ph ? `removed ${drop.length - ph} duplicate line(s) the worker added` : ''}`);
+  }
+  // 2b. the CC0 dedication contradicts a header that states GPL or carries another licence notice (the
+  // repository's lint refuses it): a worker's is dropped, also from a candidate it built on. Upstream's stays.
+  const isCc0 = (e: Entry) => e.lines[0]!.trim().replace(/^\/\/\s*/, '') === CC0;
+  if (opts.base && es.some(isCc0) && !splitHeader(opts.base).header.some((l) => l.includes(CC0))) {
+    const lines = es.flatMap((e) => e.lines.map((l) => l.trim()));
+    if (lines.some((l) => GPL_LINE.test(l) || (l.includes('SPDX-License-Identifier:') && !l.includes(CC0)))) {
+      es = es.flatMap((e) => (!isCc0(e) ? [e] : e.lines.length > 1 ? [{ ...e, lines: e.lines.slice(1), key: null }] : []));
+      changes.push('dropped the CC0 line (the header states another licence)');
+    }
   }
   // 3. a placeholder origin with no real statement in this file: use the worker's own from its .cpp
   // `sr start` appends its placeholder to a statement the file already makes ("none.; SKELETON_TODO_ORIGIN

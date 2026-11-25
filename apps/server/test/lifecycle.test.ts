@@ -158,6 +158,8 @@ describe('staging attribution', () => {
     const models = s.store.db.prepare(`SELECT DISTINCT a.model FROM tasks t JOIN verdicts v ON v.id = t.last_verdict_id JOIN attempts a ON a.id = v.attempt_id WHERE t.run_id = ? AND t.state = 'staged'`).all(run.id) as Array<{ model: string }>;
     expect(models.length).toBeGreaterThan(0);
     expect(messages).toHaveLength(1);
+    // A packet that passed on a free attempt is drafted by the model whose code it submitted.
+    for (const m of models) m.model = /^(?:stored candidate|splice) of (.+) (no model call)$/.exec(m.model)?.[1] ?? m.model;
     for (const { model } of models) expect(messages[0]).toContain(`(drafted by ${model})`);
     expect(messages[0]).toMatch(new RegExp(`\\nDrafted by v-macrev, assisted by ${models[0]!.model}`));
     const batch = s.store.listBatches(run.id)[0]!;

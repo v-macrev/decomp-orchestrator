@@ -2,7 +2,7 @@
 import { describe, expect, it } from 'vitest';
 import { GateChecks, type Verdict } from '@decomp/core';
 import type { TaskRow } from '../src/db/store.js';
-import { GateKeeper, insideTargetBody, lineInFile, symbolMissingNote } from '../src/gatekeeper/gatekeeper.js';
+import { GateKeeper, insideTargetBody, lineInFile, wholeFileProblem, symbolMissingNote } from '../src/gatekeeper/gatekeeper.js';
 import { isHeldOnly } from '../src/orchestrator/engine.js';
 import { simIdent } from '../src/providers/mock.js';
 import { SimRepo } from '../src/repo/simRepo.js';
@@ -155,6 +155,30 @@ describe('GateKeeper pipeline', () => {
       ['PREFLIGHT_PROBLEM', 5], // added by this packet
     ]);
     expect(r.verdict.findings[0]!.message).toMatch(/already in the file before this packet/);
+  });
+
+  it('judges a whole-file problem (reported at line 1) by the file, not by its first line', async () => {
+    const cc0 = 'r/A.cpp:1: the header states GPL; drop "// SPDX-License-Identifier: CC0-1.0"; fix: resolve it';
+    expect(wholeFileProblem(cc0, '// Licence: GPL-3.0\nint a;\n').before).toBe(false);
+    expect(wholeFileProblem(cc0, '// Licence: GPL-3.0\n// SPDX-License-Identifier: CC0-1.0\n').before).toBe(true);
+    expect(wholeFileProblem(cc0, null).before).toBe(false);
+    const cap = 'r/A.h:1: deterministic screen: file-size-cap; fix: reduce it';
+    expect(wholeFileProblem(cap, 'x'.repeat(65_536)).before).toBe(false);
+    expect(wholeFileProblem(cap, 'x'.repeat(65_537))).toEqual({ before: true, why: 'the file was already over the cap before this packet' });
+    expect(wholeFileProblem('r/A.h:1: header comment must label name origin', 'a\n').before).toBe(false);
+    // Through the gate: line 1 was in the base, the CC0 line was not.
+    const t = task();
+    class Upstream extends SimRepo {
+      override async baseFile(path: string) {
+        return path === t.unit ? '// Licence: GPL-3.0\n#include "Sim.h"\n' : null;
+      }
+      override async preflight() {
+        return { completed: true, ok: false, infraError: null, problems: [t.unit + ':1: the header states GPL; drop "// SPDX-License-Identifier: CC0-1.0"'] };
+      }
+    }
+    const repo = new Upstream({ slots: 1 });
+    const r = await run(repo, t, [{ path: t.unit, content: '// Licence: GPL-3.0\n' + unit(repo, t) }], GateChecks.parse({ leak: false }));
+    expect(r.verdict.findings.filter((x) => x.stage === 'preflight').map((x) => x.code)).toEqual(['PREFLIGHT_PROBLEM']);
   });
 
   it('never calls a line inside the packet\'s own function pre-existing', () => {

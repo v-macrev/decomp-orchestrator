@@ -225,3 +225,23 @@ describe('format-aware routing', () => {
     expect(planCapacity({ ...base, stealMaxGap: 2 }).unplaced).toBe(200);
   });
 });
+
+describe('the CC0 dedication', () => {
+  const base = '// Licence: uses powerof3 names, so this file is GPL-3.0.\n#include "A.h"\n';
+  const after = base.replace('#include', '// SPDX-License-Identifier: CC0-1.0\n// 0x10 A::B\n#include');
+  it('goes where the header states GPL, also when the candidate it was built on had it', () => {
+    for (const before of [base, after]) {
+      const r = repairHeader('r/A.cpp', after, before, { base });
+      expect(r.content).not.toContain('CC0');
+      expect(r.content).toContain('// 0x10 A::B');
+      expect(r.changes.join()).toContain('CC0');
+    }
+  });
+  it('goes beside an MIT notice, and stays alone or where upstream has it', () => {
+    const mit = '// SPDX-License-Identifier: MIT (x)\n#include "A.h"\n';
+    expect(repairHeader('r/A.cpp', '// SPDX-License-Identifier: CC0-1.0\n' + mit, mit, { base: mit }).content).not.toContain('CC0');
+    const plain = '// Source exposure: mixed\n#include "A.h"\n';
+    expect(repairHeader('r/A.cpp', '// SPDX-License-Identifier: CC0-1.0\n' + plain, plain, { base: plain }).content).toContain('CC0');
+    expect(repairHeader('r/A.cpp', after, after, { base: after }).content).toContain('CC0');
+  });
+});
