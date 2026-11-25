@@ -13,13 +13,22 @@ recorded as measured; nothing below is claimed done that a test does not show.
 | Minimal executable project skeleton | Done: `engine/recon`, `apps/server/src/recon` |
 | Initial automated tests | Done: 36 engine tests (`pytest`, WSL) and 23 server tests (`vitest`), including the real engine through WSL |
 | Protocol round trip from the server on this host | **Done**: `real engine in WSL` tests in `apps/server/test/recon.test.ts` (solve, determinism, doctor) |
-| Contract-equal local compare measured against `sr compare` | **Code done, NOT MEASURED.** `adapters/skyrim/comparator.py` compiles, binds and compares in process through upstream's own functions; `recon measure-compare` checks it against `sr compare` on accepted units (equal reports, negatives, time). It has not completed a run: see below |
+| Contract-equal local compare measured against `sr compare` | **Done.** `adapters/skyrim/comparator.py` compiles, binds and compares in process through upstream's own functions; `recon measure-compare` checks it against `sr compare` (measured below) |
 | Locked environment with pinned hashes | Done in Phase 2: `requirements.lock` (runtime and checks), `requirements-dev.lock` (test runner), both hashed (D-002) |
 
-**The Phase 1 gate is therefore not fully met.** What is missing is a completed local-compare measurement. The first
-version of this page said it had to wait for Phase 5 and would mean reading game-derived output; both were wrong:
-accepted upstream units are enough, and the command prints counts only. It now waits for memory on the development
-host: its commit limit is reached and Windows stopped WSL twice (audit, "Memory of the host").
+**Local compare, measured 2026-11-25** in WSL on 5 accepted units (17 functions), opened as practice tasks in a private directory:
+
+| What | Result |
+|---|---|
+| Reports of the engine's own build against `sr compare`'s | 17 of 17 equal but for `candidate.object_sha256`, which differs for every separate compile; code section digests are equal |
+| Reports on the very object `sr compare` judged | **17 of 17 equal in every field** |
+| Verdicts | 11 pass/pass, 6 fail/fail, none different |
+| Negatives (a function against its neighbour's range) | 10 of 10 equal to the comparator's command line, all rejected |
+| Cost, median | `sr compare` 7.1 s per unit (up to 38.6 s); in process 1.6 s compile + 0.24 s bind per unit + 0.63 s per function; start 0.6 s |
+
+The 6 failures are equal in both and were not investigated (one compile with `--no-retry` and the unit's first recipe); they do not bear
+on equality. Five units are a small sample. **The Phase 1 gate is met.** The first version of this page said the measurement had to
+wait for Phase 5 and would mean reading game-derived output; both were wrong.
 
 ## Phase 2: binary analysis — status 2026-11-25
 
@@ -128,7 +137,7 @@ execution-based tests on this machine's processor.
 |---|---|---|
 | R-1 | Request via a file in the task directory (not stdin) so the WSL cancel handshake runs; optional streaming runner for live progress | Phase 6 |
 | R-2 | Factor the shared tail of `processTask` (`engine.ts:3031-3150`) into one function | Phase 6 |
-| R-3 | Comparator-accepted build record from a scratch build, and the cost of the local compare versus `sr compare` | Start of Phase 5 |
+| R-3 | ~~Comparator-accepted build record from a scratch build, and the cost of the local compare~~ done, measured above | - |
 | R-4 | Provenance wording for engine output (D-006), a decision for the user | Phase 6 |
 | R-5 | ~~Hashed, locked venv~~ done for `iced_x86` and `capstone`; `z3` when Phase 4 needs it (D-002) | Phase 4 |
 | R-7 | The server runs the engine with the **venv's** Python for any command that decodes (`process.ts` defaults to `python3`); a config value for it | Phase 6 |
@@ -139,8 +148,8 @@ execution-based tests on this machine's processor.
 1. ~~Phase 2, binary analysis~~ (done above).
 2. ~~Phase 3, integer lifting and analysis~~ (done above). Then **Phase 4**: the versioned IR and its validator, first
    transformations, and scalar floating point and vector moves in the order of the demand report, each with differential tests.
-3. **Phase 5**, the vertical slice on a synthetic function (branches, member access, a call), which also
-   delivers R-3.
+3. **Phase 5**, the vertical slice on a synthetic function (branches, member access, a call), which
+   builds on the measured local compare.
 4. **Phase 6**, the deterministic tier in the orchestrator, ending at one unreconstructed target function
    that reaches packet `passed` through the unchanged Gate Keeper. Then stop: the user submits.
 

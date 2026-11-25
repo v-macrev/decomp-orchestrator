@@ -57,6 +57,17 @@ def _comparable(report: dict) -> dict:
     return json.loads(json.dumps(report, sort_keys=True))
 
 
+#: a separate compile of the same source is a separate object file (its header carries a time), so this digest differs by construction
+OBJECT_IDENTITY = "candidate.object_sha256"
+
+
+def differing_paths(a, b, at: str = "") -> list[str]:
+    """Dotted key paths at which two reports differ. Names only, never values."""
+    if isinstance(a, dict) and isinstance(b, dict):
+        return [p for k in sorted(set(a) | set(b)) for p in (differing_paths(a[k], b[k], f"{at}.{k}" if at else k) if k in a and k in b else [f"{at}.{k}" if at else k])]
+    return [] if a == b else [at]
+
+
 def measure(worktree: str | Path, checkout: str | Path, image: Path, base: Path, units: int) -> dict:
     from recon.adapters.skyrim.comparator import LocalComparator
 
@@ -67,7 +78,7 @@ def measure(worktree: str | Path, checkout: str | Path, image: Path, base: Path,
     model = f"recon-engine-{ENGINE_VERSION}"
     t = time.monotonic()
     lc = LocalComparator(wt, local, image)
-    out: dict = {"startup_s": round(time.monotonic() - t, 2), "toolchain": lc.tool["status"], "units": 0, "skipped": {}, "functions": 0, "equal": 0,
+    out: dict = {"startup_s": round(time.monotonic() - t, 2), "toolchain": lc.tool["status"], "units": 0, "skipped": {}, "functions": 0, "equal": 0, "equal_on_their_object": 0, "their_object_seen": 0,
                  "pass_both": 0, "cross_pairs": 0, "cross_equal": 0, "cross_rejected_both": 0, "differences": {}}
     times: dict[str, list[float]] = defaultdict(list)
 
@@ -104,6 +115,11 @@ def measure(worktree: str | Path, checkout: str | Path, image: Path, base: Path,
         recipe_bytes = (wt / recipe).read_bytes()
         obj = built.object_path.read_bytes()
         fns = [(int(f["rva"], 16), f["size"], f["symbol"]) for f in task["functions"]]
+        # the very object sr compare judged: there the reports must be equal in every field
+        their_dir = next((p.parent for p in sorted(tdir.rglob("build-record.json")) if (p.parent / "candidate.obj").is_file()), None)
+        theirs_built = None
+        if their_dir is not None:
+            theirs_built = type(built)(their_dir / "candidate.obj", json.loads((their_dir / "build-record.json").read_text()), built.source_revision, built.recipe_sha256)
         for rva, size, sym in fns:
             theirs = json.loads((runs[-1] / f"0x{rva:x}" / "report.json").read_text())
             t = time.monotonic()
@@ -111,11 +127,16 @@ def measure(worktree: str | Path, checkout: str | Path, image: Path, base: Path,
             times["local_compare_fn"].append(time.monotonic() - t)
             out["functions"] += 1
             a, b = _comparable(theirs), _comparable(ours)
-            if a == b:
-                out["equal"] += 1
-            for k in sorted(set(a) | set(b)):
-                if a.get(k) != b.get(k):
-                    out["differences"][k] = out["differences"].get(k, 0) + 1
+            paths = differing_paths(a, b)
+            out["equal"] += paths in ([], [OBJECT_IDENTITY])
+            for k in paths:
+                out["differences"][k] = out["differences"].get(k, 0) + 1
+            if theirs_built is not None:
+                out["their_object_seen"] += 1
+                same = lc.compare(lc.task(task["task_id"], rva, size, sym, compiled, theirs_built), recipe_bytes, theirs_built, symbols)
+                out["equal_on_their_object"] += _comparable(same) == a
+            out["verdicts"] = out.get("verdicts", {})
+            out["verdicts"][f"{theirs['result']}/{ours['result']}"] = out["verdicts"].get(f"{theirs['result']}/{ours['result']}", 0) + 1
             out["pass_both"] += theirs["result"] == "pass" and ours["result"] == "pass"
         # Negatives: a function of the unit against its neighbour's range, by the comparator's command line and in process.
         for (_r, _s, sym), (rva2, size2, _s2) in list(zip(fns, fns[1:]))[:2]:

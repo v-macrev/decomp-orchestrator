@@ -29,6 +29,15 @@ def test_aggregate_holds_counts_only():
     assert "SECRET" not in json.dumps(a)
 
 
+def test_report_differences_are_named_by_path_without_values():
+    from recon.adapters.skyrim.measure import OBJECT_IDENTITY, differing_paths
+
+    a = {"result": "pass", "candidate": {"object_sha256": "x", "size": 3}, "only_a": 1}
+    b = {"result": "pass", "candidate": {"object_sha256": "y", "size": 3}}
+    assert differing_paths(a, b) == [OBJECT_IDENTITY, "only_a"]
+    assert differing_paths(a, a) == []
+
+
 @pytest.fixture
 def img(tmp_path, upstream_worktree, iced):
     from recon.adapters.skyrim.image import PinnedImage

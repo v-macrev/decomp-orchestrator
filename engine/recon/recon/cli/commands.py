@@ -125,7 +125,7 @@ def cmd_measure_compare(args) -> int:
     base = _private_dir(args.out)
     res = ms.measure(args.worktree, args.checkout, locate_image(args.checkout), base, args.units)
     print(json.dumps(res, indent=2, sort_keys=True))
-    ok = res["functions"] > 0 and res["equal"] == res["functions"] and res["cross_equal"] == res["cross_pairs"]
+    ok = res["functions"] > 0 and res["equal"] == res["functions"] and res["equal_on_their_object"] == res["their_object_seen"] and res["cross_equal"] == res["cross_pairs"]
     return 0 if ok else 1
 
 
