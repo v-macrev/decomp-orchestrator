@@ -3050,6 +3050,20 @@ export class RunEngine {
         store.updateAttempt(attempt.id, { status: 'parse_error', error: mat.problems.join('; ').slice(0, 500), files: mat.files, finishedAt: Date.now() });
         return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_EDIT', mat.problems.join('; ').slice(0, 1_000)), { infra: false, strike: false }, tierIdx);
       }
+      // An answer built on a stored candidate may return only the file it changed. The candidate's
+      // other files are in the slot, so the gate would compile with them: they are part of the answer
+      // too, or the packet would be accepted without (say) the header that declares its functions.
+      if (spliced && !freeAttempt) {
+        const kept: string[] = [];
+        for (const f of spliced.files) {
+          if (!prepared.allowedPaths.includes(f.path) || mat.files.some((x) => x.path === f.path)) continue;
+          const content = await repo.readFile(slot, f.path);
+          if (content === null || content === (await repo.baseFile(f.path)) || content === carried.find((c) => c.path === f.path)?.content) continue;
+          mat.files.push({ path: f.path, content });
+          kept.push(f.path);
+        }
+        if (kept.length) ev('attempt.kept_files', `kept from the candidate the answer started from: ${kept.join(', ')}`, 'debug', { kept });
+      }
       // Accepted functions stay as they are, also when the answer rewrote one.
       const ownNames = task.functions.flatMap((f) => (f.name ? [f.name] : []));
       for (const f of mat.files) {

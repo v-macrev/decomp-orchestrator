@@ -305,6 +305,44 @@ describe('re-gating packets only foreign compare results killed', () => {
   }, 60_000);
 });
 
+describe('an answer built on a stored candidate', () => {
+  it('keeps the header of the candidate when the model returns only the .cpp', async () => {
+    const s = setup(tmpDb(), { slots: 4 });
+    const run = s.engine.createRun('kept', { flowId: 'default', selection: { source: 'synthetic', count: 6, seed: 9 }, routing: { enabled: false } }, flow(4, 2));
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const all = [...s.store.listTasks(run.id, { state: 'passed', limit: 100 }), ...s.store.listTasks(run.id, { state: 'staged', limit: 100 })];
+    const t = all.find((x) => all.filter((o) => o.unit === x.unit).length === 1)!;
+    const pass = s.store.getVerdict(t.lastVerdictId!)!;
+    const a = s.store.getAttempt(pass.attemptId)!;
+    const header = t.unit.replace(/[.]cpp$/, '.h');
+    s.store.updateAttempt(a.id, { files: [...a.files!.filter((f) => f.path !== header), { path: header, content: ['#pragma once', '// declares what the .cpp defines', ''].join(String.fromCharCode(10)) }] });
+    s.store.insertVerdict({
+      ...pass, id: 'vd_kept', decision: 'reject', route: 'retry', createdAt: Date.now(),
+      compare: [...(pass.compare ?? []), { rva: '0xdead0', name: 'Gone::F', result: 'fail', reason: 'function-symbol-missing' } as NonNullable<typeof pass.compare>[number]],
+      findings: [{ stage: 'compare', code: 'COMPARE_FUNCTION_SYMBOL_MISSING', severity: 'block', message: '0xdead0 Gone::F: fail function-symbol-missing' }],
+    });
+    s.store.db.prepare("UPDATE tasks SET state = 'dead', last_verdict_id = 'vd_kept' WHERE id = ?").run(t.id);
+    // The free attempt is refused once, so a model answers on top of the stored candidate.
+    const preflight = s.repo.preflight.bind(s.repo);
+    let refused = false;
+    s.repo.preflight = async (slot, task) => {
+      if (refused) return preflight(slot, task);
+      refused = true;
+      return { completed: true, ok: false, problems: ['a label is missing'], infraError: null };
+    };
+    expect((await s.engine.regateMatched(run.id)).packets).toBe(1);
+    await s.engine.waitFor(run.id);
+    const later = s.store.attemptsForTask(t.id).filter((x) => x.id !== a.id && x.files?.length && !x.model?.includes('no model call')).at(-1)!;
+    expect(later.startedAt).toBeGreaterThan(a.startedAt);
+    expect(refused).toBe(true);
+    expect(later.files!.map((f) => f.path)).toEqual(expect.arrayContaining([t.unit, header]));
+    expect(later.files!.find((f) => f.path === header)!.content).toContain('declares what the .cpp defines');
+    s.pool.close();
+    s.engine.close();
+  }, 60_000);
+});
+
 describe('packets quarantined by mistake', () => {
   it('are retried when the rules find no change of an accepted function; a real one stays quarantined', async () => {
     const s = setup(tmpDb(), { slots: 2 });

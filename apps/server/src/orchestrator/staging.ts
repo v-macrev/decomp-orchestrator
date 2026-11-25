@@ -4,6 +4,8 @@
 // Staging creates local branches only; submission is an explicit operator action.
 // A batch that fails re-verification creates no branch and leaves its packets 'passed' (the batch
 // row keeps the problems), so they can be staged again; only a verified branch makes them 'staged'.
+// When re-verification names the packets at fault, only their units stay in the failed batch: the
+// other units are staged without them, as a batch of their own.
 import type { Store, TaskRow } from '../db/store.js';
 import type { ProgressFn, RepoAdapter } from '../repo/types.js';
 import type { EventBus } from '../telemetry/events.js';
@@ -95,12 +97,21 @@ export async function stageRun(store: Store, repo: RepoAdapter, events: EventBus
         progress: (_s, detail, done, total) => opts.progress?.(step, detail, done, total),
       });
       const ok = r.verified && !!r.branch;
+      const isPrFix = tasks[0]!.fix?.check === 'review' && tasks[0]!.fix.prOpen;
+      const atFault = new Set(tasks.filter((t) => r.failedTaskIds?.includes(t.id)).map((t) => t.unit));
+      const rest = ok || isPrFix || !atFault.size ? [] : tasks.filter((t) => !atFault.has(t.unit));
+      const bad = rest.length ? tasks.filter((t) => atFault.has(t.unit)) : tasks;
+      const badFns = bad.reduce((n, t) => n + t.functions.length, 0);
       const prFix = tasks[0]!.fix?.check === 'review' && tasks[0]!.fix.prOpen ? tasks[0]!.fix : null;
       const updatesPr = prFix ? { updatesPr: { batchId: prFix.batchId, seq: prFix.seq, pr: prFix.pr ?? null } } : {};
-      store.updateBatch(id, { status: ok ? 'branch_ready' : 'failed', branch: ok ? r.branch : null, detail: { problems: r.problems, ...(r.failedTaskIds?.length ? { failedTaskIds: r.failedTaskIds } : {}), ...updatesPr, functions: fnCount, draftedBy, models } });
+      store.updateBatch(id, { status: ok ? 'branch_ready' : 'failed', branch: ok ? r.branch : null, detail: { problems: r.problems, ...(r.failedTaskIds?.length ? { failedTaskIds: r.failedTaskIds } : {}), ...updatesPr, functions: ok ? fnCount : badFns, draftedBy, models } });
       if (!ok) {
         summary.failed++;
-        events.emit('batch.failed', `batch ${seq}: ${fnCount} functions NOT staged, no branch created; packets stay passed and can be staged again: ${r.problems.join('; ') || 'no branch'}`, { runId, level: 'warn', data: { seq, problems: r.problems } });
+        if (rest.length) {
+          store.setBatchTasks(id, bad.map((t) => t.id));
+          batches.splice(i + 1, 0, rest);
+        }
+        events.emit('batch.failed', `batch ${seq}: ${badFns} functions NOT staged, no branch created; packets stay passed and can be staged again: ${r.problems.join('; ') || 'no branch'}${rest.length ? `. The other ${fnCount - badFns} functions go on without them in batch ${seq + 1}` : ''}`, { runId, level: 'warn', data: { seq, problems: r.problems } });
         continue;
       }
       events.emit('batch.staged', `batch ${seq}: ${fnCount} functions → ${r.branch} (re-verified)${draftedBy ? `; submit with --drafted-by "${draftedBy}"` : ''}`, { runId, data: { draftedBy, models } });

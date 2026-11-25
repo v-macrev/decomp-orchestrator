@@ -941,7 +941,9 @@ export class SrRepo implements RepoAdapter {
           this.markVerified(id);
           continue;
         }
-        problems.push(`${ts.map((t) => t.id).join(',')}: ${r.infraError ?? (r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ') || 'compile error')}`);
+        const mismatched = r.functions.filter((f) => f.result !== 'pass').map((f) => `${f.rva} ${f.reason ?? ''}`).join(', ');
+        const errors = r.compileErrors?.slice(0, 4).join(' | ');
+        problems.push(`${ts.map((t) => t.id).join(',')}: ${r.infraError ?? (mismatched || (errors ? `compile error: ${errors}` : 'compile error'))}`);
         failedTaskIds.push(...ts.map((t) => t.id));
       }
     };

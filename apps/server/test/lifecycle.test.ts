@@ -113,6 +113,36 @@ describe('staging that fails re-verification', () => {
   }, 60_000);
 });
 
+describe('a batch with one packet that does not compile', () => {
+  it('keeps only that unit in the failed batch; the others are staged without it', async () => {
+    const s = setup();
+    const real = s.repo.stageBatch.bind(s.repo);
+    let victim = '';
+    s.repo.stageBatch = async (input: StageBatchInput) => {
+      victim ||= input.tasks[0]!.id;
+      if (!input.tasks.some((t) => t.id === victim)) return real(input);
+      return { branch: null, verified: false, problems: [`${victim}: compile error: a.cpp(3): error C2039`], failedTaskIds: [victim] };
+    };
+    const run = createRun(s, 'one-bad');
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const unit = s.store.getTask(victim)!.unit;
+    const [bad, good] = s.store.listBatches(run.id);
+    expect(bad!.status).toBe('failed');
+    expect(bad!.taskIds.map((id) => s.store.getTask(id)!.unit).every((u) => u === unit)).toBe(true);
+    expect((bad!.detail as unknown as { functions: number }).functions).toBe(bad!.taskIds.reduce((n, id) => n + s.store.getTask(id)!.functions.length, 0));
+    expect(good!.status).toBe('branch_ready');
+    expect(good!.taskIds.length).toBeGreaterThan(0);
+    for (const id of good!.taskIds) expect(s.store.getTask(id)).toMatchObject({ state: 'staged' });
+    expect(s.store.getTask(victim)!.state).toBe('passed');
+    expect(s.store.listBatches(run.id)).toHaveLength(2);
+    // Once it is fixed, re-verifying the failed batch stages what is left of it.
+    s.repo.stageBatch = real;
+    expect(await s.engine.restageFailedAll(run.id)).toMatchObject({ staged: 1, failed: 0 });
+    expect(s.store.functionCounts(run.id).passed ?? 0).toBe(0);
+  }, 60_000);
+});
+
 describe('staging attribution', () => {
   it('names the model that finished each packet in the batch commit, with the run\'s person', async () => {
     const s = setup();

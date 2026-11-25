@@ -528,6 +528,10 @@ export class Store {
     this.db.prepare(`INSERT OR IGNORE INTO pr_batches (id, run_id, seq, status, task_ids_json, created_at) VALUES (?, ?, ?, 'draft', ?, ?)`)
       .run(b.id, b.runId, b.seq, j(b.taskIds), Date.now());
   }
+  /** Narrow a batch to these packets (the rest of it goes on in another batch). */
+  setBatchTasks(id: string, taskIds: string[]) {
+    this.db.prepare('UPDATE pr_batches SET task_ids_json = ? WHERE id = ?').run(j(taskIds), id);
+  }
   updateBatch(id: string, patch: { status?: string; branch?: string | null; detail?: unknown }) {
     this.db.prepare('UPDATE pr_batches SET status = COALESCE(@status, status), branch = COALESCE(@branch, branch), detail_json = COALESCE(@detail, detail_json) WHERE id = @id')
       .run({ id, status: patch.status ?? null, branch: patch.branch ?? null, detail: patch.detail === undefined ? null : j(patch.detail) });
