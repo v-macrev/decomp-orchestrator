@@ -94,10 +94,18 @@ def main(argv: list[str] | None = None) -> int:
     common(m, with_select=False)
     m.add_argument("--out", required=True, help="private working directory under .local")
     m.add_argument("--units", type=int, default=5)
+    k = sub.add_parser("coverage", help="lift and analyse every selected target: counts; the demand by instruction form goes under --out (a .local directory)")
+    common(k)
+    k.add_argument("--out")
+    v = sub.add_parser("validate-lift", help="run the execution-based differential tests of the lifter; --write records the coverage table")
+    v.add_argument("--only", help="forms whose name starts with this")
+    v.add_argument("--instances", type=int, default=24)
+    v.add_argument("--states", type=int, default=16)
+    v.add_argument("--write", action="store_true")
     args = ap.parse_args(argv)
     if args.cmd == "serve":
         return serve(sys.stdin, sys.stdout, sys.stderr)
-    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare"):
+    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare", "validate-lift", "coverage"):
         from recon.cli import commands
 
         return getattr(commands, "cmd_" + args.cmd.replace("-", "_"))(args)

@@ -108,7 +108,6 @@ def test_an_undecodable_tail_is_never_assumed_to_be_data(tmp_path, upstream_work
     p, sha = write(tmp_path, build_pe(bytes([0x31, 0xC0, 0xC3, 0x06, 0x06, 0x06])))  # xor eax,eax ; ret ; undecodable
     f = sv.analyse_function(PinnedImage(p, upstream_worktree, expected_sha256=sha), RVA1, 6)
     assert (f.status, f.reason, f.stop_offset) == (sv.INVALID, "invalid-instruction", 3)
-    assert sv.coverage_if([f], {"XOR", "RET"})["fully_covered"] == 0
 
 
 def test_a_branch_into_an_instruction_blocks(tmp_path, upstream_worktree, iced):
@@ -137,9 +136,6 @@ def test_survey_aggregates_counts_only(img):
     assert report["pdata_extent"] == {"exact": 2, "leaf": 1}
     assert report["refusal_reasons"] == {"unsupported-unwind": 1}
     assert report["instructions"] == 3 + 2 + 2
-    cov = sv.coverage_if(rows, {"SUB", "ADD", "RET", "XOR", "NOP"})
-    assert cov["fully_covered"] == 2  # the blocked function is never covered
-    assert sv.coverage_if(rows, {"SUB", "ADD", "RET"})["blocked_by_one_form"] == {"XOR": 1}
 
 
 def test_inventory_marks_unmatched_and_missing_progress_entries(synthetic_inventory):

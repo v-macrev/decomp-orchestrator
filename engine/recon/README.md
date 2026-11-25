@@ -20,11 +20,17 @@ python -m recon analyze   --worktree W --checkout C --address 0x<rva>        # c
 python -m recon survey    --worktree W --checkout C --unmatched --out <dir under .local>
 python -m recon crosscheck --worktree W --checkout C --unmatched --capstone-every 5
 python -m recon rtti      --worktree W --checkout C
+python -m recon coverage  --worktree W --checkout C --unmatched --out <dir under .local>   # lift and analyse; private demand report
+python -m recon validate-lift [--only ADD] [--write]                          # differential tests on this processor; --write records the table
+python -m recon measure-compare --worktree W --checkout C --out <dir under .local> --units 5
 python -m recon serve                                                         # JSON Lines protocol on stdio
 ```
 
 Every command prints counts, never bytes, operands or listings; a command that writes rows refuses any
 directory that is not under a `.local` directory.
+
+After any change to `lift.py`, `hwexec.py`, `validate.py`, `core/sem.py` or `core/evaluate.py`, run `validate-lift --write`
+(about 90 s): until then the recorded table does not fit the sources and every instruction is refused.
 
 ## Tests
 

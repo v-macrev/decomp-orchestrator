@@ -127,3 +127,27 @@ section 8 forbids. Now the code before a table must end in a terminator and must
 the function is blocked (`ambiguous-data-reference`). An undecodable tail is an error, a branch into an instruction
 blocks, unidentified trailing data blocks, and an inventory that contradicts itself is refused. On the real image
 none of these occurs (62,247 of 62,247 still decode).
+
+## D-017 · 2026-11-25 · Own semantics for the integer subset, validated on the processor
+Section 9 asks to reuse a reliable lifting framework. **No framework was evaluated by trial here**; the reason not to adopt one is that
+it would add a large dependency with its own licence and flag conventions and would still have to be validated form by form, which is
+most of the work. Revisit for vector code, where the balance may differ. **Decision.** A small lifter over the decoder already pinned; its authority is execution, not its author.
+**Validation.** Each form runs on the processor with generated operands, edge values and related operands; the whole integer state, the
+memory and stack windows and the way control goes are compared. A trap the semantics predict is repeated in a child process and must
+end it as predicted. The generated region sits at a fixed address so that the same vectors repeat. The recorded table carries a digest of
+every source it depends on; a lifter that differs from it validates nothing.
+
+## D-018 · 2026-11-25 · Switches and tail calls only from evidence
+An indirect jump is a switch when the target is the image base plus an entry loaded from the table data the decoder set apart, a
+comparison of that same index bounds it, the bounded block has one way in, and every entry is an instruction of the function. It is a
+tail call when there is no table in the range and the target is a whole pointer (read from memory or held in a register). Everything else is
+`unresolved` and stays visible.
+
+## D-019 · 2026-11-25 · A call that nothing follows does not return
+When only padding or nothing follows a call before the function's end, control cannot come back there; the block ends in
+`noreturn-call`. Any other fall off the end is `CONFLICTING_EVIDENCE`. No list of functions is used.
+
+## D-020 · 2026-11-25 · The frame analysis states its one assumption
+A store through a pointer that is not followed is taken to miss the saved registers' slots once a frame address has been indexed or has
+left the function; otherwise no function with a local array could be analysed. Results list the assumption when it was used, so a later
+phase can weigh it, and unwind data (which comes from the compiler) is compared independently.

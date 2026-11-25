@@ -44,6 +44,17 @@ when the code that needs them exists: today `core/` (canonical serialisation, in
 records), `adapters/x64_msvc/` (decoding, unwind data, RTTI) and `adapters/skyrim/` (image, inventory,
 survey, cross-checks, environment check) exist. `core` names no register and no compiler flag (tested).
 
+## From bytes to analysis (Phase 3)
+
+```text
+decode (iced) -> lift (x64_msvc/lift.py) -> statements (core/sem.py) -> cfg -> dataflow, frame, values (core/analysis/)
+                  ^ only forms in lift_coverage.json                           ^ calling convention from x64_msvc/abi.py
+```
+
+`x64_msvc/program.py` runs the whole chain for one function and returns an `Analysis` with a digest or a `Refusal`
+(stage, fixed code). `core/evaluate.py` runs semantics on concrete values: the differential tests compare it with the
+processor (`hwexec.py`, `validate.py`, only ever synthetic instructions), and the analysis tests use it as the oracle.
+
 ## Determinism contract (summary of section 21)
 
 * **Input digest** of a function covers: executable sha256, RVA and size, engine version, rule-store digest,

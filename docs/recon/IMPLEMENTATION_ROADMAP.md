@@ -74,7 +74,53 @@ Found by re-reading the code and the audit against the specification before Phas
 | A function listed with two sizes, or two overlapping functions, was accepted | `inventory.py` | refused |
 | Conditional branches that leave the range were not counted as tail jumps | `survey.py` | counted |
 | Coverage was counted per mnemonic, which overstates it | `survey.py` | per instruction form since Phase 3 |
-| "46 passed, 24 skipped" without the machine | Phase 2 report | one test short; superseded by the figures below |
+| "46 passed, 24 skipped" without the machine | Phase 2 report | one test short; superseded: 189 passed with the image and the worktree, 171 passed and 18 skipped without (Windows) |
+
+## Phase 3: instruction lifting and program analysis — status 2026-11-25
+
+| Deliverable | State |
+|---|---|
+| Lifting of the general-purpose integer subset | Done: `adapters/x64_msvc/lift.py` to the typed semantics of `core/sem.py`; every register alias, implicit operand and flag explicit, undefined flags as `undef`, traps and atomics as statements |
+| Execution-based differential tests per form | Done: **1,146 forms pass, 380,335 vectors, 0 differences, 72 predicted traps repeated and confirmed in processes of their own**. 92 other forms of the same mnemonics are refused or cannot be encoded in 64-bit mode. The table (form, vectors, date, digest of the sources) is `lift_coverage.json`; running it twice gives the same file, and Windows and Linux give the same counts. A form not in it, or a table made by other sources, is refused (`form-not-validated`) |
+| Are the vectors able to notice a mistake? | Mutation: of 8,665 deliberately wrong semantics (every third form), 7,625 (88.0%) are noticed, among them every dropped effect and inverted branch. Survivors were reviewed by kind and sampled by form: equivalent changes (an arithmetic for a logical shift whose top bits are cut off, `or` for `xor` of disjoint parts), or claims of *undefined*, which no execution refutes. They were **not** all reviewed one by one |
+| Structured refusal | Done: `UNSUPPORTED_INSTRUCTION` with every missing form and its reason |
+| Basic blocks, control-flow graph | Done (`core/analysis/cfg.py`): contradictions are errors, conditional and indirect tail calls, calls that cannot return, switch tables resolved from evidence only (`switch.py`), otherwise `unresolved` |
+| Dominators, post-dominators, components, loops, reducibility | Done (`graph.py`), tested against the definitions on 300 random graphs |
+| Data flow | Done: uses and definitions, reaching definitions, liveness under the calling convention, constants, value numbering along a path (`dataflow.py`, `frame.py`, `values.py`) |
+| Stack and registers | Done (`frame.py`): height at every instruction, saved registers and their slots, home space, stack arguments, locals, frame addresses that leave, proof that preserved registers are restored; assumptions stated per function |
+| Agreement with unwind codes | Done: unwind codes decoded, compared with the recovered frame |
+| Coverage and demand report | Done: `recon coverage`; the demand by form ("how many functions would lift completely if X were added") is written privately |
+| Alias analysis, side-effect summaries, SSA, the versioned IR | **Not done**: Phase 4 |
+
+Measured on the pinned image over the **62,247** unmatched offered targets (469 s, one process):
+
+| What | Count |
+|---|---|
+| Lift completely | **43,247 of 62,247 (69.5%)** |
+| Refused, an instruction form is missing | 19,000; 186 distinct forms, 5,066 of them lack exactly one. Vector and floating-point code is outside this phase's subset |
+| Control-flow graph built | 43,246; the one other falls off its end and is refused |
+| With loops / irreducible / unreachable blocks | 11,540 / 35 / 391 |
+| Switches resolved / functions left with an unresolved jump | 19 / 6 |
+| Frame recovered | **43,186 of 43,246**; 60 refused (`stack-pointer-unknown`: a stack probe or an aligned stack pointer) |
+| Frame with a stated assumption | 10,831 |
+| Facts compared with unwind data | **212,834 in 43,185 functions, 0 conflicts** |
+| If the 20 / 40 / 100 forms the demand report puts first were added | 10,520 / 15,605 / 17,590 more functions would lift |
+
+Analyses on synthetic code: hand-written fixtures, and 250 generated functions whose semantics are run from 4 random states
+each while every claim (edge taken, stack height, constant, reaching definition, restored register) is checked.
+34 deliberate defects in the analyses are each caught by a test. Results have a digest that does not change between runs or with
+the hash seed.
+
+**Gate: met** for the integer subset: synthetic fixtures give validated, reproducible results, and every supported form has passed
+execution-based tests on this machine's processor.
+
+**Limits**
+
+* One processor was tested (natively and under WSL). What an architecture calls undefined is never compared, so its breadth rests on the manual.
+* "Lifts completely" says nothing about matching; no source is produced yet.
+* The frame assumes indexed and escaped stores stay inside their own object, and says so per function.
+* Vector registers are not modelled; a function that uses one is refused, so no vector register's preservation is claimed.
+* Functions with exception handlers are analysed along ordinary edges only; the edges into handlers are not in the graph.
 
 ## Items found by the audit that block or shape later phases
 
@@ -91,8 +137,8 @@ Found by re-reading the code and the audit against the specification before Phas
 ## Next increments, in order
 
 1. ~~Phase 2, binary analysis~~ (done above).
-2. **Phase 3 and 4**, lifting (general-purpose integer subset first, ordered by the demand the survey
-   records), IR, validator, first transformations, each with differential tests against execution.
+2. ~~Phase 3, integer lifting and analysis~~ (done above). Then **Phase 4**: the versioned IR and its validator, first
+   transformations, and scalar floating point and vector moves in the order of the demand report, each with differential tests.
 3. **Phase 5**, the vertical slice on a synthetic function (branches, member access, a call), which also
    delivers R-3.
 4. **Phase 6**, the deterministic tier in the orchestrator, ending at one unreconstructed target function

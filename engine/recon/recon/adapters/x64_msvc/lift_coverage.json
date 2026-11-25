@@ -1,0 +1,5739 @@
+{
+ "date": "2026-11-25",
+ "forms": {
+  "ADC_AL_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_AX_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_EAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "ADC_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADC_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "ADC_R8_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "ADC_R8_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "ADC_RAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "ADC_RM16_IMM16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "ADC_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "ADC_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "ADC_RM16_R16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADC_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADC_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "ADC_RM32_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "ADC_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "ADC_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "ADC_RM32_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ADC_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "ADC_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "ADC_RM64_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "ADC_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "ADC_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "ADC_RM64_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "ADC_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "ADC_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADC_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADC_RM8_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ADC_RM8_R8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADC_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "ADC_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "ADD_AL_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_AX_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_EAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ADD_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "ADD_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADD_R8_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ADD_R8_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ADD_RAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "ADD_RM16_IMM16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADD_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ADD_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "ADD_RM16_R16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADD_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADD_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ADD_RM32_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "ADD_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "ADD_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "ADD_RM32_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "ADD_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "ADD_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "ADD_RM64_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADD_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ADD_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "ADD_RM64_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "ADD_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "ADD_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ADD_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "ADD_RM8_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ADD_RM8_R8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "ADD_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 192
+  },
+  "ADD_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "AND_AL_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_AX_IMM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_EAX_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_R16_RM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "AND_R32_RM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "AND_R64_RM64": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "AND_R8_RM8": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "AND_R8_RM8:mem": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "AND_RAX_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "AND_RM16_IMM16:mem:lock": {
+   "traps": 0,
+   "undefined": 208,
+   "vectors": 208
+  },
+  "AND_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "AND_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "AND_RM16_R16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "AND_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "AND_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "AND_RM32_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "AND_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "AND_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "AND_RM32_R32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "AND_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "AND_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 352,
+   "vectors": 352
+  },
+  "AND_RM64_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "AND_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "AND_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "AND_RM64_R64": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "AND_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "AND_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "AND_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "AND_RM8_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "AND_RM8_R8": {
+   "traps": 0,
+   "undefined": 352,
+   "vectors": 352
+  },
+  "AND_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "AND_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 224,
+   "vectors": 224
+  },
+  "BSF_R16_RM16": {
+   "traps": 0,
+   "undefined": 1959,
+   "vectors": 384
+  },
+  "BSF_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 1382,
+   "vectors": 272
+  },
+  "BSF_R32_RM32": {
+   "traps": 0,
+   "undefined": 1962,
+   "vectors": 384
+  },
+  "BSF_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 1290,
+   "vectors": 256
+  },
+  "BSF_R64_RM64": {
+   "traps": 0,
+   "undefined": 1948,
+   "vectors": 384
+  },
+  "BSF_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 1691,
+   "vectors": 336
+  },
+  "BSR_R16_RM16": {
+   "traps": 0,
+   "undefined": 1961,
+   "vectors": 384
+  },
+  "BSR_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 1781,
+   "vectors": 352
+  },
+  "BSR_R32_RM32": {
+   "traps": 0,
+   "undefined": 1948,
+   "vectors": 384
+  },
+  "BSR_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 1450,
+   "vectors": 288
+  },
+  "BSR_R64_RM64": {
+   "traps": 0,
+   "undefined": 1942,
+   "vectors": 384
+  },
+  "BSR_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 1451,
+   "vectors": 288
+  },
+  "BSWAP_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "BSWAP_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "BTC_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTC_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "BTC_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 1088,
+   "vectors": 272
+  },
+  "BTC_RM16_R16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTC_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 1088,
+   "vectors": 272
+  },
+  "BTC_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 896,
+   "vectors": 224
+  },
+  "BTC_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTC_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 960,
+   "vectors": 240
+  },
+  "BTC_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "BTC_RM32_R32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTC_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 896,
+   "vectors": 224
+  },
+  "BTC_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "BTC_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTC_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "BTC_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 896,
+   "vectors": 224
+  },
+  "BTC_RM64_R64": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTC_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 1024,
+   "vectors": 256
+  },
+  "BTC_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 1216,
+   "vectors": 304
+  },
+  "BTR_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTR_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1024,
+   "vectors": 256
+  },
+  "BTR_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "BTR_RM16_R16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTR_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 1088,
+   "vectors": 272
+  },
+  "BTR_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 1216,
+   "vectors": 304
+  },
+  "BTR_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTR_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1216,
+   "vectors": 304
+  },
+  "BTR_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 1024,
+   "vectors": 256
+  },
+  "BTR_RM32_R32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTR_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 1024,
+   "vectors": 256
+  },
+  "BTR_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 1216,
+   "vectors": 304
+  },
+  "BTR_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTR_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "BTR_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 1344,
+   "vectors": 336
+  },
+  "BTR_RM64_R64": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTR_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 1408,
+   "vectors": 352
+  },
+  "BTR_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 896,
+   "vectors": 224
+  },
+  "BTS_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTS_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "BTS_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 960,
+   "vectors": 240
+  },
+  "BTS_RM16_R16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTS_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 1024,
+   "vectors": 256
+  },
+  "BTS_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 960,
+   "vectors": 240
+  },
+  "BTS_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTS_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "BTS_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 1024,
+   "vectors": 256
+  },
+  "BTS_RM32_R32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTS_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "BTS_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 832,
+   "vectors": 208
+  },
+  "BTS_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTS_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1216,
+   "vectors": 304
+  },
+  "BTS_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "BTS_RM64_R64": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BTS_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 1088,
+   "vectors": 272
+  },
+  "BTS_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "BT_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BT_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1344,
+   "vectors": 336
+  },
+  "BT_RM16_R16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BT_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 832,
+   "vectors": 208
+  },
+  "BT_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BT_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1088,
+   "vectors": 272
+  },
+  "BT_RM32_R32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BT_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 1216,
+   "vectors": 304
+  },
+  "BT_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BT_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "BT_RM64_R64": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "BT_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 832,
+   "vectors": 208
+  },
+  "CALL_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CALL_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CALL_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CBW": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CDQ": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CDQE": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CLC": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CLD": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMC": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVAE_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVAE_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVAE_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVAE_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVAE_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVAE_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMOVA_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVA_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "CMOVA_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVA_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CMOVA_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVA_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "CMOVBE_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVBE_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "CMOVBE_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVBE_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVBE_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVBE_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMOVB_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVB_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMOVB_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVB_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMOVB_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVB_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVE_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVE_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVE_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVE_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMOVE_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVE_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMOVGE_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVGE_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMOVGE_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVGE_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "CMOVGE_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVGE_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMOVG_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVG_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "CMOVG_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVG_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "CMOVG_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVG_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMOVLE_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVLE_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CMOVLE_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVLE_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "CMOVLE_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVLE_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVL_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVL_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVL_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVL_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "CMOVL_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVL_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMOVNE_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNE_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMOVNE_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNE_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVNE_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNE_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMOVNO_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNO_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMOVNO_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNO_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVNO_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNO_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CMOVNP_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNP_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVNP_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNP_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMOVNP_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNP_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVNS_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNS_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMOVNS_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNS_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMOVNS_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVNS_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMOVO_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVO_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMOVO_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVO_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMOVO_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVO_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMOVP_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVP_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CMOVP_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVP_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMOVP_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVP_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMOVS_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVS_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMOVS_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVS_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CMOVS_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMOVS_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "CMPXCHG_RM16_R16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMPXCHG_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMPXCHG_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CMPXCHG_RM32_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMPXCHG_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CMPXCHG_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "CMPXCHG_RM64_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMPXCHG_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "CMPXCHG_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "CMPXCHG_RM8_R8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "CMPXCHG_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "CMPXCHG_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "CMP_AL_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_AX_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_EAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 192
+  },
+  "CMP_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMP_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMP_R8_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMP_R8_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "CMP_RAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "CMP_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMP_RM16_R16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMP_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMP_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "CMP_RM32_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "CMP_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "CMP_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CMP_RM64_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMP_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CMP_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "CMP_RM8_R8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "CMP_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "CQO": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CWD": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "CWDE": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "DEC_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "DEC_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "DEC_RM16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "DEC_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "DEC_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "DEC_RM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "DEC_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "DEC_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "DEC_RM64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "DEC_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "DEC_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "DEC_RM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "DIV_RM16": {
+   "traps": 4,
+   "undefined": 1644,
+   "vectors": 274
+  },
+  "DIV_RM16:mem": {
+   "traps": 4,
+   "undefined": 1284,
+   "vectors": 214
+  },
+  "DIV_RM32": {
+   "traps": 4,
+   "undefined": 1830,
+   "vectors": 305
+  },
+  "DIV_RM32:mem": {
+   "traps": 4,
+   "undefined": 1134,
+   "vectors": 189
+  },
+  "DIV_RM64": {
+   "traps": 4,
+   "undefined": 2076,
+   "vectors": 346
+  },
+  "DIV_RM64:mem": {
+   "traps": 4,
+   "undefined": 1620,
+   "vectors": 270
+  },
+  "DIV_RM8": {
+   "traps": 4,
+   "undefined": 1998,
+   "vectors": 333
+  },
+  "DIV_RM8:mem": {
+   "traps": 4,
+   "undefined": 1536,
+   "vectors": 256
+  },
+  "IDIV_RM16": {
+   "traps": 4,
+   "undefined": 1938,
+   "vectors": 323
+  },
+  "IDIV_RM16:mem": {
+   "traps": 4,
+   "undefined": 1722,
+   "vectors": 287
+  },
+  "IDIV_RM32": {
+   "traps": 4,
+   "undefined": 1974,
+   "vectors": 329
+  },
+  "IDIV_RM32:mem": {
+   "traps": 4,
+   "undefined": 1266,
+   "vectors": 211
+  },
+  "IDIV_RM64": {
+   "traps": 4,
+   "undefined": 1854,
+   "vectors": 309
+  },
+  "IDIV_RM64:mem": {
+   "traps": 4,
+   "undefined": 1500,
+   "vectors": 250
+  },
+  "IDIV_RM8": {
+   "traps": 4,
+   "undefined": 1812,
+   "vectors": 302
+  },
+  "IDIV_RM8:mem": {
+   "traps": 4,
+   "undefined": 1494,
+   "vectors": 249
+  },
+  "IMUL_R16_RM16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 1088,
+   "vectors": 272
+  },
+  "IMUL_R16_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_R16_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 1472,
+   "vectors": 368
+  },
+  "IMUL_R16_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_R16_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1024,
+   "vectors": 256
+  },
+  "IMUL_R32_RM32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "IMUL_R32_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_R32_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "IMUL_R32_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_R32_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 896,
+   "vectors": 224
+  },
+  "IMUL_R64_RM64": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "IMUL_R64_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_R64_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 960,
+   "vectors": 240
+  },
+  "IMUL_R64_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_R64_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1216,
+   "vectors": 304
+  },
+  "IMUL_RM16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_RM16:mem": {
+   "traps": 0,
+   "undefined": 1024,
+   "vectors": 256
+  },
+  "IMUL_RM32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_RM32:mem": {
+   "traps": 0,
+   "undefined": 1088,
+   "vectors": 272
+  },
+  "IMUL_RM64": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_RM64:mem": {
+   "traps": 0,
+   "undefined": 960,
+   "vectors": 240
+  },
+  "IMUL_RM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "IMUL_RM8:mem": {
+   "traps": 0,
+   "undefined": 960,
+   "vectors": 240
+  },
+  "INC_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "INC_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "INC_RM16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "INC_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "INC_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "INC_RM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "INC_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "INC_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "INC_RM64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "INC_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "INC_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "INC_RM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "INT3": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 0
+  },
+  "JAE_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JAE_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JA_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JA_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JBE_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JBE_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JB_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JB_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JE_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JE_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JGE_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JGE_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JG_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JG_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JLE_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JLE_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JL_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JL_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JMP_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JMP_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JMP_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JMP_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "JNE_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JNE_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JNO_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JNO_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JNP_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JNP_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JNS_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JNS_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JO_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JO_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JP_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JP_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JRCXZ_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JS_REL32_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "JS_REL8_64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LAHF": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LEAVEQ": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LEA_R16_M:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "LEA_R32_M:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "LEA_R64_M:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "LFENCE": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LFENCE_E9": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LFENCE_EA": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LFENCE_EB": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LFENCE_EC": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LFENCE_ED": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LFENCE_EE": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LFENCE_EF": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LODSB_AL_M8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LODSD_EAX_M32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LODSQ_RAX_M64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LODSW_AX_M16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "LZCNT_R16_RM16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "LZCNT_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 1408,
+   "vectors": 352
+  },
+  "LZCNT_R32_RM32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "LZCNT_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "LZCNT_R64_RM64": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "LZCNT_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 1344,
+   "vectors": 336
+  },
+  "MFENCE": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MFENCE_F1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MFENCE_F2": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MFENCE_F3": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MFENCE_F4": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MFENCE_F5": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MFENCE_F6": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MFENCE_F7": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSB_M8_M8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSB_M8_M8:rep": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSD_M32_M32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSD_M32_M32:rep": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSQ_M64_M64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSQ_M64_M64:rep": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSW_M16_M16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSW_M16_M16:rep": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSXD_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSXD_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "MOVSXD_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSXD_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "MOVSXD_R64_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSXD_R64_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVSX_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSX_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "MOVSX_R16_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "MOVSX_R16_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "MOVSX_R32_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSX_R32_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOVSX_R32_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 368
+  },
+  "MOVSX_R32_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "MOVSX_R64_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVSX_R64_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "MOVSX_R64_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "MOVSX_R64_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "MOVZX_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVZX_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "MOVZX_R16_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "MOVZX_R16_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVZX_R32_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVZX_R32_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVZX_R32_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "MOVZX_R32_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOVZX_R64_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOVZX_R64_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "MOVZX_R64_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 368
+  },
+  "MOVZX_R64_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 208
+  },
+  "MOV_AL_MOFFS8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_AX_MOFFS16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_EAX_MOFFS32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_MOFFS16_AX:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_MOFFS32_EAX:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_MOFFS64_RAX:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_MOFFS8_AL:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_R16_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "MOV_R32_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "MOV_R64_IMM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOV_R8_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_R8_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOV_R8_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "MOV_RAX_MOFFS64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "MOV_RM16_R16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "MOV_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "MOV_RM32_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOV_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "MOV_RM64_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOV_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "MOV_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "MOV_RM8_R8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "MOV_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "MUL_RM16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "MUL_RM16:mem": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "MUL_RM32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "MUL_RM32:mem": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "MUL_RM64": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "MUL_RM64:mem": {
+   "traps": 0,
+   "undefined": 1152,
+   "vectors": 288
+  },
+  "MUL_RM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "MUL_RM8:mem": {
+   "traps": 0,
+   "undefined": 1216,
+   "vectors": 304
+  },
+  "NEG_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NEG_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "NEG_RM16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "NEG_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NEG_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "NEG_RM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "NEG_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NEG_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "NEG_RM64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "NEG_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NEG_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "NEG_RM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "NOPD": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOPQ": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOPW": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOP_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOP_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "NOP_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOP_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "NOP_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOP_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "NOT_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOT_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "NOT_RM16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "NOT_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOT_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "NOT_RM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "NOT_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOT_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "NOT_RM64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "NOT_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "NOT_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "NOT_RM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "OR_AL_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_AX_IMM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_EAX_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_R16_RM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "OR_R32_RM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "OR_R64_RM64": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 352,
+   "vectors": 352
+  },
+  "OR_R8_RM8": {
+   "traps": 0,
+   "undefined": 208,
+   "vectors": 208
+  },
+  "OR_R8_RM8:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "OR_RAX_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "OR_RM16_IMM16:mem:lock": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 336
+  },
+  "OR_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "OR_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "OR_RM16_R16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "OR_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 336
+  },
+  "OR_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "OR_RM32_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "OR_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "OR_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "OR_RM32_R32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "OR_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "OR_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "OR_RM64_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "OR_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "OR_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "OR_RM64_R64": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "OR_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "OR_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "OR_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "OR_RM8_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 336
+  },
+  "OR_RM8_R8": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "OR_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 160,
+   "vectors": 160
+  },
+  "OR_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "PAUSE": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "POPCNT_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "POPCNT_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "POPCNT_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "POPCNT_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "POPCNT_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "POPCNT_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "POP_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "POP_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "POP_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "PUSHQ_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUSHQ_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUSH_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUSH_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "PUSH_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "RCL_RM16_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RCL_RM16_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "RCL_RM16_CL": {
+   "traps": 0,
+   "undefined": 222,
+   "vectors": 384
+  },
+  "RCL_RM16_CL:mem": {
+   "traps": 0,
+   "undefined": 163,
+   "vectors": 240
+  },
+  "RCL_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 384
+  },
+  "RCL_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 144,
+   "vectors": 224
+  },
+  "RCL_RM32_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RCL_RM32_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "RCL_RM32_CL": {
+   "traps": 0,
+   "undefined": 235,
+   "vectors": 384
+  },
+  "RCL_RM32_CL:mem": {
+   "traps": 0,
+   "undefined": 210,
+   "vectors": 320
+  },
+  "RCL_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 384
+  },
+  "RCL_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 208,
+   "vectors": 272
+  },
+  "RCL_RM64_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RCL_RM64_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "RCL_RM64_CL": {
+   "traps": 0,
+   "undefined": 294,
+   "vectors": 384
+  },
+  "RCL_RM64_CL:mem": {
+   "traps": 0,
+   "undefined": 224,
+   "vectors": 288
+  },
+  "RCL_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 384
+  },
+  "RCL_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 176,
+   "vectors": 240
+  },
+  "RCL_RM8_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RCL_RM8_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "RCL_RM8_CL": {
+   "traps": 0,
+   "undefined": 245,
+   "vectors": 384
+  },
+  "RCL_RM8_CL:mem": {
+   "traps": 0,
+   "undefined": 147,
+   "vectors": 240
+  },
+  "RCL_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 384
+  },
+  "RCL_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 208,
+   "vectors": 288
+  },
+  "RCR_RM16_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RCR_RM16_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "RCR_RM16_CL": {
+   "traps": 0,
+   "undefined": 233,
+   "vectors": 384
+  },
+  "RCR_RM16_CL:mem": {
+   "traps": 0,
+   "undefined": 219,
+   "vectors": 352
+  },
+  "RCR_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 384
+  },
+  "RCR_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 192,
+   "vectors": 256
+  },
+  "RCR_RM32_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RCR_RM32_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "RCR_RM32_CL": {
+   "traps": 0,
+   "undefined": 241,
+   "vectors": 384
+  },
+  "RCR_RM32_CL:mem": {
+   "traps": 0,
+   "undefined": 198,
+   "vectors": 304
+  },
+  "RCR_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 384
+  },
+  "RCR_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 176,
+   "vectors": 272
+  },
+  "RCR_RM64_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RCR_RM64_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "RCR_RM64_CL": {
+   "traps": 0,
+   "undefined": 290,
+   "vectors": 384
+  },
+  "RCR_RM64_CL:mem": {
+   "traps": 0,
+   "undefined": 218,
+   "vectors": 288
+  },
+  "RCR_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 384
+  },
+  "RCR_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 224,
+   "vectors": 304
+  },
+  "RCR_RM8_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RCR_RM8_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "RCR_RM8_CL": {
+   "traps": 0,
+   "undefined": 254,
+   "vectors": 384
+  },
+  "RCR_RM8_CL:mem": {
+   "traps": 0,
+   "undefined": 197,
+   "vectors": 304
+  },
+  "RCR_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 384
+  },
+  "RCR_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 176,
+   "vectors": 272
+  },
+  "RETNQ": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RETNQ:rep": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "RETNQ_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROL_RM16_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROL_RM16_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "ROL_RM16_CL": {
+   "traps": 0,
+   "undefined": 241,
+   "vectors": 384
+  },
+  "ROL_RM16_CL:mem": {
+   "traps": 0,
+   "undefined": 251,
+   "vectors": 368
+  },
+  "ROL_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 384
+  },
+  "ROL_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 320
+  },
+  "ROL_RM32_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROL_RM32_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "ROL_RM32_CL": {
+   "traps": 0,
+   "undefined": 258,
+   "vectors": 384
+  },
+  "ROL_RM32_CL:mem": {
+   "traps": 0,
+   "undefined": 203,
+   "vectors": 304
+  },
+  "ROL_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 384
+  },
+  "ROL_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 208,
+   "vectors": 304
+  },
+  "ROL_RM64_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROL_RM64_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "ROL_RM64_CL": {
+   "traps": 0,
+   "undefined": 280,
+   "vectors": 384
+  },
+  "ROL_RM64_CL:mem": {
+   "traps": 0,
+   "undefined": 187,
+   "vectors": 272
+  },
+  "ROL_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 384
+  },
+  "ROL_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 160,
+   "vectors": 304
+  },
+  "ROL_RM8_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROL_RM8_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "ROL_RM8_CL": {
+   "traps": 0,
+   "undefined": 232,
+   "vectors": 384
+  },
+  "ROL_RM8_CL:mem": {
+   "traps": 0,
+   "undefined": 211,
+   "vectors": 304
+  },
+  "ROL_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 384
+  },
+  "ROL_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 288
+  },
+  "ROR_RM16_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROR_RM16_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "ROR_RM16_CL": {
+   "traps": 0,
+   "undefined": 242,
+   "vectors": 384
+  },
+  "ROR_RM16_CL:mem": {
+   "traps": 0,
+   "undefined": 161,
+   "vectors": 272
+  },
+  "ROR_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 384
+  },
+  "ROR_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 176,
+   "vectors": 272
+  },
+  "ROR_RM32_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROR_RM32_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "ROR_RM32_CL": {
+   "traps": 0,
+   "undefined": 233,
+   "vectors": 384
+  },
+  "ROR_RM32_CL:mem": {
+   "traps": 0,
+   "undefined": 209,
+   "vectors": 352
+  },
+  "ROR_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 384
+  },
+  "ROR_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 368
+  },
+  "ROR_RM64_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROR_RM64_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "ROR_RM64_CL": {
+   "traps": 0,
+   "undefined": 293,
+   "vectors": 384
+  },
+  "ROR_RM64_CL:mem": {
+   "traps": 0,
+   "undefined": 234,
+   "vectors": 320
+  },
+  "ROR_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 384
+  },
+  "ROR_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 176,
+   "vectors": 224
+  },
+  "ROR_RM8_1": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "ROR_RM8_1:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "ROR_RM8_CL": {
+   "traps": 0,
+   "undefined": 234,
+   "vectors": 384
+  },
+  "ROR_RM8_CL:mem": {
+   "traps": 0,
+   "undefined": 183,
+   "vectors": 288
+  },
+  "ROR_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 384
+  },
+  "ROR_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 192,
+   "vectors": 256
+  },
+  "SAHF": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SAL_RM16_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SAL_RM16_1:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "SAL_RM16_CL": {
+   "traps": 0,
+   "undefined": 663,
+   "vectors": 384
+  },
+  "SAL_RM16_CL:mem": {
+   "traps": 0,
+   "undefined": 510,
+   "vectors": 288
+  },
+  "SAL_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 768,
+   "vectors": 384
+  },
+  "SAL_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 528,
+   "vectors": 256
+  },
+  "SAL_RM32_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SAL_RM32_1:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "SAL_RM32_CL": {
+   "traps": 0,
+   "undefined": 550,
+   "vectors": 384
+  },
+  "SAL_RM32_CL:mem": {
+   "traps": 0,
+   "undefined": 380,
+   "vectors": 272
+  },
+  "SAL_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 576,
+   "vectors": 384
+  },
+  "SAL_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 480,
+   "vectors": 320
+  },
+  "SAL_RM64_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SAL_RM64_1:mem": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "SAL_RM64_CL": {
+   "traps": 0,
+   "undefined": 634,
+   "vectors": 384
+  },
+  "SAL_RM64_CL:mem": {
+   "traps": 0,
+   "undefined": 480,
+   "vectors": 288
+  },
+  "SAL_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 608,
+   "vectors": 384
+  },
+  "SAL_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 416,
+   "vectors": 256
+  },
+  "SAL_RM8_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SAL_RM8_1:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "SAL_RM8_CL": {
+   "traps": 0,
+   "undefined": 710,
+   "vectors": 384
+  },
+  "SAL_RM8_CL:mem": {
+   "traps": 0,
+   "undefined": 640,
+   "vectors": 320
+  },
+  "SAL_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 784,
+   "vectors": 384
+  },
+  "SAL_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 464,
+   "vectors": 256
+  },
+  "SAR_RM16_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SAR_RM16_1:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "SAR_RM16_CL": {
+   "traps": 0,
+   "undefined": 557,
+   "vectors": 384
+  },
+  "SAR_RM16_CL:mem": {
+   "traps": 0,
+   "undefined": 453,
+   "vectors": 304
+  },
+  "SAR_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 608,
+   "vectors": 384
+  },
+  "SAR_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 512,
+   "vectors": 336
+  },
+  "SAR_RM32_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SAR_RM32_1:mem": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 336
+  },
+  "SAR_RM32_CL": {
+   "traps": 0,
+   "undefined": 511,
+   "vectors": 384
+  },
+  "SAR_RM32_CL:mem": {
+   "traps": 0,
+   "undefined": 385,
+   "vectors": 272
+  },
+  "SAR_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 576,
+   "vectors": 384
+  },
+  "SAR_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 544,
+   "vectors": 320
+  },
+  "SAR_RM64_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SAR_RM64_1:mem": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 336
+  },
+  "SAR_RM64_CL": {
+   "traps": 0,
+   "undefined": 640,
+   "vectors": 384
+  },
+  "SAR_RM64_CL:mem": {
+   "traps": 0,
+   "undefined": 515,
+   "vectors": 304
+  },
+  "SAR_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 608,
+   "vectors": 384
+  },
+  "SAR_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 528,
+   "vectors": 320
+  },
+  "SAR_RM8_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SAR_RM8_1:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "SAR_RM8_CL": {
+   "traps": 0,
+   "undefined": 573,
+   "vectors": 384
+  },
+  "SAR_RM8_CL:mem": {
+   "traps": 0,
+   "undefined": 485,
+   "vectors": 352
+  },
+  "SAR_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 608,
+   "vectors": 384
+  },
+  "SAR_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 256
+  },
+  "SBB_AL_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_AX_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_EAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "SBB_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 208
+  },
+  "SBB_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "SBB_R8_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "SBB_R8_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 192
+  },
+  "SBB_RAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "SBB_RM16_IMM16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "SBB_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SBB_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "SBB_RM16_R16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SBB_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "SBB_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SBB_RM32_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SBB_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SBB_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SBB_RM32_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "SBB_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SBB_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "SBB_RM64_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "SBB_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 208
+  },
+  "SBB_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "SBB_RM64_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "SBB_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "SBB_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SBB_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "SBB_RM8_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "SBB_RM8_R8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "SBB_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "SBB_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "SETAE_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETAE_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "SETA_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETA_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SETBE_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETBE_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "SETB_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETB_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "SETE_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETE_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SETGE_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETGE_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "SETG_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETG_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SETLE_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETLE_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "SETL_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETL_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "SETNE_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETNE_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "SETNO_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETNO_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "SETNP_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETNP_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "SETNS_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETNS_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "SETO_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETO_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SETP_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETP_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "SETS_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SETS_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SFENCE": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SFENCE_F9": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SFENCE_FA": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SFENCE_FB": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SFENCE_FC": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SFENCE_FD": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SFENCE_FE": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SFENCE_FF": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SHLD_RM16_R16_CL": {
+   "traps": 0,
+   "undefined": 883,
+   "vectors": 384
+  },
+  "SHLD_RM16_R16_CL:mem": {
+   "traps": 0,
+   "undefined": 1030,
+   "vectors": 352
+  },
+  "SHLD_RM16_R16_IMM8": {
+   "traps": 0,
+   "undefined": 1200,
+   "vectors": 384
+  },
+  "SHLD_RM16_R16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1072,
+   "vectors": 256
+  },
+  "SHLD_RM32_R32_CL": {
+   "traps": 0,
+   "undefined": 544,
+   "vectors": 384
+  },
+  "SHLD_RM32_R32_CL:mem": {
+   "traps": 0,
+   "undefined": 390,
+   "vectors": 256
+  },
+  "SHLD_RM32_R32_IMM8": {
+   "traps": 0,
+   "undefined": 576,
+   "vectors": 384
+  },
+  "SHLD_RM32_R32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 464,
+   "vectors": 288
+  },
+  "SHLD_RM64_R64_CL": {
+   "traps": 0,
+   "undefined": 637,
+   "vectors": 384
+  },
+  "SHLD_RM64_R64_CL:mem": {
+   "traps": 0,
+   "undefined": 536,
+   "vectors": 336
+  },
+  "SHLD_RM64_R64_IMM8": {
+   "traps": 0,
+   "undefined": 608,
+   "vectors": 384
+  },
+  "SHLD_RM64_R64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 240
+  },
+  "SHL_RM16_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SHL_RM16_1:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "SHL_RM16_CL": {
+   "traps": 0,
+   "undefined": 672,
+   "vectors": 384
+  },
+  "SHL_RM16_CL:mem": {
+   "traps": 0,
+   "undefined": 455,
+   "vectors": 256
+  },
+  "SHL_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 768,
+   "vectors": 384
+  },
+  "SHL_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 480,
+   "vectors": 272
+  },
+  "SHL_RM32_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SHL_RM32_1:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "SHL_RM32_CL": {
+   "traps": 0,
+   "undefined": 560,
+   "vectors": 384
+  },
+  "SHL_RM32_CL:mem": {
+   "traps": 0,
+   "undefined": 443,
+   "vectors": 304
+  },
+  "SHL_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 592,
+   "vectors": 384
+  },
+  "SHL_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 352,
+   "vectors": 256
+  },
+  "SHL_RM64_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SHL_RM64_1:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "SHL_RM64_CL": {
+   "traps": 0,
+   "undefined": 628,
+   "vectors": 384
+  },
+  "SHL_RM64_CL:mem": {
+   "traps": 0,
+   "undefined": 462,
+   "vectors": 288
+  },
+  "SHL_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 608,
+   "vectors": 384
+  },
+  "SHL_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 224
+  },
+  "SHL_RM8_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SHL_RM8_1:mem": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 336
+  },
+  "SHL_RM8_CL": {
+   "traps": 0,
+   "undefined": 705,
+   "vectors": 384
+  },
+  "SHL_RM8_CL:mem": {
+   "traps": 0,
+   "undefined": 519,
+   "vectors": 272
+  },
+  "SHL_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 752,
+   "vectors": 384
+  },
+  "SHL_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 704,
+   "vectors": 304
+  },
+  "SHRD_RM16_R16_CL": {
+   "traps": 0,
+   "undefined": 972,
+   "vectors": 384
+  },
+  "SHRD_RM16_R16_CL:mem": {
+   "traps": 0,
+   "undefined": 864,
+   "vectors": 288
+  },
+  "SHRD_RM16_R16_IMM8": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "SHRD_RM16_R16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 1168,
+   "vectors": 272
+  },
+  "SHRD_RM32_R32_CL": {
+   "traps": 0,
+   "undefined": 559,
+   "vectors": 384
+  },
+  "SHRD_RM32_R32_CL:mem": {
+   "traps": 0,
+   "undefined": 439,
+   "vectors": 288
+  },
+  "SHRD_RM32_R32_IMM8": {
+   "traps": 0,
+   "undefined": 608,
+   "vectors": 384
+  },
+  "SHRD_RM32_R32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 432,
+   "vectors": 288
+  },
+  "SHRD_RM64_R64_CL": {
+   "traps": 0,
+   "undefined": 624,
+   "vectors": 384
+  },
+  "SHRD_RM64_R64_CL:mem": {
+   "traps": 0,
+   "undefined": 489,
+   "vectors": 304
+  },
+  "SHRD_RM64_R64_IMM8": {
+   "traps": 0,
+   "undefined": 608,
+   "vectors": 384
+  },
+  "SHRD_RM64_R64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 480,
+   "vectors": 304
+  },
+  "SHR_RM16_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SHR_RM16_1:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "SHR_RM16_CL": {
+   "traps": 0,
+   "undefined": 633,
+   "vectors": 384
+  },
+  "SHR_RM16_CL:mem": {
+   "traps": 0,
+   "undefined": 522,
+   "vectors": 304
+  },
+  "SHR_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 784,
+   "vectors": 384
+  },
+  "SHR_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 464,
+   "vectors": 256
+  },
+  "SHR_RM32_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SHR_RM32_1:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "SHR_RM32_CL": {
+   "traps": 0,
+   "undefined": 546,
+   "vectors": 384
+  },
+  "SHR_RM32_CL:mem": {
+   "traps": 0,
+   "undefined": 413,
+   "vectors": 288
+  },
+  "SHR_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 576,
+   "vectors": 384
+  },
+  "SHR_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 208
+  },
+  "SHR_RM64_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SHR_RM64_1:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "SHR_RM64_CL": {
+   "traps": 0,
+   "undefined": 616,
+   "vectors": 384
+  },
+  "SHR_RM64_CL:mem": {
+   "traps": 0,
+   "undefined": 479,
+   "vectors": 288
+  },
+  "SHR_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 608,
+   "vectors": 384
+  },
+  "SHR_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 496,
+   "vectors": 336
+  },
+  "SHR_RM8_1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "SHR_RM8_1:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "SHR_RM8_CL": {
+   "traps": 0,
+   "undefined": 726,
+   "vectors": 384
+  },
+  "SHR_RM8_CL:mem": {
+   "traps": 0,
+   "undefined": 512,
+   "vectors": 256
+  },
+  "SHR_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 720,
+   "vectors": 384
+  },
+  "SHR_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 704,
+   "vectors": 336
+  },
+  "STC": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "STD": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "STOSB_M8_AL": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "STOSB_M8_AL:rep": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "STOSD_M32_EAX": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "STOSD_M32_EAX:rep": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "STOSQ_M64_RAX": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "STOSQ_M64_RAX:rep": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "STOSW_M16_AX": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "STOSW_M16_AX:rep": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_AL_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_AX_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_EAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_R16_RM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "SUB_R32_RM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "SUB_R64_RM64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "SUB_R8_RM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "SUB_R8_RM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 208
+  },
+  "SUB_RAX_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "SUB_RM16_IMM16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "SUB_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SUB_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "SUB_RM16_R16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "SUB_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SUB_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SUB_RM32_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "SUB_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "SUB_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SUB_RM32_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "SUB_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "SUB_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SUB_RM64_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SUB_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "SUB_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SUB_RM64_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SUB_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "SUB_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "SUB_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "SUB_RM8_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "SUB_RM8_R8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SUB_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "SUB_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "TEST_AL_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_AX_IMM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_EAX_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RAX_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "TEST_RM16_IMM16_F7R1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM16_IMM16_F7R1:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "TEST_RM16_R16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "TEST_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 368,
+   "vectors": 368
+  },
+  "TEST_RM32_IMM32_F7R1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM32_IMM32_F7R1:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "TEST_RM32_R32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "TEST_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 224,
+   "vectors": 224
+  },
+  "TEST_RM64_IMM32_F7R1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM64_IMM32_F7R1:mem": {
+   "traps": 0,
+   "undefined": 224,
+   "vectors": 224
+  },
+  "TEST_RM64_R64": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 336
+  },
+  "TEST_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "TEST_RM8_IMM8_F6R1": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "TEST_RM8_IMM8_F6R1:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "TEST_RM8_R8": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "TEST_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "TZCNT_R16_RM16": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "TZCNT_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 1280,
+   "vectors": 320
+  },
+  "TZCNT_R32_RM32": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "TZCNT_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 1216,
+   "vectors": 304
+  },
+  "TZCNT_R64_RM64": {
+   "traps": 0,
+   "undefined": 1536,
+   "vectors": 384
+  },
+  "TZCNT_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 1344,
+   "vectors": 336
+  },
+  "UD2": {
+   "traps": 4,
+   "undefined": 0,
+   "vectors": 0
+  },
+  "XADD_RM16_R16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "XADD_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "XADD_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "XADD_RM32_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "XADD_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 256
+  },
+  "XADD_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "XADD_RM64_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "XADD_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "XADD_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "XADD_RM8_R8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "XADD_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 192
+  },
+  "XADD_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "XCHG_R16_AX": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 352
+  },
+  "XCHG_R32_EAX": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 368
+  },
+  "XCHG_R64_RAX": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 336
+  },
+  "XCHG_RM16_R16": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "XCHG_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "XCHG_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 240
+  },
+  "XCHG_RM32_R32": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "XCHG_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 320
+  },
+  "XCHG_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "XCHG_RM64_R64": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 384
+  },
+  "XCHG_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 304
+  },
+  "XCHG_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 272
+  },
+  "XCHG_RM8_R8": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "XCHG_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 288
+  },
+  "XCHG_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 0,
+   "vectors": 224
+  },
+  "XOR_AL_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_AX_IMM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_EAX_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_R16_RM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_R16_RM16:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "XOR_R32_RM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_R32_RM32:mem": {
+   "traps": 0,
+   "undefined": 224,
+   "vectors": 224
+  },
+  "XOR_R64_RM64": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_R64_RM64:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "XOR_R8_RM8": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "XOR_R8_RM8:mem": {
+   "traps": 0,
+   "undefined": 352,
+   "vectors": 352
+  },
+  "XOR_RAX_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM16_IMM16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM16_IMM16:mem": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 336
+  },
+  "XOR_RM16_IMM16:mem:lock": {
+   "traps": 0,
+   "undefined": 224,
+   "vectors": 224
+  },
+  "XOR_RM16_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM16_IMM8:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "XOR_RM16_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "XOR_RM16_R16": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM16_R16:mem": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "XOR_RM16_R16:mem:lock": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "XOR_RM32_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM32_IMM32:mem": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "XOR_RM32_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 352,
+   "vectors": 352
+  },
+  "XOR_RM32_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM32_IMM8:mem": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "XOR_RM32_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 240,
+   "vectors": 240
+  },
+  "XOR_RM32_R32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM32_R32:mem": {
+   "traps": 0,
+   "undefined": 336,
+   "vectors": 336
+  },
+  "XOR_RM32_R32:mem:lock": {
+   "traps": 0,
+   "undefined": 304,
+   "vectors": 304
+  },
+  "XOR_RM64_IMM32": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM64_IMM32:mem": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "XOR_RM64_IMM32:mem:lock": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "XOR_RM64_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM64_IMM8:mem": {
+   "traps": 0,
+   "undefined": 224,
+   "vectors": 224
+  },
+  "XOR_RM64_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "XOR_RM64_R64": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM64_R64:mem": {
+   "traps": 0,
+   "undefined": 256,
+   "vectors": 256
+  },
+  "XOR_RM64_R64:mem:lock": {
+   "traps": 0,
+   "undefined": 288,
+   "vectors": 288
+  },
+  "XOR_RM8_IMM8": {
+   "traps": 0,
+   "undefined": 384,
+   "vectors": 384
+  },
+  "XOR_RM8_IMM8:mem": {
+   "traps": 0,
+   "undefined": 352,
+   "vectors": 352
+  },
+  "XOR_RM8_IMM8:mem:lock": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "XOR_RM8_R8": {
+   "traps": 0,
+   "undefined": 320,
+   "vectors": 320
+  },
+  "XOR_RM8_R8:mem": {
+   "traps": 0,
+   "undefined": 272,
+   "vectors": 272
+  },
+  "XOR_RM8_R8:mem:lock": {
+   "traps": 0,
+   "undefined": 224,
+   "vectors": 224
+  }
+ },
+ "schema": 1,
+ "seed": 20261125,
+ "source_digest": "66658f8571c775420ecc8cdb7d93b5b37decdc1ca7ca14ecc2ec09608498f9c7",
+ "vectors": 380335
+}

@@ -195,19 +195,3 @@ def aggregate(rows: list[FunctionFacts]) -> dict:
         "with_tail_jumps": sum(1 for r in rows if r.jumps_out),
         "mnemonic_functions": dict(mnemonic_functions.most_common()),
     }
-
-
-def coverage_if(rows: list[FunctionFacts], supported: set[str]) -> dict:
-    """Instruction coverage over `rows` for a supported mnemonic set: how many functions are fully covered, and for each
-    unsupported mnemonic how many functions it alone blocks. This orders lifting work by demand (section 9)."""
-    full = 0
-    sole: Counter[str] = Counter()
-    for r in rows:
-        if r.status != DECODED:
-            continue
-        missing = [m for m in r.mnemonics if m not in supported]
-        if not missing:
-            full += 1
-        elif len(missing) == 1:
-            sole[missing[0]] += 1
-    return {"fully_covered": full, "blocked_by_one_form": dict(sole.most_common())}

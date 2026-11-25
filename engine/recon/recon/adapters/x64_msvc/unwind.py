@@ -8,7 +8,7 @@ comparator cannot accept. The reader is given a callback so this module touches 
 from __future__ import annotations
 
 import struct
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Callable
 
 UNW_FLAG_EHANDLER = 1
@@ -16,7 +16,23 @@ UNW_FLAG_UHANDLER = 2
 UNW_FLAG_CHAININFO = 4
 FUNCINFO_MAGIC = 0x19930522
 
+# the architecture's register numbering in unwind codes
+REGISTERS = ("rax", "rcx", "rdx", "rbx", "rsp", "rbp", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15")
+
 Reader = Callable[[int, int], bytes]  # (rva, size) -> bytes; raises ValueError when unreadable
+
+
+@dataclass(frozen=True)
+class UnwindCode:
+    """One prologue step. `offset`: where the step's instruction ends, from the entry's begin."""
+
+    offset: int
+    alloc: int = 0                  # bytes the stack pointer goes down
+    register: str | None = None     # the saved register
+    push: bool = False
+    slot: int = 0                   # saved by a move: its place above the stack pointer after the whole prologue
+    vector: bool = False            # a vector register saved (not modelled yet)
+    sets_frame: bool = False
 
 
 @dataclass(frozen=True)
@@ -32,9 +48,58 @@ class UnwindInfo:
     handler_data: int | None
     #: upstream reason code when the comparator cannot take this entry, else None
     refusal: str | None
+    #: prologue steps in the order of the table (last step first); None when one of them is not understood
+    codes: tuple[UnwindCode, ...] | None = ()
+
+
+def _codes(raw: bytes, count: int) -> tuple[UnwindCode, ...] | None:
+    out: list[UnwindCode] = []
+    k = 0
+
+    def slots(n: int) -> int:
+        if k + n >= count:
+            raise ValueError("a code runs past the table")
+        return int.from_bytes(raw[2 * k + 2 : 2 * k + 2 + 2 * n], "little")
+
+    try:
+        while k < count:
+            offset, op, inf = raw[2 * k], raw[2 * k + 1] & 15, raw[2 * k + 1] >> 4
+            used = 1
+            if op == 0:
+                out.append(UnwindCode(offset, 8, REGISTERS[inf], push=True))
+            elif op == 1 and inf in (0, 1):
+                used = 2 + inf
+                v = slots(used - 1)
+                out.append(UnwindCode(offset, v * 8 if inf == 0 else v))
+            elif op == 2:
+                out.append(UnwindCode(offset, inf * 8 + 8))
+            elif op == 3:
+                out.append(UnwindCode(offset, sets_frame=True))
+            elif op in (4, 5):
+                used = op - 2
+                v = slots(used - 1)
+                out.append(UnwindCode(offset, register=REGISTERS[inf], slot=v * 8 if op == 4 else v))
+            elif op in (8, 9):
+                used = op - 6
+                v = slots(used - 1)
+                out.append(UnwindCode(offset, vector=True, slot=v * 16 if op == 8 else v))
+            else:
+                return None  # a machine frame, or a code version 1 does not define
+            k += used
+    except ValueError:
+        return None
+    return tuple(out)
 
 
 def read_unwind(read: Reader, rva: int) -> UnwindInfo:
+    """The header as upstream reads it, plus the decoded prologue steps."""
+    info = _header(read, rva)
+    if info.refusal or not info.code_count:
+        return info
+    return replace(info, codes=_codes(read(rva + 4, 2 * info.code_count), info.code_count))
+
+
+def _header(read: Reader, rva: int) -> UnwindInfo:
     head = read(rva, 4)
     version, flags = head[0] & 7, head[0] >> 3
     prolog, count = head[1], head[2]

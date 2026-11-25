@@ -127,3 +127,45 @@ def cmd_measure_compare(args) -> int:
     print(json.dumps(res, indent=2, sort_keys=True))
     ok = res["functions"] > 0 and res["equal"] == res["functions"] and res["cross_equal"] == res["cross_pairs"]
     return 0 if ok else 1
+
+
+def cmd_validate_lift(args) -> int:
+    import datetime
+
+    from recon.adapters.x64_msvc import validate as v
+
+    if args.write and args.only:
+        raise SystemExit("--write needs every form: run it without --only")
+    t0 = time.monotonic()
+    r = v.run_all(args.instances, args.states, args.only)
+    out = {"passed": len(r["passed"]), "vectors": sum(x["vectors"] for x in r["passed"].values()), "failed": r["failed"], "traps_confirmed": r["traps_confirmed"],
+           "traps_unplaced": r["traps_unplaced"], "refused": dict(sorted(Counter(r["refused"].values()).items())), "seconds": round(time.monotonic() - t0, 1)}
+    print(json.dumps(out, indent=2, sort_keys=True))
+    if args.write and not r["failed"]:
+        v.write_table(r, datetime.date.today().isoformat())
+    return 1 if r["failed"] else 0
+
+
+def cmd_coverage(args) -> int:
+    from recon.adapters.skyrim import coverage as cv
+    from recon.adapters.x64_msvc import validate as v
+
+    validated = v.load_validated()
+    if not validated:
+        raise SystemExit("no usable lift_coverage.json: it is absent or was made by other sources; run validate-lift --write")
+    inv = load_inventory(args.worktree)
+    img = _image(args)
+    ts = _select(args, inv)
+    t0 = time.monotonic()
+    rows = cv.run(img, ts, validated, progress=lambda n: print(f"  {n}/{len(ts)}", file=sys.stderr))
+    report = cv.aggregate(rows)
+    report["validated_forms"] = len(validated)
+    report["seconds"] = round(time.monotonic() - t0, 1)
+    if args.out:
+        d = _private_dir(args.out)
+        (d / "lift-demand.json").write_text(json.dumps(cv.demand(rows), indent=1, sort_keys=False), encoding="utf-8")
+        with open(d / "coverage-rows.jsonl", "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r.__dict__, sort_keys=True) + "\n")
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0
