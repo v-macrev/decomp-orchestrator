@@ -70,9 +70,33 @@ def main(argv: list[str] | None = None) -> int:
     d.add_argument("--worktree")
     d.add_argument("--checkout")
     d.add_argument("--data-dir")
+    def common(p, with_select=True):
+        p.add_argument("--worktree", required=True, help="upstream worktree at the pinned base")
+        p.add_argument("--checkout", required=True, help="the checkout holding the private contrib config")
+        if with_select:
+            p.add_argument("--unmatched", action="store_true")
+            p.add_argument("--limit", type=int, default=0)
+
+    i = sub.add_parser("inventory", help="counts over the offered targets (needs no image)")
+    i.add_argument("--worktree", required=True)
+    i.add_argument("--unmatched", action="store_true")
+    s = sub.add_parser("survey", help="decode and classify every selected target; counts, and rows under --out (a .local directory)")
+    common(s)
+    s.add_argument("--out")
+    c = sub.add_parser("crosscheck", help="compare the decoder with upstream's and capstone's")
+    common(c)
+    c.add_argument("--capstone-every", type=int, default=0)
+    common(sub.add_parser("rtti", help="count RTTI locators and vtables"), with_select=False)
+    a = sub.add_parser("analyze", help="counts-only facts of one target")
+    common(a, with_select=False)
+    a.add_argument("--address", required=True)
     args = ap.parse_args(argv)
     if args.cmd == "serve":
         return serve(sys.stdin, sys.stdout, sys.stderr)
+    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze"):
+        from recon.cli import commands
+
+        return getattr(commands, f"cmd_{args.cmd}")(args)
     from recon.adapters.skyrim.environment import run_doctor
 
     report = run_doctor(args.worktree, args.checkout, args.data_dir)

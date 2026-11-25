@@ -19,5 +19,7 @@ Code: `engine/recon/` (Python, standard library only so far), `apps/server/src/r
 Run the engine's checks with `python3 -m recon doctor --worktree <upstream worktree> --checkout <checkout>`
 in the checkout's host; tests: `python3 -m pytest` in `engine/recon` and `npm test` for the server.
 
-State: Phase 1 only. The engine answers the protocol and `doctor`; it reconstructs nothing yet and says so
-(`ENGINE_NOT_IMPLEMENTED`). Only the user submits; nothing here opens a pull request or publishes a claim.
+State: Phases 1 and 2. The engine loads and verifies the pinned image, maps addresses, reads the offered inventory,
+decodes every unmatched function range (in agreement with upstream's decoder), reads unwind data and RTTI, and refuses
+what upstream's comparator refuses. It reconstructs nothing yet and says so (`ENGINE_NOT_IMPLEMENTED`). Only the user
+submits; nothing here opens a pull request or publishes a claim.

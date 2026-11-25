@@ -175,3 +175,29 @@ before and after (`:139`, `:202`). A body trivial for a target of 24 bytes or mo
 | 2 | `Host.run` offers live progress and clean cancellation for the engine | Stdout is returned at exit; with stdin the WSL cancel handshake is off | R-1 in the roadmap |
 | 3 | Counts of section 4.4 | `data/progress.json`: 42,221 functions, 41,235 matched, 986 mapped: **equal** | none |
 | 4 | Slot worktrees stand on the base | They stand on `dc1b52fddc`; `origin/main` is `39e7cb38b1` | The input digest names the unit content and the upstream files actually imported, not the ref |
+
+## Phase 2 additions (2026-11-25)
+
+Answers to section 4.3, point 1 (discovery and identity) and parts of 2, 15, 17.
+
+* **Offered targets** are `data/target-hashes/contributor-targets-part-NNN.json` (22 parts, `functions[]` of
+  `{rva, size, extent_source, window}`): **64,010 distinct functions**. The index `contributor-targets.json` states
+  `next_candidate_count 64197`, 187 more than the parts hold; the difference is **not explained** (it may count
+  claimed functions or duplicates) and the engine uses the parts.
+* **Progress entries**: `data/progress.json` holds 42,221 functions (41,235 matched, 986 mapped; fields `rva, size,
+  status, name, name_origin, name_source, owner, evidence, report`). **None of the 62,247 unmatched offered
+  targets has an entry**, and none of the 986 `mapped` entries is an offered target. A target without an entry
+  has no recorded name, owner or status; its unit and class come from `sr next` and the facts files, which
+  Phase 6 reads.
+* **Boundaries**: the inventory range equals the contiguous `.pdata` coverage for all 55,265 unmatched functions
+  that have unwind data; 6,982 have none. The comparator refuses a `.pdata` entry that crosses the range
+  (`tools/compare.py:582-583`, `unwind-entry-crosses-boundary`) and entries that overlap (`:593-594`); the survey
+  applies the same rules before any search.
+* **Unwind refusals** that can be known from the image alone: `unsupported-unwind` for version other than 1 and
+  for a chain that carries a handler (`tools/pecoff.py:345-348`). The handler names the comparator accepts
+  (`__CxxFrameHandler3`, `__GSHandlerCheck_EH`, `__C_specific_handler`, `__GSHandlerCheck_SEH`,
+  `__GSHandlerCheck`, `tools/pecoff.py:354-360`) belong to the *candidate's* object; the image holds handler
+  addresses, not names, so the engine classifies the handler data (`FuncInfo` magic) and does not name handlers.
+* **Upstream's image model** (`tools/analysis/imagemodel.py`) needs a Ghidra export that is not present on this
+  machine, so the engine finds RTTI and vtables itself (`adapters/x64_msvc/rtti.py`).
+* **Machine**: the private venv (pip 25.1.1) was created under the checkout's `.local/orchestrator/recon/`.

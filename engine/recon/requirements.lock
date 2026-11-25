@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Pinned, hashed requirements of the engine's private venv (docs/recon/TECHNICAL_DECISIONS.md, D-002).
+# Hashes are of the wheels for CPython 3.8+ (abi3) / any, manylinux x86-64, taken from PyPI on 2026-11-25.
+# Install with scripts/setup-venv.sh; nothing is installed implicitly.
+iced-x86==1.21.0 \
+    --hash=sha256:489789377bfc1fe432bd2a8a5780c9f3e7c35be2e6133b0de5432cd901cad32c
+capstone==5.0.9 \
+    --hash=sha256:273fd8d747d2e35c88f91450be51a603ecfaafb00d96d9f315dcb8689c86193e

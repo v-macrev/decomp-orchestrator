@@ -43,3 +43,12 @@ def test_every_file_has_an_spdx_line():
     for f in sorted(PKG.rglob("*.py")):
         head = "\n".join(f.read_text(encoding="utf-8").split("\n")[:3])
         assert "SPDX-License-Identifier: AGPL-3.0-or-later" in head, f
+
+
+def test_core_names_no_register_flag_or_compiler():
+    import re
+
+    forbidden = re.compile(r"\b(rax|rbx|rcx|rdx|rsi|rdi|rsp|rbp|eax|ebx|ecx|edx|xmm\d+|msvc|/O2|/EHsc)\b", re.IGNORECASE)
+    for f in files("core"):
+        for n, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            assert not forbidden.search(line), f"{f.name}:{n}: {line.strip()}"

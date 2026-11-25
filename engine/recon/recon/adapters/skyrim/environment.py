@@ -67,6 +67,19 @@ def run_doctor(worktree: str | None, checkout: str | None, data_dir: str | None)
         checks.append(_check(f"package.{name}", "ok" if have else "missing", why,
                              None if have else "create the private venv under the data directory and install the pinned, hashed requirement (docs/recon/TECHNICAL_DECISIONS.md)"))
 
+    if data_dir:
+        venv_python = Path(data_dir) / "venv/bin/python"
+        if venv_python.is_file():
+            try:
+                r = subprocess.run([str(venv_python), "-c", "import iced_x86, capstone"], capture_output=True, text=True, timeout=60)
+                ok = r.returncode == 0
+            except (OSError, subprocess.SubprocessError):
+                ok = False
+            checks.append(_check("venv", "ok" if ok else "error", "private venv imports iced_x86 and capstone" if ok else "private venv exists but does not import its packages",
+                                 None if ok else "rerun engine/recon/scripts/setup-venv.sh <data dir>"))
+        else:
+            checks.append(_check("venv", "missing", "no private venv (decoding needs iced_x86)", "run engine/recon/scripts/setup-venv.sh <data dir>"))
+
     expected_hash = None
     wt = Path(worktree) if worktree else None
     if wt is None or not wt.is_dir():

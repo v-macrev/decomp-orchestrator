@@ -20,6 +20,18 @@ AGPL-3.0-or-later compatibility, reason. Candidates, none installed: `iced_x86` 
 `.local/orchestrator/recon/venv/` with a hashed lock file, created by an explicit step that `recon doctor`
 names; nothing is installed implicitly.
 
+**Update 2026-11-25 (Phase 2): two dependencies installed in the private venv** by `scripts/setup-venv.sh`
+from `requirements.lock`, `--require-hashes --no-deps`:
+
+| Package | Version | sha256 of the wheel | Licence | Compatible with AGPL-3.0-or-later | Reason |
+|---|---|---|---|---|---|
+| `iced-x86` | 1.21.0 | `489789377bfc1fe432bd2a8a5780c9f3e7c35be2e6133b0de5432cd901cad32c` | MIT (`License: MIT` in the wheel metadata) | yes | Instruction decoding; upstream's own pin, so the engine agrees with upstream's generators |
+| `capstone` | 5.0.9 | `273fd8d747d2e35c88f91450be51a603ecfaafb00d96d9f315dcb8689c86193e` | BSD (`License :: OSI Approved :: BSD License`; `LICENSE.TXT` in the wheel) | yes | An independent decoder for differential checks only; never used to produce an answer |
+
+Both wheels are manylinux x86-64 (`cp38-abi3` and `py3-none`), so they run on this machine's Python 3.14. Both
+have no dependencies. `capstone.__version__` reports `5.0.7` for the 5.0.9 wheel; the lock names the wheel.
+`z3-solver` is added when Phase 4 needs it.
+
 ## D-003 · 2026-11-25 · The engine runs in WSL, beside the checkout
 **Evidence.** The checkout, packs and toolchain are in WSL (`config/orchestrator.json`, `repo.host`); the Windows
 host has no Python (`REPOSITORY_AUDIT.md`, environment table), and `Host.run` already reaches WSL.
@@ -81,3 +93,22 @@ Applies to this development, not to the engine. The audit and the tests used onl
 documents and code, hashes, counts and booleans. A function the engine cannot solve is debugged from its
 reason codes and counters, and from synthetic fixtures built to reproduce the shape (section 3, "A rule whose
 only evidence is one target function is not a rule").
+
+## D-012 · 2026-11-25 · Function boundary: the inventory range, checked against `.pdata`, never replaced by it
+**Evidence.** On the 62,247 unmatched targets the inventory range and `.pdata` agree in every case that has
+unwind data (55,265 exact) and 6,982 have none (leaf functions). **Decision.** RVA and size come from upstream's
+offered list. A disagreement (an entry crossing the range, overlapping entries, a range not readable from the
+file) blocks the function with upstream's reason; the engine never picks between sources. In this image there
+is nothing to block on, so this rule is exercised by synthetic tests only.
+
+## D-013 · 2026-11-25 · Decode with iced-x86 behind an adapter; the table rule is explicit
+iced is the decoder (upstream's pin, section 8's default); upstream's length decoder and capstone are checks, not
+alternatives. MSVC puts switch tables after a function's code inside its range, so a whole-range sweep
+mis-decodes them. The range's data start is the lowest forward address that a RIP-relative operand or an
+image-relative displacement (value of at least 0x1000, below 2^31) reaches, and the code before it must decode
+cleanly to exactly there. The known weakness (a forward reference to code) is documented by a test and reported
+as `other-data` so it is visible rather than silent.
+
+## D-014 · 2026-11-25 · Aggregates only leave the engine
+Commands print counts; rows go only under a directory that has a `.local` component; the survey's mnemonic
+demand is private. Public documents carry totals and categories, never instruction names or per-function data.

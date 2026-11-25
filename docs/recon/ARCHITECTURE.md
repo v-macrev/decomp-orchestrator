@@ -40,8 +40,9 @@ cancellable. There is no daemon and no socket. Everything game-derived stays und
 
 Allowed imports: `adapters/skyrim -> adapters/x64_msvc -> core`; `core` imports neither. Enforced by
 `tests/unit/test_layers.py`, which also fails on any import of a network or AI client. Layers are created
-when the code that needs them exists: today `core/` (canonical serialisation) and `adapters/skyrim/`
-(environment check) exist and `x64_msvc/` does not.
+when the code that needs them exists: today `core/` (canonical serialisation, instruction and segment
+records), `adapters/x64_msvc/` (decoding, unwind data, RTTI) and `adapters/skyrim/` (image, inventory,
+survey, cross-checks, environment check) exist. `core` names no register and no compiler flag (tested).
 
 ## Determinism contract (summary of section 21)
 
