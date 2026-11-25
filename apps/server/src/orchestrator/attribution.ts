@@ -34,7 +34,7 @@ export function draftedByText(person: string | null, models: string[]): string {
 const DRAFTED = /^\/\/\s*Drafted by\s+(.*)$/i;
 const SKELETON_TAIL = /^\/\/\s*a tools\/skeleton\.py skeleton\.?\s*$/i;
 const LATER = '; later functions by ';
-const MODEL_TOKEN = /^[A-Za-z][A-Za-z0-9._/-]*\d[A-Za-z0-9._/-]*$/;
+export const MODEL_TOKEN = /^[A-Za-z][A-Za-z0-9._/-]*\d[A-Za-z0-9._/-]*$/;
 
 /** Parse "<person>, assisted by <models>" or a list of model ids; null for anything else. */
 function parseOurs(text: string): { person: string | null; models: string[] } | null {

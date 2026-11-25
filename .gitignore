@@ -9,3 +9,7 @@ config/accounts.json
 config/orchestrator.json
 data/*.txt
 data/server.*
+
+__pycache__/
+.pytest_cache/
+*.pyc

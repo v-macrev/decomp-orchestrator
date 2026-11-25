@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+[project]
+name = "decomp-recon"
+version = "0.1.0"
+description = "Deterministic binary-to-C++ reconstruction engine for decomp-orchestrator (no AI, no network)"
+requires-python = ">=3.11"
+license = { text = "AGPL-3.0-or-later" }
+# No runtime dependencies yet. Every dependency added later is pinned with its hash in
+# requirements.lock and recorded (name, version, hash, licence, reason) in docs/recon/TECHNICAL_DECISIONS.md.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+markers = [
+  "needs_checkout: needs the upstream checkout, the game image or the toolchain; skipped with a reason when absent",
+]
