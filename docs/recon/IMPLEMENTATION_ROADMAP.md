@@ -343,7 +343,10 @@ Compared:         reach candidates 625 (Phase 6: 140); primary CALLEE_SIGNATURE_
 Regressions:      none in the suites
 Overfitting:      no target RVA, name or byte in engine source or tests; every new rule is the x64 convention's or a reading of the
                   image's own tables, tested on original fixtures
-Engine measured:  7ea7e13 and the per-engine journal (the D-051 engine, 208bc13, is being measured next)
+Engine measured:  7ea7e13 and the per-engine journal
+D-051 engine:     208bc13, prewarm 119 min (no error, no death), campaign 21 min: development reach candidates 590, primary
+                  CALLEE_SIGNATURE_UNKNOWN 694, INDIRECT_CALL 334; held-out 33, 32, 18; BYTE_MATCHED 2. Neutral, as D-051 predicted:
+                  the leaf extents turn calls to no extent into calls to import thunks, whose signatures stay unknown until D-052
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 
@@ -355,7 +358,8 @@ By family: Knowledge 1,585, ABI 413, Source 73, Machine 28, Search 24, Unit 16.
 **No function was judged on its budget.** The 16 functions suspended at level 0 were resumed at four times the budgets and
 each ended in a state of its own; none was left resumable, and none was counted as unreconstructable because a budget ran out.
 
-**Still open in Phase 7:** the constant scan and the ceiling estimate; the campaign on the D-051 engine.
+**Still open in Phase 7:** the constant scan and the ceiling estimate; the campaign on the D-052 engine (imported functions
+declared by the platform's headers, d00c193), whose prewarm is running.
 
 ## Items found by the audit that block or shape later phases
 
