@@ -561,3 +561,33 @@ def test_every_candidate_with_no_known_difference_is_verified_until_one_passes()
     again = Every(match=shop.match)
     search.reconstruct(program(branchy(), stores()), BASE + RVA, again)
     assert again.verified == shop.verified
+
+
+# ------------------------------------------------------------------------------------ callee depth (D2)
+
+def chain(depth: int) -> list:
+    """depth functions, each passing its argument to the next and returning what it returns; the last returns it plus 1"""
+    fns = []
+    for k in range(depth):
+        rva = RVA + 0x100 * k
+        if k == depth - 1:
+            fns.append(Asm(rva)(I.create_reg_mem(C.LEA_R32_M, R.EAX, mem(R.RCX, 1)))(T.ret()))
+            continue
+        a = Asm(rva)
+        a(T.sub_rsp(40))
+        a.branch(C.CALL_REL32_64, rva + 0x100)
+        a(T.add_rsp(40))(T.ret())
+        fns.append(a)
+    return fns
+
+
+@pytest.mark.parametrize("depth", [3, 6, 12])
+def test_a_chain_of_callees_deeper_than_a_constant_has_signatures(depth):
+    from recon.core.budget import Budget
+
+    p = program(*chain(depth))
+    x = canonical(p)
+    assert re.search(rf"Function{RVA + 0x100:X}\(arg1\);", x.unit.text) and x.signature.params    # the callee's signature is known
+    # how far it looks is the irNodes budget's to say: too little, and the search says so
+    r = search.reconstruct(program(*chain(depth)), BASE + RVA, Oracle(), Budget.of({"irNodes": 3 * depth // 2}))
+    assert r.reason == search.BUDGET_EXHAUSTED and r.exhausted == "irNodes"

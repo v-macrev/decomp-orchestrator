@@ -10,6 +10,7 @@ unmatched ones (`mapped`) are a separate population here. RVA and size are the v
 """
 from __future__ import annotations
 
+import bisect
 import glob
 import json
 from dataclasses import dataclass
@@ -40,6 +41,8 @@ class Inventory:
     recorded_unmatched: tuple[Target, ...] = ()
     #: every function start upstream records or offers
     known_starts: frozenset[int] = frozenset()
+    #: every function data/progress.json records that is not in the offered list, matched or not: callees and class users
+    recorded: tuple[Target, ...] = ()
 
     def unmatched(self) -> list[Target]:
         return [t for t in self.targets if not t.matched]
@@ -79,5 +82,31 @@ def load_inventory(worktree: str | Path) -> Inventory:
     build = progress.get("target_build_id", "")
     recorded = tuple(sorted((Target(f["rva"], f["size"], "progress", f.get("status")) for f in progress["functions"]
                              if f.get("status") != "matched" and f["rva"] not in seen), key=lambda t: t.rva))
+    others = tuple(sorted((Target(f["rva"], f["size"], "progress", f.get("status")) for f in progress["functions"] if f["rva"] not in seen),
+                          key=lambda t: t.rva))
     return Inventory(build, tuple(targets), len(status), sum(1 for s in status.values() if s == "matched"), recorded,
-                     frozenset(seen) | frozenset(status))
+                     frozenset(seen) | frozenset(status), others)
+
+
+def extents(inv: Inventory) -> tuple[dict[int, int], int]:
+    """The extent of every function the engine may analyse, by RVA: the offered targets, and the recorded functions that
+    no offered one overlaps (an overlapping record is left out, never chosen over the validated entry). Also how many
+    records were left out."""
+    out = {t.rva: t.size for t in inv.targets}
+    starts = sorted(out)
+    dropped = 0
+    for t in inv.recorded:
+        k = bisect.bisect_right(starts, t.rva)
+        before = starts[k - 1] if k else None
+        after = starts[k] if k < len(starts) else None
+        if t.size <= 0 or (before is not None and before + out[before] > t.rva) or (after is not None and t.rva + t.size > after):
+            dropped += 1
+            continue
+        out[t.rva] = t.size
+    # two records that overlap each other contradict each other: both are left out
+    offered = {t.rva for t in inv.targets}
+    keys = sorted(out)
+    clash = {r for a, b in zip(keys, keys[1:]) if a + out[a] > b for r in (a, b) if r not in offered}
+    for r in clash:
+        del out[r]
+    return out, dropped + len(clash)

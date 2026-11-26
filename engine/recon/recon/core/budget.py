@@ -24,6 +24,21 @@ KINDS = ("candidates", "compiles", "solverUnits", "irNodes", "expansions")
 DEFAULTS = {"candidates": 48, "expansions": 160, "compiles": 400, "solverUnits": 2_000, "irNodes": 200_000}
 
 
+#: the levels a campaign gives a function, each a multiple of the defaults (L0 is the defaults). A level is a segment of
+#: work, never a limit of the reconstruction: a function whose budget ran out at one level is taken up at the next, and
+#: what the lower level computed (normal forms, signatures, compiles, verdicts) is read back, not computed again. Past the
+#: last level it stays RESUMABLE, for a campaign with more levels.
+LEVELS = (1, 4, 16, 64, 256, 1024)
+
+
+def level(n: int, base: dict[str, int] | None = None) -> dict[str, int]:
+    """The budgets of level `n`: every kind `LEVELS[n]` times its base (the defaults unless given)."""
+    if not 0 <= n < len(LEVELS):
+        raise ValueError(f"levels are 0 to {len(LEVELS) - 1}")
+    b = {**DEFAULTS, **(base or {})}
+    return {k: b[k] * LEVELS[n] for k in KINDS}
+
+
 class BudgetExhausted(Exception):
     def __init__(self, kind: str) -> None:
         super().__init__(kind)
@@ -81,4 +96,4 @@ def current() -> Budget | None:
     return _active.get()
 
 
-__all__ = ["DEFAULTS", "KINDS", "Budget", "BudgetExhausted", "active", "current", "spend"]
+__all__ = ["DEFAULTS", "KINDS", "LEVELS", "Budget", "BudgetExhausted", "active", "current", "level", "spend"]

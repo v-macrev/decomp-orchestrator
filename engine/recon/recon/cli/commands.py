@@ -251,6 +251,83 @@ def cmd_reconstruct(args) -> int:
     return 3 if broken else 0 if states == Counter({BYTE_MATCHED: len(rows)}) else 1
 
 
+def cmd_campaign(args) -> int:
+    """Every function of the population (startable, in an existing unit, at most --max-bytes, unmatched) gets a state and
+    blockers, level by level: a journal and records under --data (private), progress on stderr, counts on stdout."""
+    from recon.adapters.skyrim import campaign as cp
+
+    data = Path(args.data)
+    knowledge = Path(args.knowledge) if args.knowledge else data / "knowledge.db"
+    if ".local" not in data.resolve().parts or ".local" not in knowledge.resolve().parts:
+        print("campaign records and knowledge name functions: --data and --knowledge must be under a .local directory", file=sys.stderr)
+        return 2
+    first, _dash, last = args.levels.partition("-")
+    levels = range(int(first), int(last or first) + 1)
+    inv = load_inventory(args.worktree)
+    startable = {}
+    for c in json.loads(Path(args.next).read_text(encoding="utf-8"))["candidates"]:
+        startable[int(c["rva"], 16) if isinstance(c["rva"], str) else int(c["rva"])] = c
+    solve_set = frozenset(json.loads(Path(args.solve_set).read_text(encoding="utf-8"))) if args.solve_set else frozenset()
+    population = [t for t in inv.unmatched() if t.rva in solve_set or (t.rva in startable and startable[t.rva].get("unit_exists") and t.size <= args.max_bytes)]
+    records = cp.run(population, startable, Path(args.worktree), Path(args.checkout), data, args.name, solve_set, args.jobs, str(knowledge), levels,
+                     log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every)
+    cp.write(records, data, args.name)
+    report = {"population": len(population), "solve_set": len(solve_set), "recorded": len(records), "levels": [levels.start, levels.stop - 1],
+              **cp.summary(records)}
+    (data / f"{args.name}-summary.json").write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8")
+    print(json.dumps(report, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_prewarm(args) -> int:
+    """The whole-program analysis into the knowledge store (private): counts and times on stdout, progress on stderr."""
+    from recon.adapters.skyrim import prewarm as pw
+
+    if ".local" not in Path(args.knowledge).resolve().parts:
+        print("the knowledge store is derived from the image: --knowledge must be under a .local directory", file=sys.stderr)
+        return 2
+    report = pw.run(Path(args.worktree), Path(args.checkout), str(args.knowledge), args.jobs,
+                    log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every)
+    print(json.dumps(report, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_ceiling(args) -> int:
+    """The early ceiling estimate: counts only."""
+    from recon.adapters.skyrim import ceiling as ce
+    from recon.adapters.x64_msvc import validate as v
+
+    inv = load_inventory(args.worktree)
+    startable = {}
+    for c in json.loads(Path(args.next).read_text(encoding="utf-8"))["candidates"]:
+        startable[int(c["rva"], 16) if isinstance(c["rva"], str) else int(c["rva"])] = c
+    report = ce.estimate(_image(args), inv, Path(args.worktree), startable, v.load_validated(), args.sample)
+    print(json.dumps(report, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_manifest(args) -> int:
+    """The frozen denominator of the worktree's revision, written under a private directory; counts on stdout."""
+    from recon.adapters.skyrim import manifest as mf
+
+    out = Path(args.out)
+    if ".local" not in out.resolve().parts:
+        print("the manifest names every function: it goes under a .local directory (--out)", file=sys.stderr)
+        return 2
+    inv = load_inventory(args.worktree)
+    startable = None
+    if args.next:
+        startable = {}
+        for c in json.loads(Path(args.next).read_text(encoding="utf-8"))["candidates"]:
+            rva = int(c["rva"], 16) if isinstance(c["rva"], str) else int(c["rva"])
+            startable[rva] = {"unit": c.get("unit"), "unit_exists": bool(c.get("unit_exists"))}
+    m = mf.coverage(args.worktree, inv, startable)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / f"manifest-{m['upstream'][:12]}.json").write_text(json.dumps(m, sort_keys=True), encoding="utf-8")
+    print(json.dumps(mf.counts(m), indent=1, sort_keys=True))
+    return 0
+
+
 def cmd_measure_filter(args) -> int:
     """D8: the execution check's false rejections, over a synthetic pack or a sample of the real target (counts only)."""
     from recon import ENGINE_VERSION
@@ -312,9 +389,11 @@ def cmd_reach(args) -> int:
     validated = v.load_validated()
     if not validated:
         raise SystemExit("no usable lift_coverage.json: run validate-lift --write")
+    from recon.adapters.skyrim.inventory import extents
+
     inv = load_inventory(args.worktree)
     img = _image(args)
-    pack = Pack("pinned", img, {t.rva: t.size for t in inv.targets}, validated)
+    pack = Pack("pinned", img, extents(inv)[0], validated)      # recorded functions are callees too (D4)
     ts = _select(args, inv)[:: args.every]
     t0 = time.monotonic()
     rows = rc.run(pack, ts, progress=lambda n: print(f"  {n}/{len(ts)}", file=sys.stderr), jobs=args.jobs)

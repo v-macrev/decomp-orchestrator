@@ -7,7 +7,7 @@ from recon.protocol import ProtocolError, function_result, progress, result, val
 
 GOOD = {
     "protocol": 1, "requestId": "req-1", "command": "solve",
-    "packet": {"functions": [{"rva": "0x1de5e0", "size": 24, "name": "A::B"}], "unit": "A_1de5e0", "allowedPaths": ["reconstruction/a/A_1de5e0.cpp"]},
+    "packet": {"functions": [{"rva": "0x1234", "size": 24, "name": "A::B"}], "unit": "A_1234", "allowedPaths": ["reconstruction/a/A_1234.cpp"]},
     "modelName": "recon-engine-0.1.0", "budgets": {"candidates": 10, "compiles": 5},
 }
 
@@ -28,7 +28,7 @@ def test_good_request_is_accepted():
     lambda r: r.update(command="decompile"),
     lambda r: r["packet"]["functions"].clear(),
     lambda r: r["packet"]["functions"].extend([{"rva": "0x1", "size": 1}] * 4),
-    lambda r: r["packet"]["functions"][0].update(rva="1de5e0"),
+    lambda r: r["packet"]["functions"][0].update(rva="1234"),
     lambda r: r["packet"]["functions"][0].update(size=0),
     lambda r: r["packet"]["functions"][0].update(listing="mov eax, 1"),
     lambda r: r.update(budgets={"candidates": -1}),

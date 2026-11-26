@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from recon.adapters.skyrim.image import PinnedImage
 from recon.adapters.skyrim.inventory import Target
 from recon.adapters.skyrim.pack import Pack
+from recon.core.budget import BudgetExhausted
 from recon.core.inference import types as ty
 from recon.core.inference.signature import NotReconstructed
 from recon.core.structuring import ast as A
@@ -24,23 +25,32 @@ class Row:
     size: int
     result: str                                   # "candidate", "refused: CODE", "disagreed", "failed: Kind"
     facts: dict[str, int] = field(default_factory=dict)
+    #: every reason code met, for the taxonomy (the result names only the first)
+    codes: list[str] = field(default_factory=list)
 
 
 def one(pack: Pack, program, t: Target) -> Row:
     at = pack.image.image_base + t.rva
     try:
-        stages = Generator(program, at).stages()
-        r = next(stages)
+        r = None
+        for r in Generator(program, at).stages():   # every stage: what the search could compile (D7)
+            pass
+        assert r is not None
     except NotReconstructed as e:
-        return Row(t.rva, t.size, f"refused: {e.code}")
+        return Row(t.rva, t.size, f"refused: {e.code}", codes=[e.code])
+    except BudgetExhausted as e:     # suspended, not refused: a larger budget continues from what is kept
+        return Row(t.rva, t.size, f"exhausted: {e.kind}", codes=["BUDGET_EXHAUSTED"])
     except RecursionError:
-        return Row(t.rva, t.size, "failed: RecursionError")
+        return Row(t.rva, t.size, "failed: RecursionError", codes=["ENGINE_ERROR"])
     except Exception as e:  # noqa: BLE001 - a defect, counted by kind so that it is found
-        return Row(t.rva, t.size, f"failed: {type(e).__name__}")
+        return Row(t.rva, t.size, f"failed: {type(e).__name__}", codes=["ENGINE_ERROR"])
+    codes = sorted(r.refused) + (["NOT_EQUIVALENT"] if r.disagreed else []) + (["BUDGET_EXHAUSTED"] if r.exhausted else [])
+    if not r.candidates and r.exhausted:   # what was left untried is not a refusal
+        return Row(t.rva, t.size, f"exhausted: {r.exhausted}", codes=["BUDGET_EXHAUSTED", *codes[:-1]])
     if not r.candidates:
         if r.refused:
-            return Row(t.rva, t.size, f"refused: {min(r.refused)}")
-        return Row(t.rva, t.size, "disagreed" if r.disagreed else "refused: NO_CANDIDATE")
+            return Row(t.rva, t.size, f"refused: {min(r.refused)}", codes=codes)
+        return Row(t.rva, t.size, "disagreed" if r.disagreed else "refused: NO_CANDIDATE", codes=codes or ["NO_CANDIDATE"])
     c = r.candidates[0]
     nodes = [x for s in c.body.stmts for x in A.walk(s)]
     first = c.body.params[0] if c.body.params else None
@@ -52,7 +62,7 @@ def one(pack: Pack, program, t: Target) -> Row:
         "floats": int("Float" in repr([x.type for x in nodes if isinstance(x, A.EXPRS)])),
         "signed_assumption": int(bool(c.assumptions)),
     }
-    return Row(t.rva, t.size, "candidate", facts)
+    return Row(t.rva, t.size, "candidate", facts, codes)
 
 
 def run(pack: Pack, targets: list[Target], progress=None, jobs: int = 1) -> list[Row]:

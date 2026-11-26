@@ -290,3 +290,76 @@ and rejected 1, which does not compile; on the real target, a fixed sample of th
 rejections could not be compared because they do not compile, and their reason points at a world the generator made up (a truth value read from
 made-up memory) rather than at the tree; the audit now records the compiler's codes, and the count is measured again when the generator gains
 dimensions (Phase 9).
+
+## D-041 · 2026-11-26 · Every recorded function is a callee, and no constant bounds how deep one is analysed
+Defects D2, D4 and D7. The program the engine analyses now holds every function upstream records (`data/progress.json`, matched or
+not) besides the offered targets, so a callee is no longer invisible because it is not offered (D4); a record that an offered entry
+or another record overlaps is left out, never chosen over it (`inventory.extents`). The callee depth limit of 4 is gone: how much is
+analysed is the `irNodes` budget's to bound, and nothing else: the analysis walks the call graph with an explicit stack (D-045),
+so no depth of the interpreter's stack limits it either (a first version guarded that stack with `CALLEE_CHAIN_TOO_DEEP`; D-045
+removed it). Recursive functions are solved as components (D-045), each further round spending `irNodes` (D2). Reach runs every
+stage of the generator (D7).
+
+## D-042 · 2026-11-26 · What a result depends on is in its digest
+Defect D6. The input digest of a `solve` request covers, besides what it covered before, the image and build, the upstream revision,
+the recipe's digest and its compiler's, the include closure of the unit's header (project headers by path and digest; system headers
+are the compiler's), the declaration knowledge (`data/progress.json`), the engine's lockfile, and the frontiers it resumes from
+(`adapters/skyrim/manifest.py`). No timestamps or temporary paths. Requests without a worktree keep the old fields.
+
+## D-043 · 2026-11-26 · The denominator is frozen per revision, the held-out set is fixed, and every function has a state
+`recon manifest` writes the coverage manifest of the worktree's revision under the private data directory (image, revision, inventory
+file digests, comparator version, each recipe's compiler, and per function its extent, extent source, unit when `sr next` places it,
+held-out flag and populations) and prints counts only. The held-out set is every function whose `sha256("heldout-v1" || rva_le32)`
+falls in the lowest 5% of the hash space; every count is reported for development and held-out functions apart. `core/taxonomy.py`
+gives every reason code a family in pipeline order (Machine, ABI, Knowledge, Source, Search, Unit, Policy, Infra) and the plan's name,
+and derives the state (`BYTE_MATCHED`, `RESUMABLE`, `NEEDS_DECISION`, `INFRA`, `OPEN`); a test keeps every code written in the
+engine's source classified. `recon campaign` gives every function of a population a state and all its blockers, the primary first.
+`BYTE_MATCHED` is the engine's comparator only: `VERIFIED` also needs the Gate Keeper, the dry run and a clean-room rerun.
+
+## D-044 · 2026-11-26 · The ceiling estimate counts only what can be told before a match
+`recon ceiling` samples 200 startable development functions, 25 per size bucket, in a fixed hash order, and flags a unit file
+already within 10% of upstream's per-file caps (read from `tools/contrib_screen.py`) and code that is not the pinned compiler's
+(outside `.text`, or an invalid instruction). Whether a function needs another recipe, or a body upstream already matched, cannot be
+told before a match is attempted: those are reported as not measured, so the estimate is a lower bound. Identical bytes at another
+address are counted but not flagged: the linker did not fold them, so each has its own definition. The overfitting scan
+(`tests/unit/test_campaign.py`) fails on any target RVA, recorded scoped name or long plain name in the engine tree; it found one, an
+upstream example address in a protocol test, now replaced by a synthetic one.
+
+## D-045 · 2026-11-26 · Callee analysis is done once per program, by components, and kept
+The first campaign of Phase 7 analysed the same callees again for every function that reached them, and without an active budget
+reach could not stop. Signatures are now found bottom-up over the strongly connected components of the call graph (Tarjan, with an
+explicit stack, so a chain of callees is as long as the program makes it): callees first; the members of a cycle together, from one
+assumption, each inferred from what is assumed of all of them until nothing changes, a state that comes round again telling
+nothing. The result does not depend on which member is asked first or on what was analysed before. Every fact is kept in a private
+content-addressed store (`core/knowledge.py`, sqlite under the data directory, never committed): normal forms and refusals, direct
+callees and call sites keyed by the function's extent under a namespace that digests the engine's analysis code, the image and the
+validated instruction forms; signatures keyed by a Merkle digest of the component's members, their callees' keys and the
+declarations they read, so that invalidation follows dependencies and nothing else. A unit of work is written in one transaction
+with a full sync; a lease names the process computing it, another waits for it (a lease of a process that has ended is taken over);
+a cycle keeps its last finished round, so one interrupted halfway resumes from it and ends where an uninterrupted one would. Memory
+holds at most 4,096 normal forms when a store holds them all. A budget that runs out suspends the walk: every component already
+solved stays solved. `recon prewarm` does the whole program once, resumably; tests show reuse across programs and processes, resume
+after a budget runs out and after the process is killed, order-independent convergence, a chain of 1,500 callees, two workers that
+never analyse one function twice, and the memory bound (`tests/unit/test_knowledge.py`).
+
+## D-046 · 2026-11-26 · What a callee's code leaves open is kept as alternatives, and callers' evidence orders them
+A callee's signature from its own code is one reading; the others its code leaves open (the other results `signature.results`
+lists) and those its callers' code supports (every caller sets more argument locations than it reads; a caller reads a result it
+does not leave, or none reads the one it leaves) are kept as alternatives (`Program.alternatives`), those the callers support first.
+They come from the callers' normal forms alone (`call_sites`: what a call sets with values of the caller's own, and what it reads
+afterwards), so the bottom-up analysis stays a function of the callees and no cycle runs through the whole program; the index of
+callers is built once per program by `prewarm`. The search tries them as choices after the forms of the first stage
+(`Choice.callees`, written `callee:<place>:<alternative>`), alone, together and with the first-stage forms, within the budget;
+every candidate is still compiled and compared byte for byte, so an alternative can only add matches.
+
+## D-047 · 2026-11-26 · A campaign runs in levels, journals every function, and runs as many workers as memory allows
+A level multiplies every budget of the defaults (L0 to L5: 1, 4, 16, 64, 256, 1024 times). Every function runs at L0; a function
+whose budget ran out runs again at the next level, reading back what the lower level computed (the knowledge store; compiler and
+comparator verdicts from the saved frontier, now written atomically), and past the last level stays `RESUMABLE`: a budget suspends a
+function, it never decides it. Reach answers a budget that runs out as `exhausted`, never as a refusal. Each finished function is
+appended to a journal and synced; a campaign started again reads it and does nothing twice at one level (a line cut short by an
+abrupt end is closed and skipped). Workers (`core/workers.py`) start at one and grow one at a time while the memory left after another
+worker of the largest size measured would stay above a reserve (a quarter of the machine, at least 2 GiB), shrink when it falls below,
+and a worker that grows past half the machine is retired after its task. A worker that dies gives its task back; a task that kills
+its worker twice is `INFRA` (`WORKER_DIED`), retried once in the next run. Progress lines carry states, rates, per-function times,
+workers and memory, and the analysis counters apart: computed, reused and done twice.

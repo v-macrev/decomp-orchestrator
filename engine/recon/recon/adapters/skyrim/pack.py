@@ -21,6 +21,7 @@ from recon.adapters.x64_msvc.batch import Compiler, distance
 from recon.adapters.x64_msvc.cl import Toolchain
 from recon.adapters.x64_msvc.symbols import SymbolMap, scoped
 from recon.core import budget as bg
+from recon.core import knowledge as kn
 from recon.core.inference.signature import NotReconstructed, Signature, Slot
 from recon.core.ir import passes, validate
 from recon.core.ir.model import Fn
@@ -40,6 +41,8 @@ class Pack:
     symbols: SymbolMap = field(default_factory=SymbolMap)
     #: function RVA -> (decorated name, signature), from declarations the linker map places
     declarations: dict[int, tuple[str, Signature]] = field(default_factory=dict)
+    #: where what is learnt is kept across programs (`open_store`), or None
+    store: "kn.Store | None" = None
 
     @staticmethod
     def load(path: str | Path, worktree: str | Path, validated: frozenset[str] | None) -> "Pack":
@@ -100,9 +103,28 @@ class Pack:
         name = scoped(d[0])
         return None if name is None else (name, d[1])
 
+    def namespace(self) -> str:
+        """What every fact about this pack's functions depends on beyond its own extent: the engine, the image, the forms."""
+        return kn.namespace("skyrim-pack", self.image.sha256, sorted(self.validated) if self.validated is not None else None)
+
+    def key(self, at: int) -> str | None:
+        """What the normal form at `at` depends on within the namespace: where its extent starts and how long it is."""
+        rva = at - self.image.image_base
+        n = self.size.get(rva)
+        return None if n is None else f"{rva:x}:{n}"
+
+    def functions(self) -> list[int]:
+        return [self.image.image_base + rva for rva in sorted(self.size)]
+
+    def open_store(self, path: str | Path) -> kn.SqliteStore:
+        """The persistent store of what is learnt about this pack's functions, shared by every worker and campaign."""
+        self.store = kn.SqliteStore(path, self.namespace())
+        return self.store
+
     def program(self) -> Program:
-        """A program for one search: what it analyses is spent from that search's budget."""
-        return Program(self.normal, SOURCE, CALLING, self.image.image_base, self.bytes_at, self.constant, self.declared)
+        """A program for one search: what it analyses is spent from that search's budget, and kept in the store if any."""
+        return Program(self.normal, SOURCE, CALLING, self.image.image_base, self.bytes_at, self.constant, self.declared,
+                       store=self.store, key=self.key, universe=self.functions)
 
 
 class Workshop:

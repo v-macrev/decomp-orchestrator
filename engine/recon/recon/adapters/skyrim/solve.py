@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -26,7 +27,8 @@ from pathlib import Path
 from typing import Callable
 
 from recon.adapters.skyrim.image import PinnedImage, locate_image
-from recon.adapters.skyrim.inventory import load_inventory
+from recon.adapters.skyrim.inventory import extents, load_inventory
+from recon.adapters.skyrim.manifest import frontier_key, inputs
 from recon.adapters.skyrim.pack import Pack
 from recon.adapters.skyrim.verify import PASS, Verifier
 from recon.adapters.x64_msvc import coff
@@ -35,9 +37,7 @@ from recon.adapters.x64_msvc.batch import distance
 from recon.adapters.x64_msvc.cl import CompilerFailed, Toolchain, ToolchainUnavailable, diagnostics, discover
 from recon.adapters.x64_msvc.symbols import SymbolMap
 from recon.adapters.x64_msvc.validate import load_validated
-from recon import ENGINE_VERSION, RULE_STORE_VERSION
 from recon.core import budget as bg
-from recon.core.canonical import digest
 from recon.core.emitter.member import Declared, MemberUnit, member_form
 from recon.core.inference.signature import NotReconstructed
 from recon.core.synthesis import search
@@ -135,21 +135,51 @@ class UnitWorkshop:
         return ok, str(report["reason"])
 
 
-class Context:
-    """What every function of one request shares: the image, the program, the compiler, the comparator, the header."""
+#: packs a process has opened, by worktree, checkout and store: a worker that solves one function after another opens the
+#: image and reads the inventory once
+_PACKS: dict[tuple[str, str, str], tuple[Pack, frozenset[int]]] = {}
 
-    def __init__(self, worktree: Path, checkout: Path, data: Path, header_rel: str, header_text: str, recipe_rel: str) -> None:
-        self.worktree, self.data = worktree, data
-        recipe_bytes = (worktree / recipe_rel).read_bytes()
-        recipe = json.loads(recipe_bytes)
-        self.flags = [f for f in recipe["flags"] if f != "/c"]
-        self.tool: Toolchain = discover(checkout, recipe["compiler"]["binary_sha256"])
+
+def pack_of(worktree: Path, checkout: Path, knowledge: str | None) -> tuple[Pack, frozenset[int]]:
+    """The pack of every function the engine may analyse as a callee (D4), and the offered ones."""
+    k = (str(worktree), str(checkout), knowledge or "")
+    if k not in _PACKS:
         image = PinnedImage(locate_image(checkout), worktree)
         inv = load_inventory(worktree)
         validated = load_validated()
         if not validated:
             raise NotReconstructed("LIFT_COVERAGE_MISSING")
-        self.pack = Pack("pinned", image, {t.rva: t.size for t in inv.targets}, validated)
+        pack = Pack("pinned", image, extents(inv)[0], validated)
+        if knowledge:
+            pack.open_store(knowledge)
+        _PACKS[k] = (pack, frozenset(t.rva for t in inv.targets))
+    return _PACKS[k]
+
+
+def write_atomically(path: Path, text: str) -> None:
+    """A file that is either the old one or the new one, also after the machine ends abruptly."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
+    with open(tmp, "w", encoding="utf-8", newline="\n") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
+class Context:
+    """What every function of one request shares: the image, the program, the compiler, the comparator, the header."""
+
+    def __init__(self, worktree: Path, checkout: Path, data: Path, header_rel: str, header_text: str, recipe_rel: str,
+                 knowledge: str | None = None) -> None:
+        self.worktree, self.data = worktree, data
+        recipe_bytes = (worktree / recipe_rel).read_bytes()
+        recipe = json.loads(recipe_bytes)
+        self.flags = [f for f in recipe["flags"] if f != "/c"]
+        self.tool: Toolchain = discover(checkout, recipe["compiler"]["binary_sha256"])
+        # every function the engine may analyse as a callee, not only the offered ones (D4); facts kept in `knowledge`
+        self.pack, self.offered = pack_of(worktree, checkout, knowledge)
+        image = self.pack.image
         self.symbols = recorded_symbols(worktree)
         self.recipe_digest = hashlib.sha256(recipe_bytes).hexdigest()
         self.verifier = Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes)
@@ -207,6 +237,33 @@ def recipe_of(worktree: Path, cpp_rel: str) -> str:
     return m.group(1) if m else DEFAULT_RECIPE
 
 
+def unit_of(req: dict) -> tuple[str, str, str | None]:
+    """The unit's source and header (relative paths) and the header's text, as the edits will apply to it: the base revision
+    plus what the repository's own tooling wrote when the packet was prepared; when a model may have written in the unit,
+    only the base revision."""
+    packet, worktree = req["packet"], Path(req["worktree"])
+    cpp_rel = next((p for p in packet["allowedPaths"] if p.endswith(".cpp")), packet["unit"])
+    header_rel = next((p for p in packet["allowedPaths"] if p.endswith(".h")), cpp_rel[:-4] + ".h")
+    if req.get("options", {}).get("modelTextInUnit"):
+        text = base_text(worktree, header_rel)
+    else:
+        text = (worktree / header_rel).read_text(encoding="utf-8") if (worktree / header_rel).is_file() else None
+    return cpp_rel, header_rel, text
+
+
+def input_manifest(req: dict) -> dict | None:
+    """The content-addressed inputs of the request (D6), or None when it has no worktree to read them from."""
+    if not req.get("worktree") or not req.get("dataDir"):
+        return None
+    try:
+        cpp_rel, header_rel, text = unit_of(req)
+        if text is None:
+            return None
+        return inputs(Path(req["worktree"]), Path(req["dataDir"]), header_rel, text, recipe_of(Path(req["worktree"]), cpp_rel), req)
+    except (OSError, ValueError, KeyError):
+        return None
+
+
 def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[list[Outcome], str, str]:
     """The outcome of each function of the packet, the header (relative path) the declarations live in, and its text."""
     packet = req["packet"]
@@ -216,21 +273,14 @@ def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[l
     if not req.get("worktree") or not req.get("checkout") or not req.get("dataDir"):
         return blocked("NO_WORKTREE"), "", ""
     worktree, checkout, data = Path(req["worktree"]), Path(req["checkout"]), Path(req["dataDir"])
-    cpp_rel = next((p for p in packet["allowedPaths"] if p.endswith(".cpp")), packet["unit"])
-    header_rel = next((p for p in packet["allowedPaths"] if p.endswith(".h")), cpp_rel[:-4] + ".h")
-    # The header as the base revision has it plus what the repository's own tooling wrote when the packet was
-    # prepared: the text the edits apply to. When a model may have written in the unit, only the base revision.
-    if options.get("modelTextInUnit"):
-        text = base_text(worktree, header_rel)
-    else:
-        text = (worktree / header_rel).read_text(encoding="utf-8") if (worktree / header_rel).is_file() else None
+    cpp_rel, header_rel, text = unit_of(req)
     if text is None:
         return blocked("UNIT_HEADER_NOT_READABLE"), header_rel, ""
     names = [PLAIN.match(f.get("name") or "") for f in fns]
     classes = {m.group(1) for m in names if m}
     limit = options.get("maxFunctionBytes")
     try:
-        ctx = Context(worktree, checkout, data, header_rel, text, recipe_of(worktree, cpp_rel))
+        ctx = Context(worktree, checkout, data, header_rel, text, recipe_of(worktree, cpp_rel), options.get("knowledge"))
     except (ToolchainUnavailable, FileNotFoundError) as e:
         return blocked("TOOLCHAIN_UNAVAILABLE" if isinstance(e, ToolchainUnavailable) else "INPUT_MISSING"), header_rel, text
     except NotReconstructed as e:
@@ -251,7 +301,7 @@ def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[l
             if m is None or facts is None:
                 out.append(Outcome(rva, "unsupported", "NAME_NOT_PLAIN" if m is None else "SEVERAL_CLASSES"))
                 continue
-            if rva not in ctx.pack.size:
+            if rva not in ctx.offered:
                 out.append(Outcome(rva, "unsupported", "NOT_IN_INVENTORY"))
                 continue
             if limit and ctx.pack.size[rva] > int(limit):
@@ -261,8 +311,7 @@ def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[l
             shop = UnitWorkshop(ctx, rva, cls, method)
             t0 = time.monotonic()
             # a frontier is resumed by the same engine, rules, image, recipe, header and function, whatever the budget
-            key = digest({"engine": ENGINE_VERSION, "rules": RULE_STORE_VERSION, "build": ctx.pack.image.build_id, "recipe": ctx.recipe_digest,
-                          "header": hashlib.sha256(ctx.header_text.encode("utf-8")).hexdigest(), "rva": rva, "name": f"{cls}::{method}"})[:32]
+            key = frontier_key(ctx.pack.image.build_id, ctx.recipe_digest, ctx.header_text, rva, f"{cls}::{method}")
             saved = data / "frontiers" / f"{key}.json"
             try:
                 past = search.Frontier.from_json(json.loads(saved.read_text(encoding="utf-8"))) if saved.is_file() else None
@@ -274,8 +323,7 @@ def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[l
                 out.append(Outcome(rva, "unsupported", e.code))
                 continue
             if r.reason == search.BUDGET_EXHAUSTED and r.frontier is not None:
-                saved.parent.mkdir(parents=True, exist_ok=True)
-                saved.write_text(json.dumps(r.frontier.to_json(), sort_keys=True), encoding="utf-8")
+                write_atomically(saved, json.dumps(r.frontier.to_json(), sort_keys=True))
             counters = {k: int(v) for k, v in r.counters.items()} | {"compiles": shop.compiles, "ms": int(1000 * (time.monotonic() - t0)),
                                                                      "resumed": int(past is not None)}
             progress("function", {"done": len(out) + 1, "of": len(fns), "compiles": shop.compiles})

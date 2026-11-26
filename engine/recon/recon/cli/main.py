@@ -33,10 +33,15 @@ def handle(req: dict, out: TextIO) -> dict:
         return result(req["requestId"], command, digest(base), report=report)
 
     packet = req["packet"]
-    input_digest = digest({**base, "packet": packet, "model": req.get("modelName", ""), "budgets": req.get("budgets", {}),
-                           "options": req.get("options", {}), "carried": [[c["path"], digest(c["content"])] for c in req.get("carriedUnitState", [])]})
+    inputs = None
     if command == "solve":
         from recon.adapters.skyrim import solve as S
+
+        inputs = S.input_manifest(req)   # image, upstream, recipe, header closure, declarations, lockfile, frontiers (D6)
+    input_digest = digest({**base, "packet": packet, "model": req.get("modelName", ""), "budgets": req.get("budgets", {}),
+                           "options": req.get("options", {}), "carried": [[c["path"], digest(c["content"])] for c in req.get("carriedUnitState", [])],
+                           "inputs": inputs})
+    if command == "solve":
 
         _emit(out, progress("analyze", {"functions": len(packet["functions"])}))
         outcomes, header_rel, text = S.solve(req, lambda stage, counters: _emit(out, progress(stage, counters)))
@@ -143,6 +148,30 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--want", type=int, default=100, help="real target: stop after this many functions the generator made trees for (the check ran)")
     f.add_argument("--scan-limit", type=int, default=4000)
     f.add_argument("--max-bytes", type=int, default=1024)
+    mn = sub.add_parser("manifest", help="the frozen denominator of the worktree's revision: a private file, counts on stdout")
+    mn.add_argument("--worktree", required=True)
+    mn.add_argument("--out", required=True, help="a .local directory")
+    mn.add_argument("--next", help="the JSON of `sr next --offline` (startable functions and their units), when asked")
+    cg = sub.add_parser("campaign", help="every function of a population gets a state and blockers: private records, counts on stdout")
+    common(cg, with_select=False)
+    cg.add_argument("--data", required=True, help="a .local directory for the records")
+    cg.add_argument("--next", required=True, help="the JSON of `sr next --offline`")
+    cg.add_argument("--solve-set", help="a JSON list of RVAs that also go to solve")
+    cg.add_argument("--max-bytes", type=int, default=128)
+    cg.add_argument("--jobs", type=int, default=1, help="at most this many workers; fewer while memory is short")
+    cg.add_argument("--name", default="campaign")
+    cg.add_argument("--levels", default="0-5", help="the budget levels to run, FIRST-LAST (each resumes from the one below)")
+    cg.add_argument("--knowledge", help="the knowledge store (default: knowledge.db under --data)")
+    cg.add_argument("--every", type=float, default=60.0, help="seconds between progress lines")
+    pw = sub.add_parser("prewarm", help="the whole-program analysis, kept in the knowledge store: counts and times")
+    common(pw, with_select=False)
+    pw.add_argument("--knowledge", required=True, help="the knowledge store, under a .local directory")
+    pw.add_argument("--jobs", type=int, default=1, help="at most this many workers; fewer while memory is short")
+    pw.add_argument("--every", type=float, default=60.0)
+    ce = sub.add_parser("ceiling", help="the early ceiling estimate over a stratified sample of startable development functions: counts")
+    common(ce, with_select=False)
+    ce.add_argument("--next", required=True, help="the JSON of `sr next --offline`")
+    ce.add_argument("--sample", type=int, default=200)
     args = ap.parse_args(argv)
     if args.cmd == "serve":
         if args.request:
@@ -154,7 +183,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         return serve(sys.stdin, sys.stdout, sys.stderr)
     if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare", "validate-lift", "coverage", "reconstruct", "reach",
-                    "measure-filter"):
+                    "measure-filter", "manifest", "campaign", "ceiling", "prewarm"):
         from recon.cli import commands
 
         return getattr(commands, "cmd_" + args.cmd.replace("-", "_"))(args)
