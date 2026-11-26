@@ -48,15 +48,16 @@ Server tests that start the engine in WSL are skipped where WSL or the distribut
 `report` in the result (one result type for all four commands). Both are optional or additive; the
 specified fields are unchanged.
 
-## D-006 · 2026-11-25 · Provenance wording for engine output — OPEN, conservative default
-**Question for the user.** Upstream's card asks that `Code origin` be truthful and that a claim name "the actual
-model id or agent/tool name"; R40 refuses a comment naming a tool or pipeline, and the Families rule asks for a
-generator named by version and digest. Engine output is neither written by a model nor by a person.
-**Default until decided (nothing is submitted by this project either way).** `Code origin:` states that the
-body was produced by a deterministic reconstruction tool from the compared function's behaviour and community
-declarations, without naming a product; `Adapted bodies: none`; the claim and attempt model is
-`recon-engine-<version>`. Whether upstream's review accepts that, and whether a set of engine units falls under
-the Families rule, is upstream's decision and the user's to take at submission. **No code writes this text yet.**
+## D-006 · 2026-11-25 · Provenance wording for engine output — decided 2026-11-26: the default
+Upstream's card asks that `Code origin` be truthful and that a claim name "the actual model id or agent/tool
+name"; R40 refuses a comment naming a tool or pipeline, and the Families rule asks for a generator named by
+version and digest. Engine output is neither written by a model nor by a person.
+**Decision (the user's, 2026-11-26): keep the default.** `Code origin:` states, without naming a product, that the
+body was "produced by a deterministic reconstruction tool from the compared function's behaviour in the pinned
+image and the declarations of its class in this unit's header; no model wrote it" (`CODE_ORIGIN` in
+`engine/recon/recon/adapters/skyrim/solve.py`); `Adapted bodies: none`; the claim and attempt model is
+`recon-engine-<version>`. Whether upstream's review accepts that, and whether a set of engine units falls under the
+Families rule, is upstream's decision at submission, which only the user makes.
 
 ## D-007 · 2026-11-25 · The engine never reads what a model wrote
 Section 3 of the specification, applied: no `attempts.files_json`, stored candidates, `task.fix` candidates,

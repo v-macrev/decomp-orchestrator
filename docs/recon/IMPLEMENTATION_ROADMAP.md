@@ -280,7 +280,7 @@ through the unchanged Gate Keeper, and its batch dry-runs clean. Then stop: the 
   declarations of callees and of other classes are the next capability, by count.
 * Members inside the skeleton's `unknownXX` byte arrays are not carved into typed members (`MEMBER_NOT_DECLARED`).
 * New units: the engine reads the skeleton the tooling wrote, but the trial covered existing units only.
-* D-006, the provenance wording of engine output, is still the user's decision; the default is in `skyrim/solve.py`.
+* D-006, the provenance wording of engine output: decided on 2026-11-26, the default stays (`skyrim/solve.py`).
 
 ## Items found by the audit that block or shape later phases
 
@@ -289,7 +289,7 @@ through the unchanged Gate Keeper, and its batch dry-runs clean. Then stop: the 
 | R-1 | ~~Request via a file, not stdin, so the WSL cancel handshake runs~~ done in Phase 6 (a private file under the engine's data directory); a streaming runner for live progress is still open | - |
 | R-2 | ~~Factor the shared tail of `processTask` into one function~~ done, `answerTail` | - |
 | R-3 | ~~Comparator-accepted build record from a scratch build, and the cost of the local compare~~ done, measured above | - |
-| R-4 | Provenance wording for engine output (D-006), a decision for the user; the default is in use | open |
+| R-4 | ~~Provenance wording for engine output (D-006)~~ decided by the user on 2026-11-26: the default stays | - |
 | R-5 | ~~Hashed, locked venv~~ done, `z3` included (D-021) | - |
 | R-7 | ~~The server runs the engine with the venv's Python~~ done: `recon.python` and `recon.pythonPath` | - |
 | R-6 | ~~Comparator reason-code list read from source into a mapping test~~ done in Phase 5 | - |

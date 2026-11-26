@@ -92,9 +92,9 @@ refused at intake before any compare (`docs/code-rules.md:108`).
 `docs/contributor-card.md` (Header section): the skeleton header is at most 6 counted lines (Source exposure,
 SPDX, `Code origin`, `// 0x<rva> Name`, `Adapted bodies`, include); `Drafted by`, `Task`, `Labels`, `Evidence`,
 `Recipe` (unless non-default) are left out. A claim names "the actual model id or agent/tool name". Rule R40
-refuses a comment naming a model, tool or pipeline. **Open question for the user** (section 4.3, point 10;
-`TECHNICAL_DECISIONS.md`, D-006): the `Code origin` sentence and the `--model` value for engine output.
-The conservative default is stated there, and nothing is submitted by this project in any case.
+refuses a comment naming a model, tool or pipeline. The `Code origin` sentence and the `--model` value for engine
+output (section 4.3, point 10) were the user's question; on 2026-11-26 they kept the conservative default
+(`TECHNICAL_DECISIONS.md`, D-006). Nothing is submitted by this project in any case.
 
 ### Clean-room and private inputs
 
