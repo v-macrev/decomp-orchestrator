@@ -54,7 +54,8 @@ class Store(Protocol):
     def release(self, kind: str, key: str) -> None: ...
 
 
-#: the engine's code the facts are derived with, relative to the package (orchestration, reporting and the command line are not)
+#: the engine's code, relative to the package, that a run's manifest names (orchestration, reporting and the command line
+#: are not)
 ANALYSIS_CODE = ("core", "adapters/x64_msvc", "adapters/skyrim/pack.py", "adapters/skyrim/image.py", "adapters/skyrim/verify.py", "__init__.py")
 
 
@@ -64,6 +65,13 @@ NORMAL_ROOTS = ("recon.adapters.skyrim.normal", "recon.adapters.x64_msvc.program
                 "recon.adapters.x64_msvc.validate", "recon.adapters.x64_msvc.abi", "recon.core.ir.passes", "recon.core.ir.validate",
                 "recon.adapters.skyrim.image")
 NORMAL_FILES = ("adapters/x64_msvc/lift_coverage.json", "__init__.py")
+#: the module that reads what a normal form shows of its calls (the functions it calls, its call sites): with the normal
+#: form's code, what those facts are filed under, so that a change of it reads them again and keeps the normal forms
+SITE_ROOTS = ("recon.core.inference.sites",)
+#: the module every other fact is derived through (a pack's program, its callbacks and the analysis they import); the
+#: emitters of member forms, the solving and the orchestration import it, not the other way round, so a change to them
+#: leaves the facts where they are
+ANALYSIS_ROOTS = ("recon.adapters.skyrim.pack",)
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -123,14 +131,26 @@ def normal_code_digest() -> str:
     return code_digest(files=import_closure(NORMAL_ROOTS) | set(NORMAL_FILES))
 
 
-#: the kinds of fact that depend only on a function's normal form (the rest depend on the whole analysis)
+def site_code_digest() -> str:
+    """A digest of the code the facts read off one normal form are made by: the normal form's and the site readings'."""
+    return code_digest(files=import_closure(NORMAL_ROOTS + SITE_ROOTS) | set(NORMAL_FILES))
+
+
+def analysis_code_digest() -> str:
+    """A digest of the code every other fact is derived with: what the pack's module imports, directly or not."""
+    return code_digest(files=import_closure(ANALYSIS_ROOTS) | set(NORMAL_FILES))
+
+
+#: the kinds of fact that depend only on a function's normal form (the rest depend on the whole analysis): the normal form
+#: itself, and what is read off it
 NORMAL_KINDS = ("normal", "callees", "sites", "callers")
+SITE_KINDS = ("callees", "sites", "callers")
 
 
 def namespace(*inputs: object) -> str:
     """The namespace of a program's facts: the engine's analysis code and whatever else every fact depends on (the image,
     the validated instruction forms), digested."""
-    return hashlib.sha256(repr((code_digest(), *inputs)).encode()).hexdigest()
+    return hashlib.sha256(repr((analysis_code_digest(), *inputs)).encode()).hexdigest()
 
 
 def namespaces(*inputs: object, extra: tuple = ()) -> dict[str, str]:
@@ -138,7 +158,8 @@ def namespaces(*inputs: object, extra: tuple = ()) -> dict[str, str]:
     the analysis code. `extra`: what only the other kinds depend on (what is declared of imported functions), so that a
     change of it leaves the normal forms where they are."""
     normal = hashlib.sha256(repr(("normal", normal_code_digest(), *inputs)).encode()).hexdigest()
-    return {**dict.fromkeys(NORMAL_KINDS, normal), "*": namespace(*inputs, *extra)}
+    sites = hashlib.sha256(repr(("sites", site_code_digest(), *inputs)).encode()).hexdigest()
+    return {"normal": normal, **dict.fromkeys(SITE_KINDS, sites), "*": namespace(*inputs, *extra)}
 
 
 # -- the facts as data ---------------------------------------------------------------------------
@@ -373,4 +394,5 @@ def wait_for(store, kind: str, key: str, poll_s: float = 0.2):
         time.sleep(poll_s)
 
 
-__all__ = ["ANALYSIS_CODE", "LEASE_S", "NORMAL_FILES", "NORMAL_KINDS", "NORMAL_ROOTS", "MISSING", "MemoryStore", "SqliteStore", "Store", "code_digest", "decode", "encode", "import_closure", "namespace", "namespaces", "normal_code_digest", "signature_data", "signature_of", "wait_for"]
+__all__ = ["ANALYSIS_CODE", "LEASE_S", "NORMAL_FILES", "NORMAL_KINDS", "NORMAL_ROOTS", "MISSING", "SITE_KINDS", "SITE_ROOTS", "ANALYSIS_ROOTS", "analysis_code_digest",
+           "site_code_digest", "MemoryStore", "SqliteStore", "Store", "code_digest", "decode", "encode", "import_closure", "namespace", "namespaces", "normal_code_digest", "signature_data", "signature_of", "wait_for"]

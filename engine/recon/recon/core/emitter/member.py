@@ -7,12 +7,17 @@ as the declarations name them. The declarations are data handed in (offsets, nam
 project's own headers: nothing here knows a compiler or a project.
 
 What the declarations do not give is refused with a fixed code: a member read at an offset where no member of that type
-starts (or no element of an array of that type), a second class, a class by value, a callee, a global. The tree is the
-candidate's own; only the names and the form of the function change, so its meaning is the one that was checked.
+starts (or no element of an array of that type), a second class, a class by value, a global, and a callee the project
+names (by a record or a declaration) without the unit declaring it. A callee the project has not named yet is called by
+the project's placeholder for it, `Function<rva>` (an honest name for open work, its rule R7), declared by a prototype the
+unit carries after its includes; the project binds such a reference by the target's own field, as the comparator checks.
+The tree is the candidate's own; only the names and the form of the function change, so its meaning is the one that was
+checked.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 from recon.core.emitter.cpp import POSTFIX, Emitter, type_name
 from recon.core.inference import types as ty
@@ -43,6 +48,10 @@ class MemberUnit:
     declaration: str             # the declaration inside the class, `static` when there is no `this`; no semicolon
     form: str                    # "this", "this_unused" or "static"
     lines: int
+    #: prototypes of the placeholder callees, one per line, for the unit to carry after its includes ("" when none)
+    prototypes: str = ""
+    #: (placeholder, RVA) of each callee it calls
+    callees: tuple[tuple[str, int], ...] = ()
 
 
 FORMS = ("this", "this_unused", "static")
@@ -54,10 +63,18 @@ def _classes(t: ty.CType) -> set[int]:
     return {t.number} if isinstance(t, ty.Named) else set()
 
 
+def placeholder(rva: int) -> str:
+    """The project's placeholder name of the function at `rva` that it has not named."""
+    return f"Function{rva:x}"
+
+
 class MemberEmitter(Emitter):
-    def __init__(self, types: ty.Types, image_base: int, rva: int, d: Declared, cls: int | None, this: int | None) -> None:
+    def __init__(self, types: ty.Types, image_base: int, rva: int, d: Declared, cls: int | None, this: int | None,
+                 unnamed: Callable[[int], bool] = lambda at: False) -> None:
+        """`unnamed(address)`: whether the project has not named the function there, so that it is called by placeholder."""
         super().__init__(types, image_base, rva, name=f"{d.cls}::{d.method}")
         self.d, self.k, self.this = d, cls, this
+        self.unnamed = unnamed
 
     def type_name(self, t: ty.CType) -> str:
         if isinstance(t, ty.Ptr):
@@ -74,7 +91,11 @@ class MemberEmitter(Emitter):
             self.locals[self.this] = "this"
 
     def callee(self, at: int) -> str:
-        raise NotReconstructed("CALLEE_NOT_DECLARED")
+        if at not in self.callees:
+            if at == self.own or not self.unnamed(at):
+                raise NotReconstructed("CALLEE_NOT_DECLARED")
+            self.callees[at] = placeholder(at - self.base)
+        return self.callees[at]
 
     def field(self, base: str, off: int, t: ty.CType) -> str:
         for m in self.d.members:
@@ -92,8 +113,6 @@ class MemberEmitter(Emitter):
     def _e(self, x: A.Expr) -> tuple[str, int]:
         if isinstance(x, A.Global):
             raise NotReconstructed("GLOBAL_NOT_DECLARED")
-        if isinstance(x, A.Call):
-            raise NotReconstructed("CALLEE_NOT_DECLARED")
         if isinstance(x, A.Field):
             b = x.base.type
             if not (isinstance(b, ty.Ptr) and isinstance(b.to, ty.Named) and b.to.number == self.k):
@@ -117,11 +136,19 @@ class MemberEmitter(Emitter):
         ps = ", ".join(f"{self.type_name(p.type)} {self.local(p)}" for p in params)
         rt = self.type_name(body.result)
         definition = "\n".join([f"{rt} {self.d.cls}::{self.d.method}({ps})", "{", *lines, "}"]) + "\n"
-        return MemberUnit(definition, f"{'static ' if form == 'static' else ''}{rt} {self.d.method}({ps})", form, len(lines))
+        protos = []
+        for at, name in sorted(self.callees.items()):
+            s = self.t.callees[at]
+            args = [self.type_name(self.t.ctype(self.t.slot(at, k, q))) for k, q in enumerate(s.params)]
+            r = "void" if s.result is None else self.type_name(self.t.ctype(self.t.slot(at, -1, s.result)))
+            protos.append(f"{r} {name}({', '.join(f'{a} arg{k + 1}' for k, a in enumerate(args))});")
+        return MemberUnit(definition, f"{'static ' if form == 'static' else ''}{rt} {self.d.method}({ps})", form, len(lines),
+                          "".join(x + "\n" for x in protos), tuple((n, a - self.base) for a, n in sorted(self.callees.items())))
 
 
-def member_form(body: A.Body, types: ty.Types, image_base: int, rva: int, d: Declared) -> MemberUnit:
-    """The body as `d.cls::d.method`, or NotReconstructed with the reason."""
+def member_form(body: A.Body, types: ty.Types, image_base: int, rva: int, d: Declared,
+                unnamed: Callable[[int], bool] = lambda at: False) -> MemberUnit:
+    """The body as `d.cls::d.method`, or NotReconstructed with the reason. `unnamed(address)`: as `MemberEmitter`'s."""
     p0 = body.params[0] if body.params else None
     used = p0 is not None and any(isinstance(x, A.Local) and x.id == p0.id for s in body.stmts for x in A.walk(s))
     if not used:
@@ -130,7 +157,7 @@ def member_form(body: A.Body, types: ty.Types, image_base: int, rva: int, d: Dec
         form, cls, this = "this", p0.type.to.number, p0.id
     else:
         form, cls, this = "static", None, None
-    return MemberEmitter(types, image_base, rva, d, cls, this).member_unit(body, rva, form)
+    return MemberEmitter(types, image_base, rva, d, cls, this, unnamed).member_unit(body, rva, form)
 
 
-__all__ = ["FORMS", "Declared", "Member", "MemberEmitter", "MemberUnit", "member_form"]
+__all__ = ["FORMS", "Declared", "Member", "MemberEmitter", "MemberUnit", "member_form", "placeholder"]

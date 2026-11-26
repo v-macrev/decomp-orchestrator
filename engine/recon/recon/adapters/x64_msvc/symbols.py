@@ -66,6 +66,10 @@ class SymbolMap:
         got = self.lookup(symbol)
         return None if got is None else got[0]
 
+    def addresses(self) -> frozenset[int]:
+        """Every RVA some entry gives a name, by any rank."""
+        return frozenset(r for by in self._names.values() for es in by.values() for r, _s in es)
+
     def __len__(self) -> int:
         return len(self._names)
 

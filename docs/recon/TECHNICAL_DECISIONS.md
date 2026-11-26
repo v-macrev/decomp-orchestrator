@@ -457,3 +457,25 @@ also the first floating argument location, so a result passed on unmoved is not 
 reading then has fewer parameters, which lowering never refuses, rather than more). A merge is the caller's when one of its
 values is, as a least fixed point. Of the 390, 44 also read the thread's segment base at entry (thread-local storage), which
 is a capability of its own.
+
+## D-054 · 2026-11-26 · A member form calls a function the project has not named by its placeholder (the user's decision)
+Every candidate is written as a member of its class in the existing unit, and the member form refused every call: after D-052
+and D-053, 261 development functions stopped there, and of 278 such functions 203 call a function the project has not named
+(no record, no declaration). On the user's decision (2026-11-26) such a callee is called by the project's own placeholder for
+it, `Function<rva>` in lower-case hexadecimal (the form its claim tooling and units use; rule R7 counts a placeholder as honest
+open work), declared by a prototype with the signature the analysis found. The prototypes of a packet's functions go, once
+each, in the unit's `declarations` edit, which the edit applier adds after the unit's includes (rule R2 reports declarations
+in a `.cpp`; the project's rules say that is how units compile today). The project binds such a reference by the target's own
+relocated field (`tools/verifier/bind.py`, references, step 3); the engine gives its comparator the same binding, from the
+address its call was made to. A callee the project names but the unit does not declare is still refused
+(`CALLEE_NOT_DECLARED`), and so is a call of the function to itself.
+
+## D-055 · 2026-11-26 · What is read off a normal form is filed under the code that reads it
+The sites of calls (and a function's callees and callers) were filed with normal forms, under the code that makes normal
+forms; but they were read by `candidates.py`, which is not that code. D-053 changed how sites are read, and the next prewarm
+loaded the sites the old code had read: the fix never reached the stored sites. The readings now live in their own module
+(`core/inference/sites.py`), and those kinds are filed under the normal-form code and that module (`SITE_ROOTS`), so a change
+of the readings reads them again and keeps the normal forms. Every other fact is filed under what the pack's module imports,
+directly or not (`ANALYSIS_ROOTS`, an import closure checked against what Python actually loads), instead of all of `core`
+and `adapters/x64_msvc`: the member emitter, the solving and the orchestration import the pack, not the other way round, and a
+change to them no longer recomputes every signature. The run manifest still names the broader code (`ANALYSIS_CODE`).

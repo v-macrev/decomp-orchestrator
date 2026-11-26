@@ -64,6 +64,8 @@ class Outcome:
     definition: str | None = None
     declaration: str | None = None
     name: str | None = None
+    #: prototypes of the placeholder callees the definition calls, for the unit to carry after its includes
+    prototypes: str = ""
 
 
 class UnitWorkshop:
@@ -82,7 +84,8 @@ class UnitWorkshop:
     def form(self, c: Candidate) -> MemberUnit | str:
         if c.digest not in self.forms:
             try:
-                self.forms[c.digest] = member_form(c.body, c.types, self.ctx.pack.image.image_base, self.rva, self.declared)
+                self.forms[c.digest] = member_form(c.body, c.types, self.ctx.pack.image.image_base, self.rva, self.declared,
+                                                   self.ctx.unnamed)
             except NotReconstructed as e:
                 self.forms[c.digest] = e.code
         return self.forms[c.digest]
@@ -94,7 +97,7 @@ class UnitWorkshop:
         if c.digest in self.built:
             return self.built[c.digest]
         header, _old = D.with_declaration(self.ctx.header_text, self.cls, self.method, f.declaration)
-        source = f'#include "{self.ctx.temp_header.name}"\n\n{f.definition}'
+        source = f'#include "{self.ctx.temp_header.name}"\n\n' + (f.prototypes + "\n" if f.prototypes else "") + f.definition
         self.compiles += 1
         got = self.ctx.compile(header, source)
         if isinstance(got, list):
@@ -104,10 +107,19 @@ class UnitWorkshop:
         self.built[c.digest] = (fns[0], got[1], source) if len(fns) == 1 else None
         return self.built[c.digest]
 
-    def resolve(self, own: str):
-        """The function itself under its own name, else what the names upstream records say; nothing from the bytes."""
+    def _callee(self, c: Candidate, symbol: str) -> int | None:
+        """The RVA of the placeholder callee the candidate's member form calls under `symbol`, or None."""
+        f = self.form(c)
+        return None if isinstance(f, str) else dict(f.callees).get(coff.plain(symbol))
+
+    def resolve(self, own: str, c: Candidate):
+        """The function itself under its own name, a placeholder callee at the address its call was made to, else what the
+        names upstream records say; nothing from the bytes."""
         def r(rel: coff.Reloc) -> int | None:
-            return self.rva if rel.symbol == own else self.ctx.symbols.resolve(rel.symbol)
+            if rel.symbol == own:
+                return self.rva
+            at = self._callee(c, rel.symbol)
+            return at if at is not None else self.ctx.symbols.resolve(rel.symbol)
         return r
 
     def judge(self, candidates: list[Candidate]) -> list[search.Judged]:
@@ -118,7 +130,7 @@ class UnitWorkshop:
                 out.append(search.Judged(None, 0, (b,) if isinstance(b, str) else ("DOES_NOT_COMPILE",)))
                 continue
             fn, _obj, _src = b
-            d = distance(fn, self.target, self.rva, self.resolve(fn.symbol))
+            d = distance(fn, self.target, self.rva, self.resolve(fn.symbol, c))
             out.append(search.Judged(fn.key(coff.plain), d.total, (), d.unknown))
         return out
 
@@ -129,7 +141,8 @@ class UnitWorkshop:
         fn, obj, src = b
         symbols: dict[str, tuple[int, int | None]] = {}
         for r in fn.relocs:
-            got = (self.rva, self.size) if r.symbol == fn.symbol else self.ctx.symbols.lookup(r.symbol)
+            at = self._callee(c, r.symbol)
+            got = (self.rva, self.size) if r.symbol == fn.symbol else (at, self.ctx.pack.extent(at)) if at is not None else self.ctx.symbols.lookup(r.symbol)
             if got is not None:
                 symbols[r.symbol] = got
         report = self.ctx.verifier.verify(self.rva, self.size, fn.symbol, src.encode("utf-8"), obj, symbols)
@@ -224,6 +237,7 @@ class Context:
         self.pack, self.offered = pack_of(worktree, checkout, knowledge)
         image = self.pack.image
         self.symbols = recorded_symbols(worktree)
+        self._named = self.symbols.addresses()
         self.recipe_digest = hashlib.sha256(recipe_bytes).hexdigest()
         self.verifier = Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes)
         self.header_rel, self.header_text = header_rel, header_text
@@ -234,6 +248,12 @@ class Context:
         self.work.mkdir(parents=True, exist_ok=True)
         self.temp_header.write_text(header_text, encoding="utf-8", newline="\n")
         self.facts: D.ClassFacts | None = None
+
+    def unnamed(self, at: int) -> bool:
+        """Whether the function at address `at` is one the project has not named: a function of the image that no record
+        and no declaration names. Such a callee is called by its placeholder (`member.placeholder`)."""
+        rva = at - self.pack.image.image_base
+        return rva not in self._named and self.pack.declared(at) is None and self.pack.extent(rva) is not None
 
     def compile(self, header: str, source: str) -> tuple[coff.Object, bytes] | list[str]:
         """The object of `source` compiled with `header` as the unit's header, or the compiler's error codes."""
@@ -373,7 +393,8 @@ def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[l
             refused = sorted({x for x in shop.forms.values() if isinstance(x, str)})
             if r.state == search.BYTE_MATCHED and shop.chosen is not None:
                 trail = ["candidates@1", f"member-form-{shop.chosen.form.replace('_', '-')}@1", "comparator@1"]
-                out.append(Outcome(rva, "solved", "BYTE_MATCHED", counters, trail, shop.chosen.definition, shop.chosen.declaration, f"{cls}::{method}"))
+                out.append(Outcome(rva, "solved", "BYTE_MATCHED", counters, trail, shop.chosen.definition, shop.chosen.declaration, f"{cls}::{method}",
+                                   shop.chosen.prototypes))
             elif r.state == search.NONE:
                 out.append(Outcome(rva, "unsupported", r.reason or "NO_CANDIDATE", counters))
             elif r.state == search.SEMANTICALLY_VALID:
@@ -397,7 +418,9 @@ def edits(outcomes: list[Outcome], header_rel: str, cpp_rel: str, text: str) -> 
             members.append({"class": cls, "code": f"{o.declaration};"})
         else:
             replace.append({"find": old.text, "with": f"{o.declaration};"})
-    out = [{"path": cpp_rel, "functions": [{"name": o.name, "code": o.definition} for o in outcomes]}]
+    protos = list(dict.fromkeys(x for o in outcomes for x in o.prototypes.splitlines() if x.strip()))
+    out = [{"path": cpp_rel, **({"declarations": "\n".join(protos)} if protos else {}),
+            "functions": [{"name": o.name, "code": o.definition} for o in outcomes]}]
     if replace or members:
         out.append({"path": header_rel, **({"replace": replace} if replace else {}), **({"members": members} if members else {}), "functions": []})
     return out

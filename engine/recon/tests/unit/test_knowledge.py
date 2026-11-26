@@ -498,13 +498,12 @@ def test_a_callee_read_from_its_callers_takes_what_they_set_after_an_earlier_cal
 
 # ------------------------------------------------------------------------------------ namespaces
 
-def test_normal_forms_are_filed_under_the_code_that_makes_them_and_nothing_else():
-    closure = kn.import_closure(kn.NORMAL_ROOTS)
-    assert not any(x.startswith(("core/synthesis", "core/structuring", "core/emitter")) for x in closure)
+def loaded_by(roots: tuple[str, ...]) -> set[str]:
+    """The engine's source files that importing `roots` runs, in a fresh interpreter."""
     code = textwrap.dedent(f"""
         import sys, json
         sys.path.insert(0, {str(TESTS.parent)!r})
-        for m in {list(kn.NORMAL_ROOTS)!r}:
+        for m in {list(roots)!r}:
             __import__(m)
         import pathlib
         root = pathlib.Path({str(Path(kn.__file__).resolve().parents[1])!r})
@@ -512,7 +511,31 @@ def test_normal_forms_are_filed_under_the_code_that_makes_them_and_nothing_else(
                                 for n, m in sys.modules.items() if n.startswith("recon") and getattr(m, "__file__", None))))
     """)
     import json
-    loaded = set(json.loads(subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout))
-    assert loaded <= closure | set(kn.NORMAL_FILES)                # every module that runs is in the digest
+    return set(json.loads(subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout))
+
+
+def test_normal_forms_are_filed_under_the_code_that_makes_them_and_nothing_else():
+    closure = kn.import_closure(kn.NORMAL_ROOTS)
+    assert not any(x.startswith(("core/synthesis", "core/structuring", "core/emitter")) for x in closure)
+    assert loaded_by(kn.NORMAL_ROOTS) <= closure | set(kn.NORMAL_FILES)     # every module that runs is in the digest
+
+
+def test_what_is_read_off_a_normal_form_is_filed_under_its_code_and_the_site_readings():
+    closure = kn.import_closure(kn.NORMAL_ROOTS + kn.SITE_ROOTS)
+    assert "core/inference/sites.py" in closure and not any(x.startswith(("core/synthesis", "core/emitter")) for x in closure)
+    assert loaded_by(kn.NORMAL_ROOTS + kn.SITE_ROOTS) <= closure | set(kn.NORMAL_FILES)
+    assert cd.call_sites is __import__("recon.core.inference.sites", fromlist=["x"]).call_sites   # the store's sites come from there
+
+
+def test_the_other_facts_are_filed_under_what_the_pack_imports_and_not_the_member_emitter():
+    closure = kn.import_closure(kn.ANALYSIS_ROOTS)
+    assert {"core/synthesis/candidates.py", "core/inference/sites.py", "adapters/skyrim/pack.py"} <= closure
+    assert not any(x in closure for x in ("core/emitter/member.py", "adapters/skyrim/solve.py", "adapters/skyrim/campaign.py"))
+    assert loaded_by(kn.ANALYSIS_ROOTS) <= closure | set(kn.NORMAL_FILES)
+
+
+def test_each_kind_of_fact_has_the_namespace_of_the_code_it_depends_on():
     ns = kn.namespaces("x")
-    assert ns["normal"] == ns["callees"] == ns["sites"] == ns["callers"] != ns["*"]
+    assert ns["callees"] == ns["sites"] == ns["callers"]
+    assert len({ns["normal"], ns["sites"], ns["*"]}) == 3
+    assert kn.namespaces("x", extra=("imports",))["sites"] == ns["sites"]  # what is declared of imports reaches no site

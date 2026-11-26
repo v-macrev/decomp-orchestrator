@@ -151,6 +151,33 @@ def test_a_body_that_ignores_the_first_parameter_keeps_an_unused_this():
     assert u.definition == "int Box::Seven()\n{\n    return 7;\n}\n"
 
 
+def _calls_stores():
+    """f(p): stores(p, 5), where stores(p, v) sets p->member4 = v"""
+    T, BASE, RVA, Asm, C, I, R, mem, adder, canonical, program, Declared, Member, member_form = _member_tests()
+    from test_source import OTHER, stores
+    f = Asm(RVA)(T.sub_rsp(40))(I.create_reg_i32(C.MOV_R32_IMM32, R.EDX, 5))
+    f.branch(C.CALL_REL32_64, OTHER)
+    f(T.add_rsp(40))(T.ret())
+    c = canonical(program(f, stores()))
+    return c, BASE, RVA, OTHER, Declared, Member, member_form
+
+
+def test_a_callee_the_project_has_not_named_is_called_by_its_placeholder_and_declared():
+    c, BASE, RVA, OTHER, Declared, Member, member_form = _calls_stores()
+    u = member_form(c.body, c.types, BASE, RVA, Declared("Box", "Put", (Member(4, "value", ty.Int(32, True)),)),
+                    unnamed=lambda at: at == BASE + OTHER)
+    name = f"Function{OTHER:x}"
+    assert u.callees == ((name, OTHER),)
+    assert u.definition == f"void Box::Put(long long arg1)\n{{\n    {name}(arg1, 5);\n}}\n"   # p passed on as a value: static
+    assert u.prototypes == f"void {name}(long long arg1, int arg2);\n"
+
+
+def test_a_callee_the_project_names_is_not_given_a_placeholder():
+    c, BASE, RVA, OTHER, Declared, Member, member_form = _calls_stores()
+    with pytest.raises(NotReconstructed, match="CALLEE_NOT_DECLARED"):
+        member_form(c.body, c.types, BASE, RVA, Declared("Box", "Put", (Member(4, "value", ty.Int(32, True)),)))
+
+
 # ---------------------------------------------------------------- what the compiler reads from a header
 
 def test_the_compiler_gives_members_offsets_and_types(toolchain, tmp_path):
@@ -181,3 +208,17 @@ def test_the_compiler_gives_members_offsets_and_types(toolchain, tmp_path):
     assert "other" not in got and "hidden" not in got        # a pointer to a class; a member this unit cannot name
     assert {"other", "hidden"} <= set(facts.names)
     assert not any(p.name.startswith(".recon-probe") for p in (root / "unit").iterdir())
+
+
+def test_the_packet_carries_each_placeholder_prototype_once_after_the_unit_s_includes():
+    pytest.importorskip("iced_x86", reason="needs the private venv (engine/recon/scripts/setup-venv.sh)")
+    from recon.adapters.skyrim.solve import Outcome, edits
+    a = Outcome(0x10, "solved", "BYTE_MATCHED", definition="int Box::Get()\n{\n    return Function20();\n}\n",
+                declaration="int Get()", name="Box::Get", prototypes="int Function20();\n")
+    b = Outcome(0x30, "solved", "BYTE_MATCHED", definition="void Box::Set()\n{\n    Function20();\n    Function40(1);\n}\n",
+                declaration="void Set()", name="Box::Set", prototypes="int Function20();\nvoid Function40(int arg1);\n")
+    text = "class Box\n{\npublic:\n    int Get();\n};\n"
+    cpp = edits([a, b], "unit/Box.h", "unit/Box.cpp", text)[0]
+    assert cpp["path"] == "unit/Box.cpp" and cpp["declarations"] == "int Function20();\nvoid Function40(int arg1);"
+    plain = Outcome(0x10, "solved", "BYTE_MATCHED", definition=a.definition, declaration="int Get()", name="Box::Get")
+    assert "declarations" not in edits([plain], "unit/Box.h", "unit/Box.cpp", text)[0]
