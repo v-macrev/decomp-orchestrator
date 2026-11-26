@@ -426,6 +426,13 @@ def test_a_function_that_calls_through_a_value_has_a_signature_and_so_do_its_cal
         cd.Generator(p, BASE + 0x2000).make(cd.Choice(), set())
 
 
+def test_a_tail_jump_through_a_value_leaves_the_signature_unknown_rather_than_empty():
+    thunk = Asm(0x2000)(I.create_mem(C.JMP_RM64, mem(R.RCX, 8)))       # f(p, ...): tail-jumps to p's second slot
+    p = program(thunk)
+    assert cd.indirect_signatures(p.normal(BASE + 0x2000), SOURCE) == {}
+    assert p.signature(BASE + 0x2000) is None
+
+
 def test_what_a_function_leaves_open_is_read_with_the_same_calls_as_its_signature():
     p = program(virtual(0x2000))
     at = BASE + 0x2000

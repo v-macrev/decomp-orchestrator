@@ -23,12 +23,15 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Callable
 
+from recon import ENGINE_VERSION, RULE_STORE_VERSION
 from recon.adapters.skyrim import reach as rc
 from recon.adapters.skyrim import solve as S
 from recon.adapters.skyrim.inventory import Target
 from recon.adapters.skyrim.manifest import heldout
 from recon.core import budget as bg
 from recon.core import taxonomy as tx
+from recon.core.canonical import digest
+from recon.core.knowledge import code_digest
 from recon.core.workers import Pool, meminfo
 
 #: why solve did not run on a function that reach gave a candidate
@@ -49,6 +52,7 @@ class Record:
     state: str = tx.OPEN
     counters: dict[str, int] = field(default_factory=dict)
     level: int = 0
+    code: str = ""                                # the engine that made it (`engine_code()`)
 
     @staticmethod
     def of(d: dict) -> "Record":
@@ -75,16 +79,26 @@ def decide(r: Record) -> None:
 
 # -- the journal ----------------------------------------------------------------------------------------
 
-class Journal:
-    """Records appended one per line and synced: the last record of a function is its state."""
+def engine_code() -> str:
+    """What a campaign's results depend on of the engine: its version, its rules and all of its code but the command line."""
+    return digest({"engine": ENGINE_VERSION, "rules": RULE_STORE_VERSION, "code": code_digest(("core", "adapters", "__init__.py"))})[:16]
 
-    def __init__(self, path: Path) -> None:
+
+class Journal:
+    """Records appended one per line and synced: the last record of a function is its state. Each record carries the engine
+    that made it, and only those of this engine count: a journal resumed after the engine changed does its functions again
+    (what the older engine said stays in the file, apart, never mixed with what this one says)."""
+
+    def __init__(self, path: Path, code: str = "") -> None:
         self.path = path
+        self.code = code
+        self.other = 0                           # records of another engine, read and left aside
         self._ended = False
         path.parent.mkdir(parents=True, exist_ok=True)
 
     def latest(self) -> dict[int, Record]:
         out: dict[int, Record] = {}
+        self.other = 0
         if not self.path.is_file():
             return out
         with open(self.path, encoding="utf-8") as f:
@@ -93,10 +107,14 @@ class Journal:
                     r = Record.of(json.loads(line))
                 except (ValueError, TypeError):
                     continue                     # the line being written when the machine ended
+                if r.code != self.code:
+                    self.other += 1
+                    continue
                 out[r.rva] = r
         return out
 
     def append(self, r: Record) -> None:
+        r.code = self.code
         if not self._ended:              # a line cut short by an abrupt end is closed, so that it stays one bad line
             if self.path.is_file() and self.path.stat().st_size:
                 with open(self.path, "rb") as f:
@@ -218,8 +236,10 @@ def run(population: list[Target], startable: dict[int, dict], worktree: Path, ch
         solve_set: frozenset[int] = frozenset(), jobs: int = 1, knowledge: str | None = None, levels: range = range(len(bg.LEVELS)),
         log: Callable[[str], None] = print, every_s: float = 60.0) -> list[Record]:
     """Every function of the population, level by level; the journal `<data>/<name>.jsonl` holds what is done."""
-    journal = Journal(data / f"{name}.jsonl")
+    journal = Journal(data / f"{name}.jsonl", engine_code())
     latest = journal.latest()
+    if journal.other:
+        log(f"the journal has {journal.other} records of another engine: they are left aside and their functions done again")
     if latest:
         log(f"resuming: {len(latest)} functions already have a state")
     retried: set[int] = set()

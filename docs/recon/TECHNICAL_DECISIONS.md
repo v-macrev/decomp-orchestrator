@@ -401,3 +401,21 @@ code's digest and computed again, as any change of the analysis code requires.
 So that the next such stall is seen at once: the pool reports a task that has run 10 minutes, then each time twice as long, and on
 POSIX has the worker print its stack (`faulthandler` on SIGUSR1, which also answers `kill -USR1 <pid>` by hand). The task is left
 to finish: a long task is never ended or judged. A worker's error names the innermost engine frame (file name, line, function).
+
+## D-051 · 2026-11-26 · Leaf functions have extents from where they are called; a tail jump through a value shows nothing
+After D-049, the measured leaves of the chains without signatures still began, for 142 of 400 sampled, at a call to an address
+in the image that is no extent; one such callee blocked 115. The x64 convention requires unwind data of every function that
+moves the stack pointer, saves a preserved register or calls, so a function that does none of these (a leaf) has no entry in
+the exception directory. Such a function is now found where something calls it (`x64_msvc/leaf.py`, `Pack.extent`): decoded
+from there, both ways of every branch, it must never call, never write the stack pointer but by `ret`, never write a preserved
+register, end every path in `ret`, a jump to a known function or a jump through a pointer the image holds, decode within the
+bytes it may have (up to the next known function or the end of the executable section) and be contiguous but for padding.
+Whether an address is a leaf depends only on the image and the listed extents, so every worker and run finds the same. Of the
+287 callees that were no extent, 207 are leaves, reached by 5,089 of the 5,427 calls to them. Leaves are callees only: the
+population, the denominator and the universe of the index of callers are unchanged.
+
+Reading their signatures showed that D-048 read a tail jump through a value as a call site: it gave the function the
+parameters it sets itself and no result. A tail jump passes on whatever the function was given and its result is the
+function's own, which no use at the site reads: such a site shows nothing, and the function's signature now stays unknown
+instead of being read as taking and returning nothing. 189 of the leaves are such jumps through the import address table (an
+imported function's thunk), and they stay unknown until imported functions are declared; that is the measured next blocker.

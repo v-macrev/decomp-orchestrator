@@ -7,6 +7,7 @@ needs is inferred: signatures from the code of the function and its callees, lay
 """
 from __future__ import annotations
 
+import bisect
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 from recon.adapters.skyrim.image import PinnedImage
 from recon.adapters.skyrim.verify import PASS, Verifier
 from recon.adapters.x64_msvc import coff
+from recon.adapters.x64_msvc.leaf import leaf_extent
 from recon.adapters.x64_msvc import program as pg
 from recon.adapters.x64_msvc import unwind as uw
 from recon.adapters.x64_msvc.abi import CALLING, SOURCE
@@ -43,6 +45,9 @@ class Pack:
     declarations: dict[int, tuple[str, Signature]] = field(default_factory=dict)
     #: where what is learnt is kept across programs (`open_store`), or None
     store: "kn.Store | None" = None
+    #: RVA -> the extent of the leaf function there, or None: found where something calls it (`extent`)
+    _leaves: dict[int, int | None] = field(default_factory=dict, repr=False)
+    _starts: list[int] | None = field(default=None, repr=False)
 
     @staticmethod
     def load(path: str | Path, worktree: str | Path, validated: frozenset[str] | None) -> "Pack":
@@ -65,11 +70,42 @@ class Pack:
         return pack
 
     # -- what the engine asks of an image -------------------------------------------------------
+    def extent(self, rva: int) -> int | None:
+        """The size of the function at `rva`: a listed one's, or a leaf function's, which has no unwind data and is found
+        from where it is called (D-051). Which addresses are leaves depends only on the image and the listed extents, never
+        on what was asked before, so every worker and every run finds the same ones. None: no function starts there."""
+        n = self.size.get(rva)
+        if n is not None:
+            return n
+        if rva not in self._leaves:
+            self._leaves[rva] = self._leaf(rva)
+        return self._leaves[rva]
+
+    def _leaf(self, rva: int) -> int | None:
+        if self._starts is None:
+            self._starts = sorted(self.size)
+        starts = self._starts
+        k = bisect.bisect_right(starts, rva)
+        if k and starts[k - 1] + self.size[starts[k - 1]] > rva:
+            return None                                  # a place inside a listed function
+        try:
+            sec = self.image.pe.section_for(rva)
+        except self.image.up.pecoff.Reject:
+            return None
+        if not sec.flags & SCN_MEM_EXECUTE:
+            return None
+        hi = sec.vaddr + min(sec.raw_size, sec.vsize or sec.raw_size)
+        if k < len(starts):
+            hi = min(hi, starts[k])
+        if hi <= rva:
+            return None
+        return leaf_extent(self.image.read(rva, hi - rva), rva, self.image.image_base, self.size.__contains__)[0]
+
     def normal(self, at: int) -> Fn:
         rva = at - self.image.image_base
-        if rva not in self.size:
+        n = self.extent(rva)
+        if n is None:
             raise NotReconstructed("NOT_A_FUNCTION_OF_THE_PACK")
-        n = self.size[rva]
         entries = [(b, e, uw.read_unwind(self.image.read, u)) for b, e, u in self.image.runtime_functions() if rva <= b < rva + n]
         a = pg.analyse(self.image.read(rva, n), rva, self.image.image_base, self.validated, entries)
         if isinstance(a, pg.Refusal):
@@ -111,7 +147,7 @@ class Pack:
     def key(self, at: int) -> str | None:
         """What the normal form at `at` depends on within the namespace: where its extent starts and how long it is."""
         rva = at - self.image.image_base
-        n = self.size.get(rva)
+        n = self.extent(rva)
         return None if n is None else f"{rva:x}:{n}"
 
     def functions(self) -> list[int]:

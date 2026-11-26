@@ -101,7 +101,11 @@ def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
     """For each value a call jumps through (a virtual call, a function pointer), what the call site shows of its signature:
     arguments up to the last location the caller sets with a value of its own (one it merely passes on below that counts
     too), and a result where the caller reads one. For the signature of the function that makes the call; the call itself
-    is still written only when its target is known."""
+    is still written only when its target is known.
+
+    A tail jump through a value shows nothing: what it passes on is whatever the function was given, and its result is the
+    function's own, which no use at the site reads. It has no reading here, so that the function's signature stays unknown
+    rather than being read as taking nothing and returning nothing (D-051)."""
     params = {v for _n, v in fn.params}
     d = {v: o for v, (_b, o) in fn.defining().items()}
     uses: dict[int, int] = {}          # a value that only reaches a return may merely have been left there: not a use
@@ -119,7 +123,7 @@ def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
     out: dict[int, Signature] = {}
     for b in fn.blocks:
         for o in (*b.ops, b.term):
-            if o.kind not in ("call", "tail") or not o.args or not isinstance(o.args[0], int) or o.args[0] in out:
+            if o.kind != "call" or not o.args or not isinstance(o.args[0], int) or o.args[0] in out:
                 continue
             have = dict(zip(o.attr("args") or (), o.args[1:]))  # type: ignore[call-overload]
             last = max((k for k, (i_loc, f_loc) in enumerate(conv.slots) if (i_loc in have and own(have[i_loc])) or (f_loc in have and own(have[f_loc]))), default=-1)
@@ -132,12 +136,11 @@ def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
                 else:
                     slots.append(Slot(INT, 64))      # passed on from the caller's own entry
             result = None
-            if o.kind == "call":
-                back = dict(zip(o.attr("defs") or (), o.defs))  # type: ignore[call-overload]
-                if conv.result_float in back and uses.get(back[conv.result_float], 0):
-                    result = _float_slot(fn.width(back[conv.result_float]))
-                elif conv.result_int in back and uses.get(back[conv.result_int], 0):
-                    result = _int_slot(fn.width(back[conv.result_int]))
+            back = dict(zip(o.attr("defs") or (), o.defs))  # type: ignore[call-overload]
+            if conv.result_float in back and uses.get(back[conv.result_float], 0):
+                result = _float_slot(fn.width(back[conv.result_float]))
+            elif conv.result_int in back and uses.get(back[conv.result_int], 0):
+                result = _int_slot(fn.width(back[conv.result_int]))
             out[o.args[0]] = Signature(tuple(slots), result, (("indirect", "SITE"),))
     return out
 

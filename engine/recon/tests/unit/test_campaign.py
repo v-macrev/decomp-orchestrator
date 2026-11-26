@@ -184,6 +184,19 @@ def test_the_journal_resumes_a_campaign_and_never_redoes_a_function_at_one_level
     assert j.latest()[1].level == 1 and not wanted(j.latest()[1], 2, set())
 
 
+def test_a_journal_resumed_by_another_engine_does_its_functions_again(tmp_path):
+    from recon.adapters.skyrim.campaign import Journal, Record, engine_code, wanted
+
+    assert len(engine_code()) == 16 and engine_code() == engine_code()
+    j = Journal(tmp_path / "c.jsonl", "old")
+    j.append(Record(2, 16, False, "candidate", [], "solved BYTE_MATCHED", state=tx.BYTE_MATCHED, level=0))
+    assert j.latest()[2].code == "old"
+    k = Journal(j.path, "new")                       # the engine changed between the two runs
+    assert k.latest() == {} and k.other == 1 and wanted(k.latest().get(2), 0, set())
+    k.append(Record(2, 16, False, "candidate", [], "unsolved NO_MATCH", state=tx.OPEN, level=0))
+    assert k.latest()[2].solve == "unsolved NO_MATCH" and Journal(j.path, "old").latest()[2].state == tx.BYTE_MATCHED
+
+
 def double(st, task):
     return 2 * task + st
 
