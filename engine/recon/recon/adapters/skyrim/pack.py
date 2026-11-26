@@ -103,9 +103,10 @@ class Pack:
         name = scoped(d[0])
         return None if name is None else (name, d[1])
 
-    def namespace(self) -> str:
-        """What every fact about this pack's functions depends on beyond its own extent: the engine, the image, the forms."""
-        return kn.namespace("skyrim-pack", self.image.sha256, sorted(self.validated) if self.validated is not None else None)
+    def namespace(self) -> dict[str, str]:
+        """What the facts about this pack's functions depend on beyond their own extents, by kind: the engine's code (only
+        the code that makes normal forms, for the facts read off them), the image, the validated forms."""
+        return kn.namespaces("skyrim-pack", self.image.sha256, sorted(self.validated) if self.validated is not None else None)
 
     def key(self, at: int) -> str | None:
         """What the normal form at `at` depends on within the namespace: where its extent starts and how long it is."""

@@ -110,3 +110,24 @@ def extents(inv: Inventory) -> tuple[dict[int, int], int]:
     for r in clash:
         del out[r]
     return out, dropped + len(clash)
+
+
+def with_unwind_entries(size: dict[int, int], entries: list[tuple[int, int, bool]]) -> tuple[dict[int, int], int]:
+    """The extents and, for every function the image's exception directory (`.pdata`) starts outside them, its extent
+    from that entry: the image's own evidence of where a function starts and ends, for the functions upstream does not
+    list. `entries`: (begin, end, chained) RVAs; a chained entry continues another function and starts none. An entry that
+    starts inside a known extent, or overlaps one, is left out. Also how many were added."""
+    out = dict(size)
+    starts = sorted(out)
+    added = 0
+    for b, e, chained in sorted(entries):
+        if chained or e <= b:
+            continue
+        k = bisect.bisect_right(starts, b)
+        before = starts[k - 1] if k else None
+        after = starts[k] if k < len(starts) else None
+        if (before is not None and before + out[before] > b) or (after is not None and e > after) or b in out:
+            continue
+        out[b] = e - b
+        added += 1
+    return out, added

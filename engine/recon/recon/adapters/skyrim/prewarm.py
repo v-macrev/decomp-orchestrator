@@ -36,11 +36,12 @@ def _work(st: dict, task: tuple[str, list[int]]) -> dict:
     return {k: v for k, v in p.stats.items() if v}
 
 
-def run(worktree: Path, checkout: Path, knowledge: str, jobs: int = 1, log: Callable[[str], None] = print, every_s: float = 60.0) -> dict:
+def run(worktree: Path, checkout: Path, knowledge: str, jobs: int = 1, log: Callable[[str], None] = print, every_s: float = 60.0,
+        phases: tuple[str, ...] = ("normal", "signature")) -> dict:
     pack, _offered = S.pack_of(worktree, checkout, knowledge)
     everything = pack.functions()
     report: dict = {"functions": len(everything)}
-    for phase in ("normal", "signature"):
+    for phase in phases:
         if phase == "signature":
             t0 = time.monotonic()
             p = pack.program()

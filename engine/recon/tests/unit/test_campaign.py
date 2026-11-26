@@ -222,3 +222,17 @@ def test_the_pool_starts_with_one_worker_and_grows_only_while_memory_allows(monk
     pool = wk.Pool(int, (0,), double, most=3, reserve=wk.GIB, step_s=0)
     pool.run(range(40), lambda *a: None)
     assert pool.stats.most == 1                      # short of memory: one worker, every task still done
+
+
+def test_unwind_entries_add_the_functions_upstream_does_not_list_and_nothing_inside_one():
+    from recon.adapters.skyrim.inventory import with_unwind_entries
+
+    size = {0x1000: 0x40, 0x2000: 0x20}
+    entries = [(0x1000, 0x1040, False),      # already an extent
+               (0x1010, 0x1030, False),      # inside one: a part of it
+               (0x1800, 0x1880, False),      # a function nobody lists
+               (0x1900, 0x1920, True),       # chained: it continues another function
+               (0x1F80, 0x2010, False),      # would overlap the next extent
+               (0x3000, 0x3000, False)]      # empty
+    out, added = with_unwind_entries(size, entries)
+    assert added == 1 and out == {0x1000: 0x40, 0x1800: 0x80, 0x2000: 0x20}

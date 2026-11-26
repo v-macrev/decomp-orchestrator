@@ -287,7 +287,7 @@ def cmd_prewarm(args) -> int:
         print("the knowledge store is derived from the image: --knowledge must be under a .local directory", file=sys.stderr)
         return 2
     report = pw.run(Path(args.worktree), Path(args.checkout), str(args.knowledge), args.jobs,
-                    log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every)
+                    log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every, phases=tuple(args.phases.split(",")))
     print(json.dumps(report, indent=1, sort_keys=True))
     return 0
 

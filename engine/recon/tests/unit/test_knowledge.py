@@ -399,3 +399,57 @@ def test_the_search_tries_a_callee_s_alternatives_and_says_which():
     assert read and all(ch.startswith("callee:") for c in read for ch in c.changes() if ch.startswith("callee"))
     made = [g.make(c, set()) for c in read[:3]]
     assert any(m is not None for m in made)
+
+
+# ------------------------------------------------------------------------------------ calls through a value
+
+def virtual(rva: int) -> Asm:
+    """f(p): p->vtable[1](p, 5)"""
+    a = Asm(rva)
+    a(T.sub_rsp(40))(T.load(R.RAX, mem(R.RCX)))(I.create_reg_i32(C.MOV_R32_IMM32, R.EDX, 5))
+    a(I.create_mem(C.CALL_RM64, mem(R.RAX, 8)))
+    a(T.add_rsp(40))(T.ret())
+    return a
+
+
+def test_a_function_that_calls_through_a_value_has_a_signature_and_so_do_its_callers():
+    top = Asm(RVA)
+    top(T.sub_rsp(40))
+    top.branch(C.CALL_REL32_64, 0x2000)
+    top(T.add_rsp(40))(T.ret())
+    fns = [top, virtual(0x2000)]
+    p = program(*fns)
+    s = p.signature(BASE + 0x2000)
+    assert s is not None and s.params and s.params[0] == Slot("i", 64) and ("indirect-calls", "SITE") in s.evidence
+    assert p.signature(BASE + RVA) is not None                    # the chain above it is no longer blocked
+    with pytest.raises(NotReconstructed, match="INDIRECT_CALL"):     # the call itself is still written only with its target
+        cd.Generator(p, BASE + 0x2000).make(cd.Choice(), set())
+
+
+def test_what_a_call_site_shows_is_read_from_the_caller_s_own_values():
+    p = program(virtual(0x2000))
+    fn = p.normal(BASE + 0x2000)
+    (sig,) = cd.indirect_signatures(fn, SOURCE).values()
+    assert len(sig.params) == 2 and sig.result is None   # this, passed on, and the 5 it sets; nothing read after it
+
+
+# ------------------------------------------------------------------------------------ namespaces
+
+def test_normal_forms_are_filed_under_the_code_that_makes_them_and_nothing_else():
+    closure = kn.import_closure(kn.NORMAL_ROOTS)
+    assert not any(x.startswith(("core/synthesis", "core/structuring", "core/emitter")) for x in closure)
+    code = textwrap.dedent(f"""
+        import sys, json
+        sys.path.insert(0, {str(TESTS.parent)!r})
+        for m in {list(kn.NORMAL_ROOTS)!r}:
+            __import__(m)
+        import pathlib
+        root = pathlib.Path({str(Path(kn.__file__).resolve().parents[1])!r})
+        print(json.dumps(sorted(pathlib.Path(m.__file__).resolve().relative_to(root).as_posix()
+                                for n, m in sys.modules.items() if n.startswith("recon") and getattr(m, "__file__", None))))
+    """)
+    import json
+    loaded = set(json.loads(subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout))
+    assert loaded <= closure | set(kn.NORMAL_FILES)                # every module that runs is in the digest
+    ns = kn.namespaces("x")
+    assert ns["normal"] == ns["callees"] == ns["sites"] == ns["callers"] != ns["*"]

@@ -363,3 +363,24 @@ worker of the largest size measured would stay above a reserve (a quarter of the
 and a worker that grows past half the machine is retired after its task. A worker that dies gives its task back; a task that kills
 its worker twice is `INFRA` (`WORKER_DIED`), retried once in the next run. Progress lines carry states, rates, per-function times,
 workers and memory, and the analysis counters apart: computed, reused and done twice.
+
+## D-048 · 2026-11-26 · A call through a value is read from its site, and normal forms outlive changes to the analysis
+The first whole-program prewarm measured why signatures were missing: of 400 functions sampled across the program, 337 had
+none, and following each down through callees without a signature, 281 chains ended at a function that calls through a value
+(a virtual call or a function pointer), which inference refused (`INDIRECT_CALL`), so every caller above it had none either; one
+such function blocked 94 of the 400. For the signature of a function, a call through a value now takes what its site shows
+(`indirect_signatures`): arguments up to the last location the caller sets with a value of its own (one merely passed on below it
+counts too), and a result where the caller uses one (reaching a return is not a use: it may have been left there). The call itself
+is still written only when its target is known, so a function that makes one is still refused as a target. Normal forms, callees,
+call sites and the index of callers are filed under a digest of the code that makes normal forms only (the import closure of the
+lifter and the IR passes, read from the source; a test checks that every module importing them runs is in it), so a change to
+the signature analysis or the search keeps them.
+
+## D-049 · 2026-11-26 · The image's exception directory gives the extents of the functions upstream does not list
+With calls through a value read from their sites (D-048), the measured leaves of the chains without signatures moved: 178 of the
+400 sampled ended at a call to an address in the image that is no extent, because upstream's inventory does not list the function
+there; one such callee blocked 112 of them. The image's own exception directory records where every function with unwind data
+starts and ends. Every entry that starts outside the known extents and overlaps none is now an extent too (`with_unwind_entries`);
+a chained entry continues another function and starts none, and an entry inside a known extent is a part of it. These functions
+are callees and members of the index of callers only: the population, the denominator and what is offered are unchanged. A leaf
+function without unwind data is still no extent.

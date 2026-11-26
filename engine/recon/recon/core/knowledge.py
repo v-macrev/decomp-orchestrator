@@ -58,22 +58,85 @@ class Store(Protocol):
 ANALYSIS_CODE = ("core", "adapters/x64_msvc", "adapters/skyrim/pack.py", "adapters/skyrim/image.py", "adapters/skyrim/verify.py", "__init__.py")
 
 
-def code_digest(parts: tuple[str, ...] = ANALYSIS_CODE) -> str:
-    """A digest of the engine's code the facts depend on: any change to it files every fact under a new namespace."""
-    root = Path(__file__).resolve().parents[1]
+#: the modules a normal form is made by, and files read as they are without following their imports (`Pack.normal` lives in
+#: pack.py, which also imports the search; the search does not make normal forms)
+NORMAL_ROOTS = ("recon.adapters.x64_msvc.program", "recon.adapters.x64_msvc.unwind", "recon.adapters.x64_msvc.validate",
+                "recon.adapters.x64_msvc.abi", "recon.core.ir.passes", "recon.core.ir.validate", "recon.adapters.skyrim.image")
+NORMAL_FILES = ("adapters/skyrim/pack.py", "adapters/x64_msvc/lift_coverage.json", "__init__.py")
+
+_ROOT = Path(__file__).resolve().parents[1]
+
+
+def import_closure(roots: tuple[str, ...]) -> set[str]:
+    """The engine's source files the modules `roots` import, directly or not, read from the source (paths relative to the
+    package)."""
+    import ast
+
+    out: set[str] = set()
+    todo = list(roots)
+    while todo:
+        mod = todo.pop()
+        rel = mod.split(".", 1)[1].replace(".", "/") if "." in mod else ""
+        for cand in (f"{rel}.py", f"{rel}/__init__.py"):
+            p = _ROOT / cand
+            if p.is_file() and cand not in out:
+                out.add(cand)
+                parts = rel.split("/")
+                pkg = parts if cand.endswith("__init__.py") else parts[:-1]
+                for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+                    names: list[str] = []
+                    if isinstance(node, ast.Import):
+                        names = [a.name for a in node.names]
+                    elif isinstance(node, ast.ImportFrom):
+                        base = node.module or ""
+                        if node.level:
+                            base = ".".join(["recon", *pkg[: len(pkg) - node.level + 1], *([base] if base else [])])
+                        names = [base] + [f"{base}.{a.name}" for a in node.names]
+                    todo += [n for n in names if n.startswith("recon.") or n == "recon"]
+                for parent in range(1, len(parts)):          # importing a module runs its packages' __init__ too
+                    todo.append("recon." + ".".join(parts[:parent]))
+                break
+    return out
+
+
+def code_digest(parts: tuple[str, ...] = ANALYSIS_CODE, files: set[str] | None = None) -> str:
+    """A digest of the engine's code the facts depend on: any change to it files those facts under a new namespace.
+    `parts`: directories and files relative to the package; `files`: exact files instead."""
+    if files is None:
+        found: set[str] = set()
+        for part in parts:
+            p = _ROOT / part
+            if p.is_dir():
+                found |= {x.relative_to(_ROOT).as_posix() for x in p.rglob("*") if x.suffix in (".py", ".json") and "__pycache__" not in x.parts}
+            else:
+                found.add(part)
+        files = found
     h = hashlib.sha256()
-    for part in parts:
-        p = root / part
-        files = sorted(x for x in p.rglob("*") if x.suffix in (".py", ".json") and "__pycache__" not in x.parts) if p.is_dir() else [p]
-        for f in files:
-            h.update(f.relative_to(root).as_posix().encode() + b"\0" + f.read_bytes().replace(b"\r\n", b"\n") + b"\0")
+    for rel in sorted(files):
+        h.update(rel.encode() + b"\0" + (_ROOT / rel).read_bytes().replace(b"\r\n", b"\n") + b"\0")
     return h.hexdigest()
 
 
+def normal_code_digest() -> str:
+    """A digest of the code normal forms are made by: a change to the signature analysis or the search leaves it."""
+    return code_digest(files=import_closure(NORMAL_ROOTS) | set(NORMAL_FILES))
+
+
+#: the kinds of fact that depend only on a function's normal form (the rest depend on the whole analysis)
+NORMAL_KINDS = ("normal", "callees", "sites", "callers")
+
+
 def namespace(*inputs: object) -> str:
-    """The namespace of a program's facts: the engine's code and whatever else every fact depends on (the image, the
-    validated instruction forms), digested."""
+    """The namespace of a program's facts: the engine's analysis code and whatever else every fact depends on (the image,
+    the validated instruction forms), digested."""
     return hashlib.sha256(repr((code_digest(), *inputs)).encode()).hexdigest()
+
+
+def namespaces(*inputs: object) -> dict[str, str]:
+    """A namespace for each kind of fact: the normal kinds under the code that makes normal forms, the others under all of
+    the analysis code."""
+    normal = hashlib.sha256(repr(("normal", normal_code_digest(), *inputs)).encode()).hexdigest()
+    return {**dict.fromkeys(NORMAL_KINDS, normal), "*": namespace(*inputs)}
 
 
 # -- the facts as data ---------------------------------------------------------------------------
@@ -209,9 +272,11 @@ def _alive(pid: int) -> bool:
 class SqliteStore:
     """Facts on disk, shared by processes: keyed by namespace, kind and key; a fact is written once, in a transaction."""
 
-    def __init__(self, path: str | Path, namespace: str, owner: str | None = None) -> None:
+    def __init__(self, path: str | Path, namespace: "str | dict[str, str]", owner: str | None = None) -> None:
+        """`namespace`: one for every kind, or kind -> namespace with "*" for the other kinds (`namespaces`)."""
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.path, self.ns = str(path), namespace
+        self.path = str(path)
+        self.ns = namespace if isinstance(namespace, dict) else {"*": namespace}
         self.owner = owner or f"{os.getpid()}"
         self._depth = 0
         self.db = sqlite3.connect(self.path, timeout=600, isolation_level=None)
@@ -228,19 +293,22 @@ class SqliteStore:
             self.db.execute("CREATE TABLE IF NOT EXISTS leases (ns TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, owner TEXT NOT NULL, "
                             "since REAL NOT NULL, PRIMARY KEY (ns, kind, key)) WITHOUT ROWID")
 
+    def _ns(self, kind: str) -> str:
+        return self.ns.get(kind, self.ns["*"])
+
     def get(self, kind: str, key: str):
-        row = self.db.execute("SELECT value FROM facts WHERE ns = ? AND kind = ? AND key = ?", (self.ns, kind, key)).fetchone()
+        row = self.db.execute("SELECT value FROM facts WHERE ns = ? AND kind = ? AND key = ?", (self._ns(kind), kind, key)).fetchone()
         return MISSING if row is None else decode(kind, row[0])
 
     def put(self, kind: str, key: str, value) -> bool:
         verb = "INSERT OR REPLACE" if kind == "fixpoint" else "INSERT OR IGNORE"
         with self.transaction():
-            n = self.db.execute(f"{verb} INTO facts (ns, kind, key, value) VALUES (?, ?, ?, ?)", (self.ns, kind, key, encode(kind, value))).rowcount
+            n = self.db.execute(f"{verb} INTO facts (ns, kind, key, value) VALUES (?, ?, ?, ?)", (self._ns(kind), kind, key, encode(kind, value))).rowcount
         return n == 1
 
     def drop(self, kind: str, key: str) -> None:
         with self.transaction():
-            self.db.execute("DELETE FROM facts WHERE ns = ? AND kind = ? AND key = ?", (self.ns, kind, key))
+            self.db.execute("DELETE FROM facts WHERE ns = ? AND kind = ? AND key = ?", (self._ns(kind), kind, key))
 
     @contextmanager
     def transaction(self) -> Iterator[None]:
@@ -267,23 +335,23 @@ class SqliteStore:
         """Take the unit for this process; False while another live process holds it."""
         now = time.time()
         with self.transaction():
-            row = self.db.execute("SELECT owner, since FROM leases WHERE ns = ? AND kind = ? AND key = ?", (self.ns, kind, key)).fetchone()
+            row = self.db.execute("SELECT owner, since FROM leases WHERE ns = ? AND kind = ? AND key = ?", (self._ns(kind), kind, key)).fetchone()
             if row is not None and row[0] != self.owner:
                 pid = row[0].split(":")[0]
                 if now - row[1] < LEASE_S and (not pid.isdigit() or _alive(int(pid))):
                     return False
-            self.db.execute("INSERT OR REPLACE INTO leases (ns, kind, key, owner, since) VALUES (?, ?, ?, ?, ?)", (self.ns, kind, key, self.owner, now))
+            self.db.execute("INSERT OR REPLACE INTO leases (ns, kind, key, owner, since) VALUES (?, ?, ?, ?, ?)", (self._ns(kind), kind, key, self.owner, now))
         return True
 
     def release(self, kind: str, key: str) -> None:
         with self.transaction():
-            self.db.execute("DELETE FROM leases WHERE ns = ? AND kind = ? AND key = ? AND owner = ?", (self.ns, kind, key, self.owner))
+            self.db.execute("DELETE FROM leases WHERE ns = ? AND kind = ? AND key = ? AND owner = ?", (self._ns(kind), kind, key, self.owner))
 
     def keys(self, kind: str) -> set[str]:
-        return {k for (k,) in self.db.execute("SELECT key FROM facts WHERE ns = ? AND kind = ?", (self.ns, kind))}
+        return {k for (k,) in self.db.execute("SELECT key FROM facts WHERE ns = ? AND kind = ?", (self._ns(kind), kind))}
 
     def count(self, kind: str) -> int:
-        return self.db.execute("SELECT COUNT(*) FROM facts WHERE ns = ? AND kind = ?", (self.ns, kind)).fetchone()[0]
+        return self.db.execute("SELECT COUNT(*) FROM facts WHERE ns = ? AND kind = ?", (self._ns(kind), kind)).fetchone()[0]
 
     def check(self) -> str:
         return self.db.execute("PRAGMA integrity_check").fetchone()[0]
@@ -303,4 +371,4 @@ def wait_for(store, kind: str, key: str, poll_s: float = 0.2):
         time.sleep(poll_s)
 
 
-__all__ = ["ANALYSIS_CODE", "LEASE_S", "MISSING", "MemoryStore", "SqliteStore", "Store", "code_digest", "decode", "encode", "namespace", "signature_data", "signature_of", "wait_for"]
+__all__ = ["ANALYSIS_CODE", "LEASE_S", "NORMAL_FILES", "NORMAL_KINDS", "NORMAL_ROOTS", "MISSING", "MemoryStore", "SqliteStore", "Store", "code_digest", "decode", "encode", "import_closure", "namespace", "namespaces", "normal_code_digest", "signature_data", "signature_of", "wait_for"]

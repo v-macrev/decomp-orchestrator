@@ -27,12 +27,13 @@ from pathlib import Path
 from typing import Callable
 
 from recon.adapters.skyrim.image import PinnedImage, locate_image
-from recon.adapters.skyrim.inventory import extents, load_inventory
+from recon.adapters.skyrim.inventory import extents, load_inventory, with_unwind_entries
 from recon.adapters.skyrim.manifest import frontier_key, inputs
 from recon.adapters.skyrim.pack import Pack
 from recon.adapters.skyrim.verify import PASS, Verifier
 from recon.adapters.x64_msvc import coff
 from recon.adapters.x64_msvc import declarations as D
+from recon.adapters.x64_msvc import unwind as uw
 from recon.adapters.x64_msvc.batch import distance
 from recon.adapters.x64_msvc.cl import CompilerFailed, Toolchain, ToolchainUnavailable, diagnostics, discover
 from recon.adapters.x64_msvc.symbols import SymbolMap
@@ -149,11 +150,23 @@ def pack_of(worktree: Path, checkout: Path, knowledge: str | None) -> tuple[Pack
         validated = load_validated()
         if not validated:
             raise NotReconstructed("LIFT_COVERAGE_MISSING")
-        pack = Pack("pinned", image, extents(inv)[0], validated)
+        pack = Pack("pinned", image, unwind_extents(image, extents(inv)[0]), validated)
         if knowledge:
             pack.open_store(knowledge)
         _PACKS[k] = (pack, frozenset(t.rva for t in inv.targets))
     return _PACKS[k]
+
+
+def unwind_extents(image: PinnedImage, size: dict[int, int]) -> dict[int, int]:
+    """The extents, and those the image's exception directory gives the functions upstream does not list (D-049)."""
+    entries = []
+    for b, e, u in image.runtime_functions():
+        try:
+            chained = bool(uw.read_unwind(image.read, u).flags & uw.UNW_FLAG_CHAININFO)
+        except (ValueError, IndexError):
+            chained = True                       # unreadable: it starts nothing the engine can tell
+        entries.append((b, e, chained))
+    return with_unwind_entries(size, entries)[0]
 
 
 def write_atomically(path: Path, text: str) -> None:

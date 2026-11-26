@@ -168,6 +168,7 @@ def main(argv: list[str] | None = None) -> int:
     pw.add_argument("--knowledge", required=True, help="the knowledge store, under a .local directory")
     pw.add_argument("--jobs", type=int, default=1, help="at most this many workers; fewer while memory is short")
     pw.add_argument("--every", type=float, default=60.0)
+    pw.add_argument("--phases", default="normal,signature", help="normal (normal forms and calls) and/or signature (callers, signatures)")
     ce = sub.add_parser("ceiling", help="the early ceiling estimate over a stratified sample of startable development functions: counts")
     common(ce, with_select=False)
     ce.add_argument("--next", required=True, help="the JSON of `sr next --offline`")

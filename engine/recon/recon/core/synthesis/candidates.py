@@ -51,6 +51,14 @@ def direct_callees(fn: Fn) -> tuple[int, ...]:
     return tuple(out)
 
 
+def computed_width(fn: Fn, d: dict, v: Arg) -> int:
+    """The width a value was computed in (a 32-bit write zero-extends to the whole register)."""
+    o = d.get(v) if isinstance(v, int) else None
+    if isinstance(o, Op) and o.kind == "zext":
+        return computed_width(fn, d, o.args[0])
+    return v.width if isinstance(v, Const) else fn.width(v)
+
+
 def call_sites(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
     """What a caller's normal form shows of each call it makes (tails are left out: what they pass is the caller's own).
 
@@ -59,9 +67,9 @@ def call_sites(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
     not set: it may be an argument of the caller that the callee ignores."""
     params = {v for _n, v in fn.params}
     d = {v: o for v, (_b, o) in fn.defining().items()}
-    uses: dict[int, int] = {}
+    uses: dict[int, int] = {}          # a value that only reaches a return may merely have been left there: not a use
     for b in fn.blocks:
-        for a in [a for o in b.ops for a in o.args] + [a for p in b.phis for _k, a in p.args] + list(b.term.args):
+        for a in [a for o in b.ops for a in o.args] + [a for p in b.phis for _k, a in p.args] + (list(b.term.args) if b.term.kind != "return" else []):
             if isinstance(a, int):
                 uses[a] = uses.get(a, 0) + 1
     out: dict[str, list[dict]] = {}
@@ -74,10 +82,63 @@ def call_sites(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
                 if isinstance(v, Const):
                     put.append([n, 64])
                 elif isinstance(v, int) and v not in params and not (isinstance(d.get(v), Op) and d[v].kind == "undef"):  # type: ignore[union-attr]
-                    put.append([n, fn.width(v)])
+                    put.append([n, computed_width(fn, d, v)])
             reads = [[n, fn.width(v)] for n, v in zip(o.attr("defs") or (), o.defs)  # type: ignore[call-overload]
                      if n in (conv.result_int, conv.result_float) and uses.get(v, 0)]
             out.setdefault(str(o.args[0].value), []).append({"set": sorted(put), "reads": sorted(reads)})
+    return out
+
+
+def _int_slot(w: int) -> Slot:
+    return Slot(INT, next(x for x in (64, 32, 16, 8) if w >= x) if w >= 8 else 64)
+
+
+def _float_slot(w: int) -> Slot:
+    return Slot(sg.FLOAT, 32 if w == 32 else 64)
+
+
+def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
+    """For each value a call jumps through (a virtual call, a function pointer), what the call site shows of its signature:
+    arguments up to the last location the caller sets with a value of its own (one it merely passes on below that counts
+    too), and a result where the caller reads one. For the signature of the function that makes the call; the call itself
+    is still written only when its target is known."""
+    params = {v for _n, v in fn.params}
+    d = {v: o for v, (_b, o) in fn.defining().items()}
+    uses: dict[int, int] = {}          # a value that only reaches a return may merely have been left there: not a use
+    for b in fn.blocks:
+        for a in [a for o in b.ops for a in o.args] + [a for p in b.phis for _k, a in p.args] + (list(b.term.args) if b.term.kind != "return" else []):
+            if isinstance(a, int):
+                uses[a] = uses.get(a, 0) + 1
+
+    def own(v: Arg) -> bool:
+        return isinstance(v, Const) or (isinstance(v, int) and v not in params and not (isinstance(d.get(v), Op) and d[v].kind == "undef"))  # type: ignore[union-attr]
+
+    def width(v: Arg) -> int:
+        return computed_width(fn, d, v)
+
+    out: dict[int, Signature] = {}
+    for b in fn.blocks:
+        for o in (*b.ops, b.term):
+            if o.kind not in ("call", "tail") or not o.args or not isinstance(o.args[0], int) or o.args[0] in out:
+                continue
+            have = dict(zip(o.attr("args") or (), o.args[1:]))  # type: ignore[call-overload]
+            last = max((k for k, (i_loc, f_loc) in enumerate(conv.slots) if (i_loc in have and own(have[i_loc])) or (f_loc in have and own(have[f_loc]))), default=-1)
+            slots = []
+            for i_loc, f_loc in conv.slots[: last + 1]:
+                if i_loc in have and own(have[i_loc]):
+                    slots.append(_int_slot(width(have[i_loc])))
+                elif f_loc in have and own(have[f_loc]):
+                    slots.append(_float_slot(width(have[f_loc])))
+                else:
+                    slots.append(Slot(INT, 64))      # passed on from the caller's own entry
+            result = None
+            if o.kind == "call":
+                back = dict(zip(o.attr("defs") or (), o.defs))  # type: ignore[call-overload]
+                if conv.result_float in back and uses.get(back[conv.result_float], 0):
+                    result = _float_slot(fn.width(back[conv.result_float]))
+                elif conv.result_int in back and uses.get(back[conv.result_int], 0):
+                    result = _int_slot(fn.width(back[conv.result_int]))
+            out[o.args[0]] = Signature(tuple(slots), result, (("indirect", "SITE"),))
     return out
 
 
@@ -421,14 +482,19 @@ class Program:
             return None
 
     def _infer(self, at: int, k: int = 0) -> Signature:
+        """From the function's own code: callees by their signatures, calls through a value by what the site shows."""
         fn = self.normal(at)
+        through = indirect_signatures(fn, self.conv)
+
+        def resolve(t: Arg) -> Signature | None:
+            return self.callee(t) if isinstance(t, Const) else through.get(t)  # type: ignore[arg-type]
         self._inferring += 1
         try:
-            result, why = sg.results(fn, self.conv, self.callee)[k]
-            _low, slots = lw.lower(fn, self.conv, self.abi, self.callee, result)
+            result, why = sg.results(fn, self.conv, resolve)[k]
+            _low, slots = lw.lower(fn, self.conv, self.abi, resolve, result)
         finally:
             self._inferring -= 1
-        return Signature(slots, result, (("result", why.value),))
+        return Signature(slots, result, (("result", why.value),) + ((("indirect-calls", "SITE"),) if through else ()))
 
     # -- what is left open --------------------------------------------------------------------------
     def alternatives(self, at: int) -> tuple[Signature, ...]:
