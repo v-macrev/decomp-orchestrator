@@ -3233,11 +3233,14 @@ export class RunEngine {
 
     const where = repo.engineContext?.(slot) ?? null;
     const budgets = { ...(node.data.recon?.candidates ? { candidates: node.data.recon.candidates } : {}), ...(node.data.recon?.compiles ? { compiles: node.data.recon.compiles } : {}) };
+    // Files of earlier packets of this unit may be a model's: the engine then reads the unit's header only at the
+    // base revision and never from the worktree (section 3). Their contents are never sent.
+    const options = { ...(limit ? { maxFunctionBytes: limit } : {}), ...(carried.length ? { modelTextInUnit: true } : {}) };
     const r = await recon.solve({
       packet: { functions: task.functions.map((f) => ({ rva: f.rva.toLowerCase(), size: f.size, ...(f.name ? { name: f.name.slice(0, 300) } : {}) })), unit: task.unit, allowedPaths: prepared.allowedPaths.slice(0, 8) },
       ...(where ? { worktree: where.worktree, checkout: where.checkout, dataDir: where.dataDir } : {}),
       ...(Object.keys(budgets).length ? { budgets } : {}),
-      ...(limit ? { options: { maxFunctionBytes: limit } } : {}),
+      ...(Object.keys(options).length ? { options } : {}),
     }, { signal, ...(node.data.recon?.timeoutSec ? { timeoutMs: node.data.recon.timeoutSec * 1000 } : {}) });
     store.updateAttempt(attempt.id, { latencyMs: r.durationMs, bundleHash: r.ok ? r.result.inputDigest : null });
     if (!r.ok) {

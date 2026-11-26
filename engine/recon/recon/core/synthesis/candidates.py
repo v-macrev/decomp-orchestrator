@@ -144,6 +144,8 @@ class Candidate:
     assumptions: tuple[str, ...]                 # the source's own
     function_assumptions: tuple[str, ...]        # those its normal form rests on
     history: tuple[str, ...]                     # the rules that led from the code to the source-level form
+    #: the types the tree was made with (classes by number), for another form of the same tree
+    types: ty.Types | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass
@@ -238,7 +240,7 @@ class Generator:
         rva = self.at - self.p.base
         unit = Emitter(t, self.p.base, rva).unit(body, rva)
         verdict = ev.compare(body, self.fn, self.p.conv, sig, self._called(callees), size_of(t), self.p.image)
-        return Candidate(c, unit, body, body.digest(), verdict, sig, body.assumptions, self.fn.assumptions, f.history)
+        return Candidate(c, unit, body, body.digest(), verdict, sig, body.assumptions, self.fn.assumptions, f.history, t)
 
     def _called(self, callees: dict[int, Signature]) -> dict[int, Signature]:
         """Signatures for every call of the normal form, which may have calls the source-level form dropped."""

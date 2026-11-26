@@ -92,9 +92,11 @@ synthesis/candidates.py: choices in order --> x64_msvc/batch.py (namespaces, one
 | `core/synthesis/` | `candidates.py` the program, the choices, the checks; `search.py` the stages and the states |
 | `x64_msvc/{cl,coff,batch}.py` | the compiler as a process, objects, batches and distances (they rank, they decide nothing) |
 | `skyrim/{pack,verify}.py` | synthetic packs; upstream's comparator |
+| `core/emitter/member.py` | a tree as a member function of a declared class: `this`, members by their declared names and types (D-034) |
+| `x64_msvc/declarations.py` | what a header declares, as the pinned compiler reads it: layout report and a probe of constants (D-035) |
+| `skyrim/solve.py` | the protocol's `solve` on the real target: one packet in the slot's worktree, compiled next to the unit's header, verified by upstream's comparator |
 
 The calling convention reaches `core` as data (`abi.SOURCE`). `BYTE_MATCHED` is given only when upstream's comparator passed the exact unit.
-The protocol's `solve` does not use any of this yet (Phase 6).
 
 ## Determinism contract (summary of section 21)
 

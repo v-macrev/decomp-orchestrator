@@ -235,16 +235,63 @@ as unsigned, the largest float, and a shift whose left literal had the wrong typ
 * The corpus is 34 small functions by one author, in the same C++ dialect.
 * A constant the object holds itself is bound where the target's own field leads, when the bytes there are equal. The harness checks that with the linker's map.
 
+## Phase 6: the deterministic tier in the orchestrator — status 2026-11-25
+
+**Done**
+
+| Part | State |
+|---|---|
+| Flows | `FlowNodeData.kind` (`llm` by default, so saved flows load) and a `recon` block; presets `deterministic-only` and `deterministic-first`; worker kind, engine settings and a template in the flow builder |
+| Scheduling | `engineAttempt` after prepare and late classification; the shared tail `answerTail` serves the model path, the free attempt and the engine (R-2); D-009 and D-036 |
+| Process | the request in a private file, `serve --request FILE` (R-1); the engine's own Python and module path from `config/orchestrator.json` `recon` (R-7) |
+| Persistence | migration 8, `recon_results` (codes and counts); a copy of the live database migrates 7 to 8 and its flow, 2 runs, 266 tasks and 1,702 attempts load |
+| Engine `solve` | a function `Class::Method` of an existing unit: member form (D-034), declarations read by the compiler (D-035), compiled next to the unit's header, verified by upstream's comparator; edits only for a wholly solved packet |
+| Prepare | `sr start` that refuses because several existing units fit is run again with the unit discovery named (`--unit`), only on that refusal |
+
+**Measured on the real target** (counts, codes, and RVAs and names from upstream's public data only):
+
+| What | Result |
+|---|---|
+| Offered by `sr next` (offline) | 12,720 startable functions; 2,375 of at most 128 bytes in an existing unit |
+| Reach over those (nothing compiled) | 140 candidates; refused: `CALLEE_SIGNATURE_UNKNOWN` 1,657, `INDIRECT_CALL` 340, `LOCAL_IN_MEMORY` 25, others under 20 each |
+| `solve` on the 93 without a callee or global | **2 `BYTE_MATCHED`**; unsolved: `MEMBER_NOT_DECLARED` 39, `CLASS_NOT_DECLARED` 34, `NO_MATCH` 18 |
+| Cost | 4 to 9 s per function |
+
+**Through the server** (a separate instance with its own database, slots and port; the checkout and its `.local` shared; no
+accounts, zero provider calls, no exposure consent):
+
+* `0xcd6bc0 BSNullImplGameSound::Functioncd6bc0`: engine `solved`, Gate Keeper **pass** (unchanged), staged on a local
+  branch and re-verified there, and the batch's `sr submit --dry-run` **clean**. Its local claim is unpublished. Not submitted:
+  the user submits. The base unit held a draft body of it that did not match; the engine did not read it.
+* `0x6a2000 Character::Function6a2000`: first refused by `sr start` (several units fit; fixed above). Then engine `solved`
+  and the Gate Keeper's compare passed every byte, but preflight blocked the packet because the unit's header was already over
+  upstream's file-size cap. Not an engine disagreement; the claim was released.
+
+**Tests**: server 371 pass, typecheck clean, among them a deterministic-only run that asserts no account, no provider call and
+no consent, and what the tier sends. Engine: 470 pass on Linux, none skipped; 469 pass on Windows, where the compiler test of
+declarations skips (a Windows compiler cannot read the standard headers over a WSL path).
+
+**Gate: met.** One eligible, previously unreconstructed target function was reconstructed automatically, reached `passed`
+through the unchanged Gate Keeper, and its batch dry-runs clean. Then stop: the user submits.
+
+**Limits**
+
+* Most offered functions call others (`CALLEE_SIGNATURE_UNKNOWN`) or read members of a second class (`CLASS_NOT_DECLARED`):
+  declarations of callees and of other classes are the next capability, by count.
+* Members inside the skeleton's `unknownXX` byte arrays are not carved into typed members (`MEMBER_NOT_DECLARED`).
+* New units: the engine reads the skeleton the tooling wrote, but the trial covered existing units only.
+* D-006, the provenance wording of engine output, is still the user's decision; the default is in `skyrim/solve.py`.
+
 ## Items found by the audit that block or shape later phases
 
 | Id | Item | Needed by |
 |---|---|---|
-| R-1 | Request via a file in the task directory (not stdin) so the WSL cancel handshake runs; optional streaming runner for live progress | Phase 6 |
-| R-2 | Factor the shared tail of `processTask` (`engine.ts:3031-3150`) into one function | Phase 6 |
+| R-1 | ~~Request via a file, not stdin, so the WSL cancel handshake runs~~ done in Phase 6 (a private file under the engine's data directory); a streaming runner for live progress is still open | - |
+| R-2 | ~~Factor the shared tail of `processTask` into one function~~ done, `answerTail` | - |
 | R-3 | ~~Comparator-accepted build record from a scratch build, and the cost of the local compare~~ done, measured above | - |
-| R-4 | Provenance wording for engine output (D-006), a decision for the user | Phase 6 |
+| R-4 | Provenance wording for engine output (D-006), a decision for the user; the default is in use | open |
 | R-5 | ~~Hashed, locked venv~~ done, `z3` included (D-021) | - |
-| R-7 | The server runs the engine with the **venv's** Python for any command that decodes (`process.ts` defaults to `python3`); a config value for it | Phase 6 |
+| R-7 | ~~The server runs the engine with the venv's Python~~ done: `recon.python` and `recon.pythonPath` | - |
 | R-6 | ~~Comparator reason-code list read from source into a mapping test~~ done in Phase 5 | - |
 
 ## Next increments, in order
@@ -252,7 +299,7 @@ as unsigned, the largest float, and a shift whose left literal had the wrong typ
 1. ~~Phase 2, binary analysis~~ (done above).
 2. ~~Phase 3, integer lifting and analysis~~ (done above). ~~Phase 4, the IR~~ (done above).
 3. ~~Phase 5, the vertical slice on synthetic functions~~ (done above).
-4. **Phase 6**, the deterministic tier in the orchestrator, ending at one unreconstructed target function
-   that reaches packet `passed` through the unchanged Gate Keeper. Then stop: the user submits.
+4. ~~Phase 6, the deterministic tier in the orchestrator~~ (done above; the batch waits for the user to submit).
+5. By the failure counts: declarations of callees and of other classes, then typed members carved from byte arrays.
 
 The next capability is always chosen by the coverage and failure reports, not by interest.

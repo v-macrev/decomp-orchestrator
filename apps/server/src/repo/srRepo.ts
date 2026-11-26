@@ -425,7 +425,15 @@ export class SrRepo implements RepoAdapter {
           }
         }
         opts.signal.throwIfAborted();
-        const started = await this.sr(cwd, ['start', ...rvas, '--no-branch', '--drafted-by', opts.draftedBy, '--model', opts.model], { timeoutMs: 600_000, signal: opts.signal });
+        const start = ['start', ...rvas, '--no-branch', '--drafted-by', opts.draftedBy, '--model', opts.model];
+        let started = await this.sr(cwd, start, { timeoutMs: 600_000, signal: opts.signal });
+        // Several existing units fit and discovery named one of them: start again in that one. Only on this
+        // refusal, so tooling that has no `--unit` is never given it.
+        const refusal = String(started.json?.error ?? (started.run.stderr || started.run.stdout));
+        if (started.run.code !== 0 && /several units fit/.test(refusal) && refusal.split('\n').map((l) => l.trim()).includes(task.unit)) {
+          opts.signal.throwIfAborted();
+          started = await this.sr(cwd, [...start, '--unit', task.unit], { timeoutMs: 600_000, signal: opts.signal });
+        }
         if (started.run.code !== 0 || !started.json?.task) {
           throw new InfraError(`sr start failed (exit ${started.run.code}): ${started.json?.error ?? (started.run.stderr || started.run.stdout).slice(0, 300)}`);
         }

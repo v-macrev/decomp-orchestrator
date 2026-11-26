@@ -20,5 +20,11 @@
     "maxInfraFailures": 5,
     "providerTimeoutMs": 900000,
     "maxOutputTokens": 32000
+  },
+  "recon": {
+    "enabled": false,
+    "python": "python3",
+    "pythonPath": ["D:/Repositories/skyrim_decomp/.local/orchestrator/recon/venv/Lib/site-packages"],
+    "timeoutSec": 900
   }
 }

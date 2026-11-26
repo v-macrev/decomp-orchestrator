@@ -60,6 +60,17 @@ class Toolchain:
     def digest(self) -> str:
         return hashlib.sha256(self.binary("cl").read_bytes()).hexdigest()
 
+    def include_dirs(self) -> list[Path]:
+        """The toolset's headers, then the SDK's, in the order the checkout's wrappers give them."""
+        out = [self.root / "include"]
+        base = self.root.parents[3]            # <base>/VC/Tools/MSVC/<version>
+        for kits in (base / "Windows Kits/10/Include", base / "kits/10/include", base.parent / "kits/10/include"):
+            if kits.is_dir():
+                for sdk in sorted(kits.iterdir())[-1:]:
+                    out += [sdk / d for d in ("shared", "ucrt", "um", "winrt")]
+                break
+        return out
+
     def run(self, name: str, args: list[str], cwd: Path, timeout: float = 120.0) -> tuple[int, str]:
         """Exit code and output. The compiler sees the working directory and nothing of this machine's own settings."""
         exe = str(self.binary(name) if self.wrappers is None else self.wrappers / name)
@@ -68,6 +79,9 @@ class Toolchain:
         if sys.platform == "win32":
             env["VSLANG"] = "1033"
             env["PATH"] = os.path.join(env.get("SYSTEMROOT") or env.get("SystemRoot", r"C:\Windows"), "System32")
+        if self.wrappers is None:
+            # The wrappers set the toolset's and the SDK's headers themselves; the binaries run directly need them said.
+            env["INCLUDE"] = os.pathsep.join(str(p) for p in self.include_dirs())
         try:
             p = subprocess.run([exe, *args], cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
         except subprocess.TimeoutExpired:

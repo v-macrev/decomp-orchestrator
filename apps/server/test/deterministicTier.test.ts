@@ -3,7 +3,7 @@
 // unchanged Gate Keeper; a run of engine tiers only needs no account, makes no provider call and needs no
 // exposure consent; what the engine does not solve moves on with its reason codes; a failing engine process
 // is an infrastructure failure.
-import { existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path, { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -16,6 +16,7 @@ import { ProviderRegistry } from '../src/providers/registry.js';
 import { ReconRunner } from '../src/recon/runner.js';
 import { LocalHost } from '../src/repo/host.js';
 import { SimRepo } from '../src/repo/simRepo.js';
+import type { RepoAdapter } from '../src/repo/types.js';
 import { EventBus } from '../src/telemetry/events.js';
 import { mockAccount } from './helpers.js';
 
@@ -154,6 +155,28 @@ describe('deterministic tier', () => {
     expect(infra.n).toBeGreaterThan(0);
     const routed = s.store.db.prepare(`SELECT COUNT(*) n FROM verdicts v JOIN attempts a ON a.id = v.attempt_id WHERE a.run_id = ? AND a.tier = 0 AND v.route = 'escalate' AND v.findings_json LIKE '%RECON_INFRA%'`).get(run.id) as { n: number };
     expect(routed.n).toBe(s.store.listTasks(run.id).length);
+    s.pool.close();
+    s.engine.close();
+  }, 60_000);
+
+  it('sends the engine the packet, the slot and its own model name, never file contents, packs or candidates', async () => {
+    const s = setup();
+    const data = tmp();
+    (s.repo as SimRepo & Pick<RepoAdapter, 'engineContext'>).engineContext = (slot: number) => ({ worktree: `/wt/slot-${slot}`, checkout: '/checkout', dataDir: data });
+    const flow = deterministicFirstFlow({ withModels: false });
+    const run = s.engine.createRun('det-sent', { flowId: flow.id, selection: { source: 'synthetic', count: 10, seed: 4 }, packetMaxFunctions: 1 }, flow);
+    await s.engine.start(run.id);
+    await s.engine.waitFor(run.id);
+    const sent = readFileSync(join(data, 'requests.log'), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(sent.length).toBe(s.store.listTasks(run.id).length);
+    for (const q of sent) {
+      expect(Object.keys(q).sort()).toEqual(expect.arrayContaining(['checkout', 'command', 'dataDir', 'modelName', 'packet', 'protocol', 'requestId', 'worktree']));
+      for (const k of Object.keys(q)) expect(['budgets', 'checkout', 'command', 'dataDir', 'modelName', 'options', 'packet', 'protocol', 'requestId', 'worktree']).toContain(k);
+      expect(q.modelName).toBe('recon-engine-9.9.9');
+      expect(String(q.worktree)).toMatch(/^\/wt\/slot-\d+$/);
+      expect(Object.keys(q.packet as object).sort()).toEqual(['allowedPaths', 'functions', 'unit']);
+      for (const v of Object.values((q.options ?? {}) as Record<string, unknown>)) expect(typeof v === 'string' && v.length > 40).toBe(false);
+    }
     s.pool.close();
     s.engine.close();
   }, 60_000);

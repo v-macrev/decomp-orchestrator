@@ -36,10 +36,21 @@ def handle(req: dict, out: TextIO) -> dict:
     input_digest = digest({**base, "packet": packet, "model": req.get("modelName", ""), "budgets": req.get("budgets", {}),
                            "options": req.get("options", {}), "carried": [[c["path"], digest(c["content"])] for c in req.get("carriedUnitState", [])]})
     if command == "solve":
+        from recon.adapters.skyrim import solve as S
+
         _emit(out, progress("analyze", {"functions": len(packet["functions"])}))
-        # Phase 1 has no reconstruction yet: say so per function, produce no edits (docs/recon/IMPLEMENTATION_ROADMAP.md).
-        fns = [function_result(f["rva"], "unsupported", "ENGINE_NOT_IMPLEMENTED", counters={"candidates": 0, "compiles": 0}) for f in packet["functions"]]
-        return result(req["requestId"], command, input_digest, functions=fns)
+        outcomes, header_rel, text = S.solve(req, lambda stage, counters: _emit(out, progress(stage, counters)))
+        fns = []
+        for f, o in zip(packet["functions"], outcomes):
+            solved = o.status == "solved"
+            fns.append(function_result(f["rva"], o.status, o.reason, counters=o.counters, rule_trail=o.trail,
+                                       origin_labels=["members and class as the unit header declares them"] if solved else [],
+                                       evidence=[{"kind": "comparator", "evidence": "PROVEN", "count": 1}] if solved else []))
+        cpp_rel = next((p for p in packet["allowedPaths"] if p.endswith(".cpp")), packet["unit"])
+        eds = S.edits(outcomes, header_rel, cpp_rel, text)
+        if not eds:
+            return result(req["requestId"], command, input_digest, functions=fns)
+        return result(req["requestId"], command, input_digest, functions=fns, edits=eds, code_origin=S.CODE_ORIGIN, adapted_bodies=S.ADAPTED)
     return result(req["requestId"], command, input_digest, report={"implemented": False})
 
 

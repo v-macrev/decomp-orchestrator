@@ -1,0 +1,281 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+"""The protocol's `solve` on the real target: one packet of one unit, in the slot's worktree.
+
+For each function: the candidates of its code (Phase 5), each written as a member of the class the unit's header declares
+(`core/emitter/member.py`, the class read by the pinned compiler), compiled next to that header with the unit's recipe,
+ranked against the target and verified by upstream's comparator. A function is solved only when the comparator passed it.
+
+What is read: the image and upstream's inventory and tools at the pinned base, the recipe, and the unit's header as the
+worktree has it after the repository's own tooling prepared the packet (the base revision only, when the server says a
+model may have written in the unit). Never a pack, a listing, a decompiler's output, the unit's source, a stored candidate
+or any text a model wrote.
+
+Edits are returned only when every function of the packet is solved: a unit with a function left as the skeleton's
+placeholder does not compile, so a partial answer would only fail at the Gate Keeper.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import re
+import shutil
+import subprocess
+import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable
+
+from recon.adapters.skyrim.image import PinnedImage, locate_image
+from recon.adapters.skyrim.inventory import load_inventory
+from recon.adapters.skyrim.pack import Pack
+from recon.adapters.skyrim.verify import PASS, Verifier
+from recon.adapters.x64_msvc import coff
+from recon.adapters.x64_msvc import declarations as D
+from recon.adapters.x64_msvc.batch import distance
+from recon.adapters.x64_msvc.cl import CompilerFailed, Toolchain, ToolchainUnavailable, diagnostics, discover
+from recon.adapters.x64_msvc.validate import load_validated
+from recon.core.emitter.member import Declared, MemberUnit, member_form
+from recon.core.inference.signature import NotReconstructed
+from recon.core.synthesis import search
+from recon.core.synthesis.candidates import Candidate
+
+DEFAULT_RECIPE = "reconstruction/recipes/msvc-19.16.27054-o2.json"
+CODE_ORIGIN = ("produced by a deterministic reconstruction tool from the compared function's behaviour in the pinned image "
+               "and the declarations of its class in this unit's header; no model wrote it")
+ADAPTED = "none"
+PLAIN = re.compile(r"^([A-Za-z_]\w*)::([A-Za-z_]\w*)$")
+
+
+@dataclass
+class Outcome:
+    rva: int
+    status: str                    # solved | unsolved | unsupported | blocked
+    reason: str
+    counters: dict[str, int] = field(default_factory=dict)
+    trail: list[str] = field(default_factory=list)
+    definition: str | None = None
+    declaration: str | None = None
+    name: str | None = None
+
+
+class UnitWorkshop:
+    """Compiles, ranks and verifies the member forms of one function's candidates next to the unit's header."""
+
+    def __init__(self, ctx: "Context", rva: int, cls: str, method: str) -> None:
+        self.ctx, self.rva, self.cls, self.method = ctx, rva, cls, method
+        self.size = ctx.pack.size[rva]
+        self.target = ctx.pack.image.read(rva, self.size)
+        self.declared = Declared(cls, method, ctx.facts.members)
+        self.forms: dict[str, MemberUnit | str] = {}
+        self.built: dict[str, tuple[coff.Function, bytes, str] | None] = {}
+        self.compiles = 0
+        self.chosen: MemberUnit | None = None
+
+    def form(self, c: Candidate) -> MemberUnit | str:
+        if c.digest not in self.forms:
+            try:
+                self.forms[c.digest] = member_form(c.body, c.types, self.ctx.pack.image.image_base, self.rva, self.declared)
+            except NotReconstructed as e:
+                self.forms[c.digest] = e.code
+        return self.forms[c.digest]
+
+    def build(self, c: Candidate) -> tuple[coff.Function, bytes, str] | None | str:
+        f = self.form(c)
+        if isinstance(f, str):
+            return f
+        if c.digest in self.built:
+            return self.built[c.digest]
+        header, _old = D.with_declaration(self.ctx.header_text, self.cls, self.method, f.declaration)
+        source = f'#include "{self.ctx.temp_header.name}"\n\n{f.definition}'
+        self.compiles += 1
+        got = self.ctx.compile(header, source)
+        if isinstance(got, list):
+            self.built[c.digest] = None
+            return ",".join(got[:3]) or "DOES_NOT_COMPILE"
+        fns = [x for x in got[0].functions().values() if coff.plain(x.symbol) == self.method]
+        self.built[c.digest] = (fns[0], got[1], source) if len(fns) == 1 else None
+        return self.built[c.digest]
+
+    def resolve(self, own: str):
+        def r(rel: coff.Reloc) -> int | None:
+            return self.rva if rel.symbol == own else None
+        return r
+
+    def judge(self, candidates: list[Candidate]) -> list[search.Judged]:
+        out = []
+        for c in candidates:
+            b = self.build(c)
+            if b is None or isinstance(b, str):
+                out.append(search.Judged(None, 0, (b,) if isinstance(b, str) else ("DOES_NOT_COMPILE",)))
+                continue
+            fn, _obj, _src = b
+            out.append(search.Judged(fn.key(coff.plain), distance(fn, self.target, self.rva, self.resolve(fn.symbol)).total))
+        return out
+
+    def verify(self, c: Candidate) -> tuple[bool, str]:
+        b = self.build(c)
+        if b is None or isinstance(b, str):
+            return False, "EXACT_UNIT_DOES_NOT_COMPILE"
+        fn, obj, src = b
+        symbols = {r.symbol: (self.rva, self.size) for r in fn.relocs if r.symbol == fn.symbol}
+        report = self.ctx.verifier.verify(self.rva, self.size, fn.symbol, src.encode("utf-8"), obj, symbols)
+        ok = report["result"] == "pass" and report["reason"] == PASS
+        if ok:
+            self.chosen = self.form(c)  # type: ignore[assignment]
+        return ok, str(report["reason"])
+
+
+class Context:
+    """What every function of one request shares: the image, the program, the compiler, the comparator, the header."""
+
+    def __init__(self, worktree: Path, checkout: Path, data: Path, header_rel: str, header_text: str, recipe_rel: str) -> None:
+        self.worktree, self.data = worktree, data
+        recipe_bytes = (worktree / recipe_rel).read_bytes()
+        recipe = json.loads(recipe_bytes)
+        self.flags = [f for f in recipe["flags"] if f != "/c"]
+        self.tool: Toolchain = discover(checkout, recipe["compiler"]["binary_sha256"])
+        image = PinnedImage(locate_image(checkout), worktree)
+        inv = load_inventory(worktree)
+        validated = load_validated()
+        if not validated:
+            raise NotReconstructed("LIFT_COVERAGE_MISSING")
+        self.pack = Pack("pinned", image, {t.rva: t.size for t in inv.targets}, validated)
+        self.program = self.pack.program()
+        self.verifier = Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes)
+        self.header_rel, self.header_text = header_rel, header_text
+        tag = hashlib.sha256(f"{header_rel}\0{time.monotonic_ns()}".encode()).hexdigest()[:10]
+        self.temp_header = worktree / Path(header_rel).parent / f".recon-{tag}.h"
+        self.temp_source = self.temp_header.with_suffix(".cpp")
+        self.work = data / "work" / tag
+        self.work.mkdir(parents=True, exist_ok=True)
+        self.temp_header.write_text(header_text, encoding="utf-8", newline="\n")
+        self.facts: D.ClassFacts | None = None
+
+    def compile(self, header: str, source: str) -> tuple[coff.Object, bytes] | list[str]:
+        """The object of `source` compiled with `header` as the unit's header, or the compiler's error codes."""
+        self.temp_header.write_text(header, encoding="utf-8", newline="\n")
+        self.temp_source.write_text(source, encoding="utf-8", newline="\n")
+        obj = self.work / "candidate.obj"
+        obj.unlink(missing_ok=True)
+        try:
+            code, out = self.tool.run("cl", [*self.flags, "/c", f"/Fo{obj}", str(self.temp_source.relative_to(self.worktree))], self.worktree)
+        except CompilerFailed:
+            return ["COMPILER_FAILED"]
+        if code != 0 or not obj.is_file():
+            return sorted({d.code for d in diagnostics(out)}) or ["DOES_NOT_COMPILE"]
+        blob = obj.read_bytes()
+        return coff.Object(blob), blob
+
+    def close(self) -> None:
+        for p in (self.temp_header, self.temp_source):
+            p.unlink(missing_ok=True)
+        shutil.rmtree(self.work, ignore_errors=True)
+
+
+def base_text(worktree: Path, rel: str) -> str | None:
+    """The file as the worktree's base revision has it, or None when the base has no such file."""
+    p = subprocess.run(["git", "-C", str(worktree), "show", f"HEAD:{rel}"], capture_output=True, timeout=60)
+    return p.stdout.decode("utf-8") if p.returncode == 0 else None
+
+
+def recipe_of(worktree: Path, cpp_rel: str) -> str:
+    """The unit's recipe: its `// Recipe:` line in the base revision, else the project's default."""
+    text = base_text(worktree, cpp_rel) or ""
+    m = re.search(r"^// Recipe: (reconstruction/recipes/[\w.-]+\.json)\s*$", text, re.M)
+    return m.group(1) if m else DEFAULT_RECIPE
+
+
+def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[list[Outcome], str, str]:
+    """The outcome of each function of the packet, the header (relative path) the declarations live in, and its text."""
+    packet = req["packet"]
+    fns = packet["functions"]
+    options = req.get("options", {})
+    blocked = lambda code: [Outcome(int(f["rva"], 16), "blocked", code) for f in fns]  # noqa: E731
+    if not req.get("worktree") or not req.get("checkout") or not req.get("dataDir"):
+        return blocked("NO_WORKTREE"), "", ""
+    worktree, checkout, data = Path(req["worktree"]), Path(req["checkout"]), Path(req["dataDir"])
+    cpp_rel = next((p for p in packet["allowedPaths"] if p.endswith(".cpp")), packet["unit"])
+    header_rel = next((p for p in packet["allowedPaths"] if p.endswith(".h")), cpp_rel[:-4] + ".h")
+    # The header as the base revision has it plus what the repository's own tooling wrote when the packet was
+    # prepared: the text the edits apply to. When a model may have written in the unit, only the base revision.
+    if options.get("modelTextInUnit"):
+        text = base_text(worktree, header_rel)
+    else:
+        text = (worktree / header_rel).read_text(encoding="utf-8") if (worktree / header_rel).is_file() else None
+    if text is None:
+        return blocked("UNIT_HEADER_NOT_READABLE"), header_rel, ""
+    names = [PLAIN.match(f.get("name") or "") for f in fns]
+    classes = {m.group(1) for m in names if m}
+    limit = options.get("maxFunctionBytes")
+    try:
+        ctx = Context(worktree, checkout, data, header_rel, text, recipe_of(worktree, cpp_rel))
+    except (ToolchainUnavailable, FileNotFoundError) as e:
+        return blocked("TOOLCHAIN_UNAVAILABLE" if isinstance(e, ToolchainUnavailable) else "INPUT_MISSING"), header_rel, text
+    except NotReconstructed as e:
+        return blocked(e.code), header_rel, text
+    out: list[Outcome] = []
+    try:
+        facts: D.ClassFacts | None = None
+        if len(classes) == 1:
+            try:
+                facts = D.class_facts(ctx.tool, ctx.flags, worktree, str(ctx.temp_header.relative_to(worktree)), next(iter(classes)), ctx.work)
+            except NotReconstructed as e:
+                return [Outcome(int(f["rva"], 16), "blocked", e.code) for f in fns], header_rel, text
+            if facts.virtual_bases:
+                return blocked("VIRTUAL_BASES"), header_rel, text
+        ctx.facts = facts
+        for f, m in zip(fns, names):
+            rva = int(f["rva"], 16)
+            if m is None or facts is None:
+                out.append(Outcome(rva, "unsupported", "NAME_NOT_PLAIN" if m is None else "SEVERAL_CLASSES"))
+                continue
+            if rva not in ctx.pack.size:
+                out.append(Outcome(rva, "unsupported", "NOT_IN_INVENTORY"))
+                continue
+            if limit and ctx.pack.size[rva] > int(limit):
+                out.append(Outcome(rva, "unsupported", "SIZE_LIMIT"))
+                continue
+            cls, method = m.group(1), m.group(2)
+            shop = UnitWorkshop(ctx, rva, cls, method)
+            t0 = time.monotonic()
+            try:
+                r = search.reconstruct(ctx.program, ctx.pack.image.image_base + rva, shop)
+            except NotReconstructed as e:
+                out.append(Outcome(rva, "unsupported", e.code))
+                continue
+            counters = {k: int(v) for k, v in r.counters.items()} | {"compiles": shop.compiles, "ms": int(1000 * (time.monotonic() - t0))}
+            progress("function", {"done": len(out) + 1, "of": len(fns), "compiles": shop.compiles})
+            refused = sorted({x for x in shop.forms.values() if isinstance(x, str)})
+            if r.state == search.BYTE_MATCHED and shop.chosen is not None:
+                trail = ["candidates@1", f"member-form-{shop.chosen.form.replace('_', '-')}@1", "comparator@1"]
+                out.append(Outcome(rva, "solved", "BYTE_MATCHED", counters, trail, shop.chosen.definition, shop.chosen.declaration, f"{cls}::{method}"))
+            elif r.state == search.NONE:
+                out.append(Outcome(rva, "unsupported", r.reason or "NO_CANDIDATE", counters))
+            elif r.state == search.SEMANTICALLY_VALID:
+                out.append(Outcome(rva, "unsolved", (refused[0] if refused and r.reason == "DOES_NOT_COMPILE" else r.reason) or "DOES_NOT_COMPILE", counters))
+            else:
+                out.append(Outcome(rva, "unsolved", r.reason or "NO_MATCH", counters))
+    finally:
+        ctx.close()
+    return out, header_rel, text
+
+
+def edits(outcomes: list[Outcome], header_rel: str, cpp_rel: str, text: str) -> list[dict]:
+    """The packet's edits when every function is solved, else none."""
+    if not outcomes or any(o.status != "solved" for o in outcomes):
+        return []
+    replace, members = [], []
+    for o in outcomes:
+        cls, method = o.name.split("::")  # type: ignore[union-attr]
+        _new, old = D.with_declaration(text, cls, method, o.declaration)  # type: ignore[arg-type]
+        if old is None:
+            members.append({"class": cls, "code": f"{o.declaration};"})
+        else:
+            replace.append({"find": old.text, "with": f"{o.declaration};"})
+    out = [{"path": cpp_rel, "functions": [{"name": o.name, "code": o.definition} for o in outcomes]}]
+    if replace or members:
+        out.append({"path": header_rel, **({"replace": replace} if replace else {}), **({"members": members} if members else {}), "functions": []})
+    return out
+
+
+__all__ = ["ADAPTED", "CODE_ORIGIN", "Context", "Outcome", "UnitWorkshop", "edits", "solve"]

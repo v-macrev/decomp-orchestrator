@@ -76,6 +76,9 @@ class Emitter:
         self.used: set[int] = set()
 
     # -- names ----------------------------------------------------------------------------------
+    def type_name(self, t: ty.CType) -> str:
+        return type_name(t)
+
     def local(self, v: A.Local) -> str:
         return self.locals[v.id]
 
@@ -140,7 +143,7 @@ class Emitter:
         if isinstance(x, A.Cast):
             if x.implicit:
                 return self._e(x.arg)
-            return f"static_cast<{type_name(x.type)}>({self.e(x.arg)})", POSTFIX
+            return f"static_cast<{self.type_name(x.type)}>({self.e(x.arg)})", POSTFIX
         if isinstance(x, A.Field):
             return f"{self.e(x.base, POSTFIX)}->{self.member(x.offset)}", POSTFIX
         if isinstance(x, A.Index):
@@ -196,7 +199,7 @@ class Emitter:
             if isinstance(s, A.Assign):
                 out.append(pad + self.assign(s) + ";")
             elif isinstance(s, A.Declare):
-                head = f"{type_name(s.var.type)} {self.local(s.var)}"
+                head = f"{self.type_name(s.var.type)} {self.local(s.var)}"
                 out.append(pad + (f"{head} = {self.e(s.value, ASSIGN)};" if s.value is not None else f"{head};"))
             elif isinstance(s, A.Do):
                 out.append(f"{pad}{self.e(s.value)};")

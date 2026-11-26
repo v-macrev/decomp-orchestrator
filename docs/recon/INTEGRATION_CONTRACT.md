@@ -6,7 +6,7 @@ validate strictly and have tests against the other's behaviour.
 
 ## Protocol, version 1
 
-One request line on stdin; any number of `progress` lines then exactly one `result` line on stdout; exit 0.
+One request line, from the file `--request` names (the server's way) or on stdin; any number of `progress` lines then exactly one `result` line on stdout; exit 0.
 Nothing else on stdout. Every object rejects unknown fields; every string is bounded.
 
 **Request** (`EngineRequest`):
@@ -59,30 +59,34 @@ The server returns an `EngineRun`; every non-`ok` kind is an *infrastructure* fa
 One attempt of a deterministic tier is one complete budgeted search; `maxAttempts` defaults to 1 for such a
 node because the same inputs give the same answer.
 
-## The deterministic tier in the orchestrator (Phase 6, not yet implemented)
+## The deterministic tier in the orchestrator (Phase 6, implemented)
 
-* `FlowNodeData` gains `kind: 'llm' | 'deterministic'` (default `'llm'`, so every saved flow loads) and an
-  optional `recon` block (search budgets, compile jobs, size limit). Account-pool fields are not required for
-  a deterministic node.
-* `processTask` branches after prepare and late classification (`engine.ts:2831-2903`) and before
-  `contextV2.build` (`:2928`): no context bundle, `pool.acquire`, `providers.complete`, skill selection,
-  prefix pre-warm or response parsing.
-* The shared tail (`engine.ts:3031-3150`) is **factored into one function** that the LLM path, the
-  free-attempt path and the engine path call. It is not copied.
-* `modelHint` (`engine.ts:2853`) is `recon-engine-<version>` for such a node, so claims never name the
-  private config's default model.
-* Scheduling decisions for a deterministic tier are in [TECHNICAL_DECISIONS.md](TECHNICAL_DECISIONS.md), D-009.
-* A run with only deterministic tiers must start and finish with no accounts, make zero provider calls and
-  need no `exposureConsent`. A test asserts all three.
+* `FlowNodeData.kind: 'llm' | 'deterministic'` (default `'llm'`, so every saved flow loads) and an optional
+  `recon` block (`candidates`, `compiles`, `timeoutSec`, `maxFunctionBytes`). `deterministicFirstFlow()` in
+  `packages/core/src/flow.ts` gives the two presets: engine only (`deterministic-only`), and engine first with
+  the model ladder behind it (`deterministic-first`). The flow builder has a worker-kind field and a template.
+* `processTask` branches after prepare and late classification into `engineAttempt`: no context bundle,
+  `pool.acquire`, `providers.complete`, skill selection, prefix pre-warm or response parsing. Its answer goes
+  through `answerTail`, the shared tail the model path and the free-attempt path also call.
+* `modelHint` and the attempt's `model` are `recon-engine-<version>`; the account is null and tokens and cost are 0.
+* The server sends: the packet (RVAs, sizes, community names, unit, allowed paths), the slot's worktree, the
+  checkout, `dataDir` (`<localDir>/orchestrator/recon`), `modelName`, budgets, and options. `options.modelTextInUnit`
+  is set when files of earlier packets of the unit are carried; the engine then reads the unit's header only at the
+  base revision. Never sent: pack directories, carried file contents, stored candidates, `task.fix`.
+* The request goes in a private file (`<dataDir>/requests/<id>.json`, `serve --request FILE`), removed afterwards,
+  so stdin stays free for the cancel handshake (R-1).
+* Configuration: `recon` in `config/orchestrator.json` (`enabled`, `python`, `pythonPath`, `engineDir`,
+  `timeoutSec`). A flow with a deterministic tier is refused at run creation when no engine is configured.
+* Scheduling for a deterministic tier: D-009 and D-036. A run with only deterministic tiers starts and finishes
+  with no accounts, makes zero provider calls and needs no `exposureConsent`; `apps/server/test/deterministicTier.test.ts`
+  asserts all three.
 
-## Additive persistence (Phase 6)
+## Additive persistence (Phase 6, implemented)
 
-New tables, appended to `MIGRATIONS` (`db/database.ts:12`), for example `recon_functions` and `recon_results`:
-function id, RVA, size, executable digest, inventory revision, engine revision, analysis, IR and candidate
-digests, recipe and dependency digests, verification codes and counts, attempt count, failure classification
-and "what would have to change", checkpoint reference (a private file), labels and rule-trail ids,
-timestamps. `TaskState` is not extended. Every saved flow, run, task and attempt must still load, and a copy
-of the live database must migrate; the live `data/real.db` is read-only for development.
+Migration 8 appends `recon_results`: run, task, attempt, RVA, size, engine and rule-store versions, input digest,
+status, reason code, counters, rule trail, origin labels, evidence summary, infrastructure kind, duration. Codes
+and counts only. `TaskState` is not extended. A copy of the live database migrates 7 to 8 and every saved flow,
+run, task and attempt loads; the live `data/real.db` is read-only for development.
 
 ## Limits found in the existing host layer
 

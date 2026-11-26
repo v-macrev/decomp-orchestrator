@@ -118,12 +118,12 @@ describe.skipIf(!wslUp)('real engine in WSL (needs_checkout: WSL distribution Ub
   const host = new WslHost('Ubuntu');
   const engineDir = defaultEngineDir(host);
 
-  it('answers a solve request, unsupported until reconstruction exists, with no edits', async () => {
+  it('answers a solve request without a worktree as blocked, with no edits', async () => {
     const r = await runEngine(request('ignored', { options: undefined }), { host, engineDir, timeoutMs: 60_000 });
     expect(r.ok, JSON.stringify(r)).toBe(true);
     if (!r.ok) return;
     expect(r.result.engineVersion).toBe('0.1.0');
-    expect(r.result.functions).toEqual([{ rva: '0x10', status: 'unsupported', reasonCode: 'ENGINE_NOT_IMPLEMENTED', counters: { candidates: 0, compiles: 0 }, ruleTrail: [], originLabels: [], evidenceSummary: [] }]);
+    expect(r.result.functions).toEqual([{ rva: '0x10', status: 'blocked', reasonCode: 'NO_WORKTREE', counters: {}, ruleTrail: [], originLabels: [], evidenceSummary: [] }]);
     expect(r.result.edits).toEqual([]);
   });
 

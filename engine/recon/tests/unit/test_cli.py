@@ -33,7 +33,7 @@ def test_solve_round_trip_is_one_result_after_progress():
     res = msgs[-1]
     assert res["requestId"] == "t1" and res["command"] == "solve" and res["edits"] == []
     assert [(f["rva"], f["status"], f["reasonCode"]) for f in res["functions"]] == [
-        ("0x10", "unsupported", "ENGINE_NOT_IMPLEMENTED"), ("0x80", "unsupported", "ENGINE_NOT_IMPLEMENTED")]
+        ("0x10", "blocked", "NO_WORKTREE"), ("0x80", "blocked", "NO_WORKTREE")]
     assert res["inputDigest"].startswith("sha256:")
 
 

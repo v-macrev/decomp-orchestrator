@@ -186,6 +186,19 @@ server binds to `127.0.0.1` by default and refuses any other address without a t
 `ORCH_ALLOW_UNAUTHENTICATED=1` says the network is trusted. Without a token it also refuses requests
 sent by other websites open in the browser (`Host`, `Origin` and `Sec-Fetch-Site` are checked).
 
+## Deterministic worker tier (reconstruction engine)
+
+A worker node of kind `deterministic` runs `engine/recon`, a reconstruction engine that uses no model: it writes a
+function's body from the function's behaviour in the pinned image and the declarations of its class in the unit's
+header, and the compiler and upstream's comparator decide. Its answers go through the same Gate Keeper as any
+other. Such a tier needs no account, costs nothing and makes one attempt per packet; what it does not solve moves
+to the next tier with a reason code. The flow builder has an **Engine-first template**; an engine-only flow runs
+with no accounts at all.
+
+Turn it on in `config/orchestrator.json`: `"recon": { "enabled": true, "python": "python3", "pythonPath":
+["<the engine venv's site-packages>"] }` (the venv: `engine/recon/scripts/setup-venv.sh <checkout>/.local/orchestrator/recon`).
+Use packets of one function for engine runs. Design and status: [docs/recon](docs/recon/).
+
 ## Desk
 
 In repo mode the web app opens on the desk: Overview, Solved, Near misses, Templates and queue, Models,
@@ -206,6 +219,7 @@ packages/skills   skill schemas, deterministic trigger matcher, SKILL.md format,
 apps/server       engine, queue, account pool, providers, Gate Keeper, repo adapters, skill registry/curator/shadow evaluator, API, simulator
 apps/web          React UI: desk views (src/desk) and orchestrator pages (src/pages, React Flow builder)
 tools/desk        read-only collector behind the desk views
+engine/recon      deterministic reconstruction engine (Python) behind the deterministic worker tier
 docs/             architecture
 config/           example configs
 ```

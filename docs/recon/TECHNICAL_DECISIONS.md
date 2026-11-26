@@ -226,3 +226,25 @@ differ (paths). Development may use either; the same tests run on both.
 ## D-033 · 2026-11-25 · Held-out functions
 `heldout.cpp` is written before the engine sees it. Its first score is reported as it is; a correction it leads to makes the next score an ordinary one, and a new
 set is written when a held-out number is wanted again.
+
+## D-034 · 2026-11-25 · A body is a member of the class the unit's header declares
+On the real target a function is `Class::Method` in an existing unit. The candidate's tree is written as that member (`core/emitter/member.py`): the
+first parameter is `this` when it points to the class whose members the body reads, or when the body does not use it; a first parameter used as a
+plain value makes a static member. Members are named and typed as the header declares them; a read where no member of that type starts (or no
+element of an array of that type) is refused (`MEMBER_NOT_DECLARED`), and so is a second class, a class by value, a callee or a global. Nothing is
+declared by the engine except the method itself: its declaration replaces the one in the class, or is added at its end. Virtual, overloaded and
+inline-defined methods are refused. Carving typed members out of the skeleton's `unknownXX` byte arrays is not done yet.
+
+## D-035 · 2026-11-25 · The compiler reads the declarations
+What a header declares is read by the pinned compiler, not by a C++ parser: its class-layout report gives offsets and names, and a probe unit of
+compile-time constants (one declaration per member: a type code, the offset, the size, the element count) gives the types, read back from the object.
+A member the unit cannot name (private, ambiguous) is found by the line of its error and left out. The probe files sit next to the header so its
+relative includes resolve, and are removed again. Only the text of one method's declaration is located by hand, with comments and literals blanked.
+The header read is the worktree's after the repository's tooling prepared the packet, which is exactly the text the edits apply to; when the server
+says that files of earlier packets of the unit may be a model's (`options.modelTextInUnit`), only the base revision is read.
+
+## D-036 · 2026-11-25 · Whole packets, and a tier of one attempt
+The engine returns edits only when every function of the packet is solved: a unit with a placeholder left does not compile, so a partial answer could
+only fail at the Gate Keeper. Engine runs therefore use packets of one function. Its tier makes one attempt per packet (the same input gives the same
+answer), does not steal or get stolen from, has no budget pause, outage or prewarm, and late classification never moves a packet away from it (D-009).
+What it does not solve goes to the next tier with the engine's reason code and no gate call.
