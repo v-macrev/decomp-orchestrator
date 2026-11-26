@@ -229,3 +229,23 @@ def cmd_reconstruct(args) -> int:
     (out / "result.json").write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8", newline="\n")
     print(json.dumps({"states": report["states"], "functions": len(rows), "engine_errors": broken, "digest": report["digest"]}, sort_keys=True))
     return 3 if broken else 0 if states == Counter({BYTE_MATCHED: len(rows)}) else 1
+
+
+def cmd_reach(args) -> int:
+    from recon.adapters.skyrim import reach as rc
+    from recon.adapters.skyrim.pack import Pack
+    from recon.adapters.x64_msvc import validate as v
+
+    validated = v.load_validated()
+    if not validated:
+        raise SystemExit("no usable lift_coverage.json: run validate-lift --write")
+    inv = load_inventory(args.worktree)
+    img = _image(args)
+    pack = Pack("pinned", img, {t.rva: t.size for t in inv.targets}, validated)
+    ts = _select(args, inv)[:: args.every]
+    t0 = time.monotonic()
+    rows = rc.run(pack, ts, progress=lambda n: print(f"  {n}/{len(ts)}", file=sys.stderr), jobs=args.jobs)
+    report = rc.report(rows)
+    report["seconds"] = round(time.monotonic() - t0, 1)
+    print(json.dumps(report, indent=2, sort_keys=True))
+    return 0

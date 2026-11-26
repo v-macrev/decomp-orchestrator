@@ -65,3 +65,15 @@ def test_doctor_runs_without_a_checkout():
     checks = {c["id"]: c for c in res["report"]["checks"]}
     assert {"python", "machine", "upstream.worktree"} <= set(checks)
     assert checks["upstream.worktree"]["status"] == "missing"
+
+
+def test_the_request_can_come_from_a_file(tmp_path):
+    f = tmp_path / "request.json"
+    f.write_text(json.dumps(REQ) + "\n", encoding="utf-8")
+    p = subprocess.run([sys.executable, "-s", "-B", "-m", "recon", "serve", "--request", str(f)], capture_output=True, text=True, cwd=ROOT, timeout=60,
+                       stdin=subprocess.DEVNULL, env={"PYTHONPATH": str(ROOT), "PYTHONHASHSEED": "0", "PATH": "/usr/bin:/bin"})
+    assert p.returncode == 0, p.stderr
+    assert p.stdout == run(REQ).stdout
+    missing = subprocess.run([sys.executable, "-s", "-B", "-m", "recon", "serve", "--request", str(tmp_path / "none.json")], capture_output=True, text=True,
+                             cwd=ROOT, timeout=60, stdin=subprocess.DEVNULL, env={"PYTHONPATH": str(ROOT), "PATH": "/usr/bin:/bin"})
+    assert missing.returncode == 2 and missing.stdout == ""

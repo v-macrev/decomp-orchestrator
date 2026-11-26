@@ -65,7 +65,8 @@ def serve(stdin: TextIO, stdout: TextIO, stderr: TextIO) -> int:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="recon")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("serve", help="answer one request on stdin (JSON Lines)")
+    sv = sub.add_parser("serve", help="answer one request (JSON Lines): from --request FILE, else one line on stdin")
+    sv.add_argument("--request", help="a file holding the request line (the server's way, so stdin stays free for cancelling)")
     d = sub.add_parser("doctor", help="check the environment and print a JSON report")
     d.add_argument("--worktree")
     d.add_argument("--checkout")
@@ -105,6 +106,10 @@ def main(argv: list[str] | None = None) -> int:
     v.add_argument("--instances", type=int, default=24)
     v.add_argument("--states", type=int, default=16)
     v.add_argument("--write", action="store_true")
+    h = sub.add_parser("reach", help="how far source generation reaches over the selected targets: counts, nothing compiled")
+    common(h)
+    h.add_argument("--jobs", type=int, default=1)
+    h.add_argument("--every", type=int, default=1)
     r = sub.add_parser("reconstruct", help="reconstruct functions of a synthetic pack: source, states and counts under --out")
     r.add_argument("--pack", required=True, help="pack.json beside its image")
     r.add_argument("--worktree", required=True, help="upstream worktree at the pinned base: the comparator")
@@ -116,8 +121,15 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--function", action="append", default=[], help="RVA; every function of the pack when not given")
     args = ap.parse_args(argv)
     if args.cmd == "serve":
+        if args.request:
+            try:
+                with open(args.request, encoding="utf-8") as f:
+                    return serve(f, sys.stdout, sys.stderr)
+            except OSError as e:
+                sys.stderr.write(f"the request file cannot be read: {type(e).__name__}\n")
+                return 2
         return serve(sys.stdin, sys.stdout, sys.stderr)
-    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare", "validate-lift", "coverage", "reconstruct"):
+    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare", "validate-lift", "coverage", "reconstruct", "reach"):
         from recon.cli import commands
 
         return getattr(commands, "cmd_" + args.cmd.replace("-", "_"))(args)

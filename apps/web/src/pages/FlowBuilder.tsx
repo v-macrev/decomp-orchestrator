@@ -8,7 +8,7 @@ import {
   useEdgesState, useNodesState, useReactFlow, type Connection, type Edge, type Node, type NodeProps,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import { defaultFlow, type Account, type CapabilityTier, type Difficulty, type EdgeKind, type Flow, type FlowNode, type Role } from '@decomp/core';
+import { defaultFlow, deterministicFirstFlow, type Account, type CapabilityTier, type Difficulty, type EdgeKind, type Flow, type FlowNode, type Role } from '@decomp/core';
 import { api, type FlowIssue } from '../api';
 import { ConfirmButton } from '../components/ConfirmButton';
 
@@ -39,7 +39,8 @@ function inferKind(s: Role, t: Role): EdgeKind | null {
 
 function RoleNode({ data, selected }: NodeProps<RFNode>) {
   const pool = data.pool;
-  const binding = pool.strategy === 'bound' ? `bound: ${pool.accountIds.join(', ') || '—'}` : `pool${pool.tags.length ? `: #${pool.tags.join(' #')}` : ': any'}`;
+  const engine = data.role === 'worker' && data.kind === 'deterministic';
+  const binding = engine ? 'reconstruction engine · no account' : pool.strategy === 'bound' ? `bound: ${pool.accountIds.join(', ') || '—'}` : `pool${pool.tags.length ? `: #${pool.tags.join(' #')}` : ': any'}`;
   return (
     <div className={`flow-node${selected ? ' selected' : ''}`} style={{ ['--c' as string]: ROLE_COLOR[data.role] }}>
       {/* Four uniquely named connection points; with loose connection mode any of them can start or
@@ -51,7 +52,7 @@ function RoleNode({ data, selected }: NodeProps<RFNode>) {
       <div className="meta">
         {data.role !== 'orchestrator' && <>× {data.instances} · </>}
         {binding}
-        {pool.model ? ` · ${pool.model}` : ''}
+        {pool.model && !engine ? ` · ${pool.model}` : ''}
       </div>
       {data.role === 'worker' && (
         <div className="meta">
@@ -60,7 +61,7 @@ function RoleNode({ data, selected }: NodeProps<RFNode>) {
           {data.stealDown === false ? ' · no stealing' : ''}
         </div>
       )}
-      {data.role === 'worker' && <div className="meta">{data.maxAttempts} attempts, then the next tier</div>}
+      {data.role === 'worker' && <div className="meta">{engine ? 'one attempt, then the next tier' : `${data.maxAttempts} attempts, then the next tier`}</div>}
       {data.role === 'gatekeeper' && (
         <div className="meta">{Object.entries(data.gate).filter(([, v]) => v).map(([k]) => k).join(' · ')}</div>
       )}
@@ -139,7 +140,7 @@ function newNode(role: Role, position: { x: number; y: number }): RFNode {
   return {
     id, type: 'role', position,
     data: {
-      role, label: ROLE_LABEL[role], instances: role === 'worker' ? 4 : 1,
+      role, label: ROLE_LABEL[role], kind: 'llm', instances: role === 'worker' ? 4 : 1,
       pool: { strategy: 'pool', accountIds: [], tags: [] }, maxAttempts: 6, stuckAfter: 3,
       gate: { scope: true, leak: true, cheat: true, integrity: true, repoCompare: true, repoPreflight: true, llmReview: false }, stealDown: true,
     },
@@ -355,6 +356,7 @@ function Builder() {
           {saved && <button onClick={() => save(true)} title="Save a copy under the name in the field">Save as copy</button>}
           <button onClick={newFlow}>New flow</button>
           <button onClick={() => load({ ...defaultFlow(), ...meta })} title="Replace the canvas with the default ladder (not saved until you click Save)">Load template</button>
+          <button onClick={() => load({ ...deterministicFirstFlow(), ...meta })} title="Replace the canvas with the reconstruction engine as the first tier, then the default ladder (not saved until you click Save)">Engine-first template</button>
           {saved && (
             <ConfirmButton onConfirm={async () => { await api.deleteFlow(meta.id); const fs = await api.flows(); setFlows(fs); load(fs[0] ?? defaultFlow()); setStatus(`deleted "${meta.name}"`); }} confirmLabel={`Delete "${meta.name}"?`}>
               Delete
@@ -445,6 +447,7 @@ function NodeInspector({ node, accounts, onChange, onDelete }: { node: RFNode; a
   const candidates = accounts.filter((a) => (pool.strategy === 'bound' ? pool.accountIds.includes(a.id) : pool.tags.every((t) => a.tags.includes(t))));
   const models = [...new Set(candidates.flatMap((a) => a.models.map((m) => m.id)))];
   const allTags = [...new Set(accounts.flatMap((a) => a.tags))];
+  const engine = d.role === 'worker' && d.kind === 'deterministic';
   return (
     <div style={{ display: 'grid', gap: 10 }}>
       <h2 style={{ color: ROLE_COLOR[d.role] }}>{ROLE_LABEL[d.role]}</h2>
@@ -452,6 +455,15 @@ function NodeInspector({ node, accounts, onChange, onDelete }: { node: RFNode; a
       {d.role !== 'orchestrator' && (
         <label>Instances (parallel slots)<input type="number" min={1} max={256} value={d.instances} onChange={(e) => onChange({ instances: Math.max(1, Number(e.target.value)) })} /></label>
       )}
+      {d.role === 'worker' && (
+        <label title="Who writes the answer. The reconstruction engine needs no account, makes no model call and gets one attempt per packet: the same input gives the same answer.">Worker kind
+          <select value={d.kind ?? 'llm'} onChange={(e) => { const kind = e.target.value as NodeData['kind']; onChange(kind === 'deterministic' ? { kind, maxAttempts: 1, stealDown: false } : { kind }); }}>
+            <option value="llm">Model (AI accounts)</option>
+            <option value="deterministic">Reconstruction engine (deterministic, no account)</option>
+          </select>
+        </label>
+      )}
+      {engine ? <EngineSettings d={d} onChange={onChange} /> : <>
       <h3>Account binding</h3>
       <label>Strategy
         <select value={pool.strategy} onChange={(e) => setPool({ strategy: e.target.value as 'pool' | 'bound' })}>
@@ -487,7 +499,8 @@ function NodeInspector({ node, accounts, onChange, onDelete }: { node: RFNode; a
           {['low', 'medium', 'high', 'xhigh', 'max'].map((x) => <option key={x}>{x}</option>)}
         </select>
       </label>
-      {d.role === 'worker' && (
+      </>}
+      {d.role === 'worker' && !engine && (
         <>
           <h3>Retry policy</h3>
           <label title="The only retry setting: a packet gets exactly this many attempts on this tier, then moves to the next tier (on the last tier, it fails). Format-only rejections (header, lint, output contract) do not count.">Attempts at this tier<input type="number" min={1} max={20} value={d.maxAttempts} onChange={(e) => onChange({ maxAttempts: Number(e.target.value) })} /></label>
@@ -516,6 +529,22 @@ function NodeInspector({ node, accounts, onChange, onDelete }: { node: RFNode; a
       )}
       <button className="danger" onClick={onDelete}>Delete node</button>
     </div>
+  );
+}
+
+/** The engine tier's limits: operation counts per function and one wall-clock bound per packet. */
+function EngineSettings({ d, onChange }: { d: NodeData; onChange: (p: Partial<NodeData>) => void }) {
+  const r = d.recon ?? {};
+  const num = (k: keyof NonNullable<NodeData['recon']>) => (e: { target: { value: string } }) => onChange({ recon: { ...r, [k]: e.target.value ? Math.max(1, Math.round(Number(e.target.value))) : undefined } });
+  return (
+    <>
+      <h3>Engine limits</h3>
+      <div className="muted" style={{ fontSize: 12 }}>One attempt per packet. What the engine does not solve moves to the next tier with its reason codes; the Gate Keeper judges what it does solve like any other answer.</div>
+      <label>Time per packet (seconds)<input type="number" min={10} max={7200} value={r.timeoutSec ?? ''} placeholder="server default" onChange={num('timeoutSec')} /></label>
+      <label>Largest function tried (bytes)<input type="number" min={1} value={r.maxFunctionBytes ?? ''} placeholder="no limit" onChange={num('maxFunctionBytes')} /></label>
+      <label>Candidates per function<input type="number" min={1} max={10000} value={r.candidates ?? ''} placeholder="engine default" onChange={num('candidates')} /></label>
+      <label>Compiles per function<input type="number" min={1} max={10000} value={r.compiles ?? ''} placeholder="engine default" onChange={num('compiles')} /></label>
+    </>
   );
 }
 

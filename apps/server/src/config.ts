@@ -61,6 +61,21 @@ export const ServerConfig = z.object({
       infraBackoffMs: z.number().int().optional(),
     })
     .default({}),
+  /**
+   * The reconstruction engine of deterministic worker tiers (engine/recon). It runs on the repository's host
+   * (WSL when the repository is there). `python` is the interpreter as that host sees it (R-7: a virtual
+   * environment's works), `pythonPath` extra module paths. Off unless `enabled`.
+   */
+  recon: z
+    .object({
+      enabled: z.boolean().default(false),
+      python: z.string().min(1).default('python3'),
+      pythonPath: z.array(z.string().min(1)).default([]),
+      /** The engine package directory as the host sees it; default: this checkout's engine/recon. */
+      engineDir: z.string().optional(),
+      timeoutSec: z.number().int().min(10).max(7_200).default(900),
+    })
+    .default({ enabled: false, python: 'python3', pythonPath: [], timeoutSec: 900 }),
   /** Desk views: how often the read-only collector runs, and the Python (3.11+) that runs it. */
   desk: z
     .object({

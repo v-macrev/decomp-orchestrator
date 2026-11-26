@@ -48,6 +48,9 @@ import { SkillRegistry } from '../skills/registry.js';
 import { FunctionGatherer } from '../intel/gatherer.js';
 import { planCapacity } from './capacity.js';
 import { hasRetryOnlySkills, type RunSkills } from './contextBuilder.js';
+import type { EngineRun } from '../recon/process.js';
+import type { EngineResult } from '../recon/protocol.js';
+import type { ReconRunner } from '../recon/runner.js';
 
 export interface EngineOptions {
   leaseMs: number;
@@ -89,6 +92,8 @@ export interface EngineDeps {
   events: EventBus;
   reviewer?: (plan: FlowPlan) => Reviewer | null;
   skills?: SkillRegistry;
+  /** The reconstruction engine of deterministic tiers (none: such a tier answers RECON_UNAVAILABLE). */
+  recon?: ReconRunner | null;
 }
 
 class ActiveRun {
@@ -199,6 +204,7 @@ export class RunEngine {
     const routing = row.config.routing;
     const ids = new Set<string>();
     for (const tier of p.tiers) {
+      if (tier.node.data.kind === 'deterministic') continue; // uses no account
       const own = tier.node.data.pool;
       const binding: PoolBinding = { ...own, capability: own.capability ?? (routing.enabled ? tier.capability : undefined) };
       for (const c of pool.resolve(binding, 'worker')) ids.add(c.slot.account.id);
@@ -268,6 +274,9 @@ export class RunEngine {
     const flow = Flow.parse(flowIn);
     const errors = validateFlow(flow).filter((i) => i.level === 'error');
     if (errors.length) throw new Error(`invalid flow: ${errors.map((e) => e.message).join('; ')}`);
+    if (!this.deps.recon && flow.nodes.some((n) => n.type === 'worker' && n.data.kind === 'deterministic')) {
+      throw new Error('the flow has a deterministic worker tier, but no reconstruction engine is configured on this server (config "recon")');
+    }
     return this.deps.store.createRun({ id: newId('run'), name, config, flow });
   }
 
@@ -2651,6 +2660,7 @@ export class RunEngine {
     const seen = new Set<string>();
     const targets: Array<{ accountId: string; modelId: string }> = [];
     for (const t of run.plan.tiers) {
+      if (t.node.data.kind === 'deterministic') continue;
       const binding: PoolBinding = { ...t.node.data.pool, capability: t.node.data.pool.capability ?? (run.row.config.routing.enabled ? t.capability : undefined) };
       for (const { slot, model } of pool.resolve(binding, 'worker')) {
         const key = `${slot.account.id}/${model.id}`;
@@ -2734,7 +2744,9 @@ export class RunEngine {
           continue;
         }
         const budget = run.row.config.budgetUsd;
-        if (budget !== undefined && (store.getRun(runId)?.costUsd ?? 0) >= budget) {
+        // A deterministic tier spends nothing: a reached budget does not stop it (D-009).
+        const deterministic = run.plan.tiers[tier]!.node.data.kind === 'deterministic';
+        if (budget !== undefined && !deterministic && (store.getRun(runId)?.costUsd ?? 0) >= budget) {
           if (!run.budgetPaused) {
             run.budgetPaused = true;
             this.pause(runId);
@@ -2746,17 +2758,19 @@ export class RunEngine {
         // Steal only from tiers within `stealMaxGap` capability steps: a frontier slot taking a fast
         // tier's easy packet costs ~40x the tokens for work a cheap model handles.
         const myRank = CAPABILITY_RANK[run.plan.tiers[tier]!.capability];
-        const steal: StealSource[] = routing.enabled && routing.workStealing
-          ? stealSources(run.plan, tier).filter((t) => myRank - CAPABILITY_RANK[run.plan.tiers[t]!.capability] <= routing.stealMaxGap).map((t) => ({ tier: t, minBacklog: run.idleSlots(t) }))
+        // Nobody steals a deterministic tier's untried packets (the engine is free), and the engine does not take
+        // another tier's packets nor count against a per-worker cap (D-009).
+        const steal: StealSource[] = routing.enabled && routing.workStealing && !deterministic
+          ? stealSources(run.plan, tier).filter((t) => run.plan.tiers[t]!.node.data.kind !== 'deterministic' && myRank - CAPABILITY_RANK[run.plan.tiers[t]!.capability] <= routing.stealMaxGap).map((t) => ({ tier: t, minBacklog: run.idleSlots(t) }))
           : [];
-        const worker = run.workerBySlot.get(slot);
+        const worker = deterministic ? undefined : run.workerBySlot.get(slot);
         let [leased] = this.queue.lease(runId, tier, 1, this.opts.leaseMs, { stealFrom: steal, worker });
         let workTier = tier;
-        if (!leased && routing.helpUp) {
+        if (!leased && routing.helpUp && !deterministic) {
           // Nothing here or below: run a higher tier's ready packet in this worktree, with that
           // tier's node (models, limits). The packet keeps its tier; only the worktree is lent.
           const myCap = CAPABILITY_RANK[run.plan.tiers[tier]!.capability];
-          const higher = run.plan.tiers.filter((t) => t.index !== tier && CAPABILITY_RANK[t.capability] > myCap).sort((a, b) => CAPABILITY_RANK[b.capability] - CAPABILITY_RANK[a.capability]);
+          const higher = run.plan.tiers.filter((t) => t.index !== tier && t.node.data.kind !== 'deterministic' && CAPABILITY_RANK[t.capability] > myCap).sort((a, b) => CAPABILITY_RANK[b.capability] - CAPABILITY_RANK[a.capability]);
           for (const up of higher) {
             [leased] = this.queue.lease(runId, up.index, 1, this.opts.leaseMs, { worker });
             if (leased) {
@@ -2850,7 +2864,8 @@ export class RunEngine {
       // The claim must name a model or the agent, never a guess: the model is chosen per attempt
       // (rotation, help-up), so until a packet passes the claim names the orchestrator, and on a
       // pass recordAttribution rewrites it with the model that finished the packet.
-      const modelHint = node.data.pool.model ?? 'decomp-orchestrator';
+      // A deterministic tier names its engine, never the private config's default model.
+      const modelHint = node.data.kind === 'deterministic' ? (this.deps.recon?.modelName ?? 'decomp-orchestrator') : (node.data.pool.model ?? 'decomp-orchestrator');
       let prepared: PreparedTask;
       try {
         prepared = await repo.prepare(slot, task, { draftedBy: cfg.draftedBy, model: modelHint, signal });
@@ -2888,7 +2903,8 @@ export class RunEngine {
           task = { ...task, assessment: refined, complexity: refined.score };
           if (DIFFICULTY_RANK[refined.difficulty] > DIFFICULTY_RANK[task.difficulty]) {
             const to = tierFor(run.plan, refined.difficulty, tierIdx);
-            if (task.attemptsTotal === 0 && to > tierIdx) {
+            // The engine tier tries every packet first, whatever its difficulty (D-009).
+            if (task.attemptsTotal === 0 && to > tierIdx && node.data.kind !== 'deterministic') {
               this.queue.transition(task.id, leaseId, ['leased'], 'pending', { tier: to, difficulty: refined.difficulty, attemptsAtDifficulty: 0, attemptsAtTier: 0, notBefore: 0 });
               const w = run.workerBySlot.get(slot);
               if (w) this.queue.unassign(runId, w, task.id); // never attempted here: refund the cap
@@ -2900,6 +2916,12 @@ export class RunEngine {
             task = { ...task, difficulty: refined.difficulty, attemptsAtDifficulty: 0 };
           }
         }
+      }
+
+      // A deterministic tier: the engine answers. No context bundle, account, model call or skill (D-009).
+      if (node.data.kind === 'deterministic') {
+        await this.engineAttempt({ run, tierIdx, slot, task, leaseId, prepared, carried, spliced, signal, ev, track: (a) => { attempt = a; } });
+        return;
       }
 
       // 2. bundle + feedback
@@ -3027,104 +3049,7 @@ export class RunEngine {
 
         finisher = lease.model.id;
       }
-      // 4. parse output; materialise function-level edits into complete files
-      const json = extractJson(text);
-      const parsed = WorkerOutput.safeParse(json);
-      if (!parsed.success) {
-        // Say what was wrong and what came back: "did not match" alone gets the same reply again.
-        const issues = json === null || json === undefined
-          ? 'no JSON object was found in the reply'
-          : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.') || '(top level)'}: ${i.message}`).join('; ');
-        const reply = text.trim().replace(/\s+/g, ' ');
-        const why = `reply was not the JSON object of the output contract (${issues}). It began: "${reply.slice(0, 300)}${reply.length > 300 ? '…' : ''}". Return only {"files": [...]} or {"edits": [...]} as the contract describes, with no text around it.`;
-        store.updateAttempt(attempt.id, { status: 'parse_error', error: why.slice(0, 500), finishedAt: Date.now() });
-        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_PARSE', why), { infra: false, strike: false }, tierIdx);
-      }
-      if (!freeAttempt && outputMode === 'edits' && elided.length && parsed.data.files?.some((f) => f.path.endsWith('.cpp'))) {
-        // Complete files cannot contain bodies the worker never saw: reject as a contract error, not a cheat strike.
-        store.updateAttempt(attempt.id, { status: 'parse_error', error: 'returned complete files in edits mode', finishedAt: Date.now() });
-        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_MODE', `accepted bodies were elided (${elided.length} function(s)); return "edits" with only the functions you add or change, never complete files`), { infra: false, strike: false }, tierIdx);
-      }
-      const mat = await materialise(parsed.data, (p) => repo.readFile(slot, p), freeAttempt ? [] : elisions);
-      if (mat.problems.length) {
-        store.updateAttempt(attempt.id, { status: 'parse_error', error: mat.problems.join('; ').slice(0, 500), files: mat.files, finishedAt: Date.now() });
-        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_EDIT', mat.problems.join('; ').slice(0, 1_000)), { infra: false, strike: false }, tierIdx);
-      }
-      // An answer built on a stored candidate may return only the file it changed. The candidate's
-      // other files are in the slot, so the gate would compile with them: they are part of the answer
-      // too, or the packet would be accepted without (say) the header that declares its functions.
-      if (spliced && !freeAttempt) {
-        const kept: string[] = [];
-        for (const f of spliced.files) {
-          if (!prepared.allowedPaths.includes(f.path) || mat.files.some((x) => x.path === f.path)) continue;
-          const content = await repo.readFile(slot, f.path);
-          if (content === null || content === (await repo.baseFile(f.path)) || content === carried.find((c) => c.path === f.path)?.content) continue;
-          mat.files.push({ path: f.path, content });
-          kept.push(f.path);
-        }
-        if (kept.length) ev('attempt.kept_files', `kept from the candidate the answer started from: ${kept.join(', ')}`, 'debug', { kept });
-      }
-      // Accepted functions stay as they are, also when the answer rewrote one.
-      const ownNames = task.functions.flatMap((f) => (f.name ? [f.name] : []));
-      for (const f of mat.files) {
-        const before = carried.find((c) => c.path === f.path)?.content ?? (await repo.baseFile(f.path));
-        const r = restoreAccepted(f.content, before, (n) => ownNames.some((o) => o === n || o.endsWith(`::${n}`) || n.endsWith(`::${o}`)));
-        f.content = r.content;
-        if (r.restored.length) ev('attempt.restored', `accepted function(s) put back as they were: ${r.restored.slice(0, 8).join(', ')}`, 'debug', { restored: r.restored });
-      }
-      // A member function the packet defines must be in its class: the declaration follows from the definition.
-      const had = new Map<string, Set<string>>();
-      const key = (d: { cls: string; name: string }) => `${d.cls}::${d.name}`;
-      const declared = await declareMembers(mat.files, prepared.allowedPaths, (p) => repo.readFile(slot, p), async (p, d) => {
-        if (!had.has(p)) had.set(p, new Set(memberDefs((await repo.baseFile(p)) ?? '').map(key)));
-        return !had.get(p)!.has(key(d));
-      });
-      mat.files = declared.files;
-      if (declared.changes.length) ev('attempt.declared', `declared in their classes: ${declared.changes.join('; ').slice(0, 600)}`, 'debug', { changes: declared.changes });
-      // Deterministic header repair (skeleton placeholders, duplicate keys, banned lines, origin in .h).
-      const untouched = await Promise.all(prepared.allowedPaths.filter((p) => !mat.files.some((f) => f.path === p)).map(async (p) => ({ path: p, current: await repo.readFile(slot, p), base: await repo.baseFile(p) })));
-      const fixed = await repairAnswer(mat.files, (p) => repo.readFile(slot, p), { codeOrigin: parsed.data.codeOrigin, adaptedBodies: parsed.data.adaptedBodies }, {
-        untouched, attribution: { person: personOf(cfg.draftedBy), model: finisher },
-        base: (p) => repo.baseFile(p), own: task.functions.map((f) => (f.name ?? f.rva).split('::').pop()!),
-      });
-      mat.files = fixed.files;
-      // The exact code (comments and spacing aside) already failed in the compiler: refuse it without
-      // compiling and say which attempt it repeats, so the next try has to change the logic.
-      // (A free attempt re-submits a stored candidate on purpose: the gate decides it again.)
-      const repeat = freeAttempt ? null : findRepeat(history, mat.files);
-      if (repeat) {
-        store.updateAttempt(attempt.id, { status: 'completed', files: mat.files, finishedAt: Date.now() });
-        // The same code whose functions all matched, blocked only by lines it did not write: the
-        // worker kept them on purpose (another body needs them). Same code, same verdict: hold it.
-        const prior = store.verdictsForTask(task.id).find((v) => store.getAttempt(v.attemptId)?.n === repeat.n);
-        if (prior && isHeldOnly(prior)) {
-          ev('attempt.repeated', `candidate repeats attempt #${repeat.n}, whose functions all match; only lines it did not write block it`, 'debug', { repeats: repeat.n });
-          return this.route(run, task, leaseId, attempt, { ...prior, id: newId('vd'), attemptId: attempt.id, createdAt: Date.now() }, { infra: false, strike: false }, tierIdx);
-        }
-        ev('attempt.repeated', `candidate repeats attempt #${repeat.n}; refused without compiling`, 'debug', { repeats: repeat.n });
-        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'REPEATED_CANDIDATE', `the code is identical to attempt #${repeat.n} (comments and spacing do not count), which already failed: ${repeat.outcome}. Change the logic.`), { infra: false, strike: false }, tierIdx);
-      }
-      if (fixed.changes.length) ev('attempt.header_repaired', `header repaired before the Gate Keeper: ${fixed.changes.join('; ').slice(0, 600)}`, 'debug', { changes: fixed.changes });
-      store.updateAttempt(attempt.id, { files: mat.files });
-
-      // 5. Gate Keeper (always on the complete materialised files)
-      if (!this.queue.transition(task.id, leaseId, ['leased'], 'gating')) throw new AbortedError('lease lost before gating');
-      const carriedMap = new Map(carried.map((c) => [c.path, c.content]));
-      const gate = await run.gate.evaluate({
-        task, attemptId: attempt.id, slot, prepared, files: mat.files, checks: mergeGateChecks(run.plan),
-        compareTimeoutMs: cfg.compareTimeoutMs, signal, carried: carriedMap, compared: this.comparedRvas(run.row.id, task),
-      });
-      if (signal.aborted) throw new AbortedError();
-      const written = gate.written.length ? gate.written : mat.files;
-      store.updateAttempt(attempt.id, { status: 'completed', files: written, finishedAt: Date.now() });
-      if (gate.verdict.decision === 'pass') await this.learn(run, task, written, carriedMap).catch((e) => ev('knowledge.failed', `knowledge extraction failed: ${(e as Error).message}`, 'warn'));
-      this.route(run, task, leaseId, attempt, gate.verdict, { infra: gate.infra, strike: gate.strike }, tierIdx, prepared.srTaskId);
-      if (gate.verdict.decision === 'reject' && !gate.infra && !gate.strike) this.splitMatched(run, task, gate.verdict);
-      if (gate.verdict.decision === 'pass' && prepared.srTaskId && repo.recordAttribution && store.getTask(task.id)?.lastVerdictId === gate.verdict.id) {
-        const draftedBy = draftedByText(personOf(cfg.draftedBy), [finisher]);
-        const r = await repo.recordAttribution({ task, srTaskId: prepared.srTaskId, model: finisher, draftedBy, slot }).catch((e: Error) => ({ ok: false, problems: [e.message] }));
-        ev(r.ok ? 'task.attributed' : 'task.attribution_failed', r.ok ? `claim and task attributed to ${finisher} (drafted by ${draftedBy})` : `could not record ${finisher} as the finishing model: ${r.problems.join('; ').slice(0, 300)}`, r.ok ? 'debug' : 'warn', { model: finisher });
-      }
+      await this.answerTail({ run, task, leaseId, attempt, tierIdx, slot, prepared, carried, spliced, freeAttempt, outputMode, elided, elisions, history, text, finisher, signal, ev });
       return;
     } catch (e) {
       if (e instanceof AbortedError || signal.aborted) {
@@ -3147,6 +3072,211 @@ export class RunEngine {
         ev('slot.reset_failed', `slot ${slot} reset failed: ${(err as Error).message}`, 'error');
         this.parkSlot(run, slot, (err as Error).message);
       });
+    }
+  }
+
+  /**
+   * Steps 4 and 5, the same for every answer (a model's, a free attempt's, the engine's): parse the output,
+   * materialise edits into complete files, put accepted functions back, declare members, repair the header,
+   * refuse a repeat, then the Gate Keeper and the route.
+   */
+  private async answerTail(c: AnswerTail): Promise<void> {
+    const { store, repo } = this.deps;
+    const { run, task, leaseId, attempt, tierIdx, slot, prepared, carried, spliced, freeAttempt, outputMode, elided, elisions, history, text, finisher, signal, ev } = c;
+    const cfg = run.row.config;
+    // 4. parse output; materialise function-level edits into complete files
+    const json = extractJson(text);
+    const parsed = WorkerOutput.safeParse(json);
+    if (!parsed.success) {
+      // Say what was wrong and what came back: "did not match" alone gets the same reply again.
+      const issues = json === null || json === undefined
+        ? 'no JSON object was found in the reply'
+        : parsed.error.issues.slice(0, 5).map((i) => `${i.path.join('.') || '(top level)'}: ${i.message}`).join('; ');
+      const reply = text.trim().replace(/\s+/g, ' ');
+      const why = `reply was not the JSON object of the output contract (${issues}). It began: "${reply.slice(0, 300)}${reply.length > 300 ? '…' : ''}". Return only {"files": [...]} or {"edits": [...]} as the contract describes, with no text around it.`;
+      store.updateAttempt(attempt.id, { status: 'parse_error', error: why.slice(0, 500), finishedAt: Date.now() });
+      return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_PARSE', why), { infra: false, strike: false }, tierIdx);
+    }
+    if (!freeAttempt && outputMode === 'edits' && elided.length && parsed.data.files?.some((f) => f.path.endsWith('.cpp'))) {
+      // Complete files cannot contain bodies the worker never saw: reject as a contract error, not a cheat strike.
+      store.updateAttempt(attempt.id, { status: 'parse_error', error: 'returned complete files in edits mode', finishedAt: Date.now() });
+      return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_MODE', `accepted bodies were elided (${elided.length} function(s)); return "edits" with only the functions you add or change, never complete files`), { infra: false, strike: false }, tierIdx);
+    }
+    const mat = await materialise(parsed.data, (p) => repo.readFile(slot, p), freeAttempt ? [] : elisions);
+    if (mat.problems.length) {
+      store.updateAttempt(attempt.id, { status: 'parse_error', error: mat.problems.join('; ').slice(0, 500), files: mat.files, finishedAt: Date.now() });
+      return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'OUTPUT_EDIT', mat.problems.join('; ').slice(0, 1_000)), { infra: false, strike: false }, tierIdx);
+    }
+    // An answer built on a stored candidate may return only the file it changed. The candidate's
+    // other files are in the slot, so the gate would compile with them: they are part of the answer
+    // too, or the packet would be accepted without (say) the header that declares its functions.
+    if (spliced && !freeAttempt) {
+      const kept: string[] = [];
+      for (const f of spliced.files) {
+        if (!prepared.allowedPaths.includes(f.path) || mat.files.some((x) => x.path === f.path)) continue;
+        const content = await repo.readFile(slot, f.path);
+        if (content === null || content === (await repo.baseFile(f.path)) || content === carried.find((c) => c.path === f.path)?.content) continue;
+        mat.files.push({ path: f.path, content });
+        kept.push(f.path);
+      }
+      if (kept.length) ev('attempt.kept_files', `kept from the candidate the answer started from: ${kept.join(', ')}`, 'debug', { kept });
+    }
+    // Accepted functions stay as they are, also when the answer rewrote one.
+    const ownNames = task.functions.flatMap((f) => (f.name ? [f.name] : []));
+    for (const f of mat.files) {
+      const before = carried.find((c) => c.path === f.path)?.content ?? (await repo.baseFile(f.path));
+      const r = restoreAccepted(f.content, before, (n) => ownNames.some((o) => o === n || o.endsWith(`::${n}`) || n.endsWith(`::${o}`)));
+      f.content = r.content;
+      if (r.restored.length) ev('attempt.restored', `accepted function(s) put back as they were: ${r.restored.slice(0, 8).join(', ')}`, 'debug', { restored: r.restored });
+    }
+    // A member function the packet defines must be in its class: the declaration follows from the definition.
+    const had = new Map<string, Set<string>>();
+    const key = (d: { cls: string; name: string }) => `${d.cls}::${d.name}`;
+    const declared = await declareMembers(mat.files, prepared.allowedPaths, (p) => repo.readFile(slot, p), async (p, d) => {
+      if (!had.has(p)) had.set(p, new Set(memberDefs((await repo.baseFile(p)) ?? '').map(key)));
+      return !had.get(p)!.has(key(d));
+    });
+    mat.files = declared.files;
+    if (declared.changes.length) ev('attempt.declared', `declared in their classes: ${declared.changes.join('; ').slice(0, 600)}`, 'debug', { changes: declared.changes });
+    // Deterministic header repair (skeleton placeholders, duplicate keys, banned lines, origin in .h).
+    const untouched = await Promise.all(prepared.allowedPaths.filter((p) => !mat.files.some((f) => f.path === p)).map(async (p) => ({ path: p, current: await repo.readFile(slot, p), base: await repo.baseFile(p) })));
+    const fixed = await repairAnswer(mat.files, (p) => repo.readFile(slot, p), { codeOrigin: parsed.data.codeOrigin, adaptedBodies: parsed.data.adaptedBodies }, {
+      untouched, attribution: { person: personOf(cfg.draftedBy), model: finisher },
+      base: (p) => repo.baseFile(p), own: task.functions.map((f) => (f.name ?? f.rva).split('::').pop()!),
+    });
+    mat.files = fixed.files;
+    // The exact code (comments and spacing aside) already failed in the compiler: refuse it without
+    // compiling and say which attempt it repeats, so the next try has to change the logic.
+    // (A free attempt re-submits a stored candidate on purpose: the gate decides it again.)
+    const repeat = freeAttempt ? null : findRepeat(history, mat.files);
+    if (repeat) {
+      store.updateAttempt(attempt.id, { status: 'completed', files: mat.files, finishedAt: Date.now() });
+      // The same code whose functions all matched, blocked only by lines it did not write: the
+      // worker kept them on purpose (another body needs them). Same code, same verdict: hold it.
+      const prior = store.verdictsForTask(task.id).find((v) => store.getAttempt(v.attemptId)?.n === repeat.n);
+      if (prior && isHeldOnly(prior)) {
+        ev('attempt.repeated', `candidate repeats attempt #${repeat.n}, whose functions all match; only lines it did not write block it`, 'debug', { repeats: repeat.n });
+        return this.route(run, task, leaseId, attempt, { ...prior, id: newId('vd'), attemptId: attempt.id, createdAt: Date.now() }, { infra: false, strike: false }, tierIdx);
+      }
+      ev('attempt.repeated', `candidate repeats attempt #${repeat.n}; refused without compiling`, 'debug', { repeats: repeat.n });
+      return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'REPEATED_CANDIDATE', `the code is identical to attempt #${repeat.n} (comments and spacing do not count), which already failed: ${repeat.outcome}. Change the logic.`), { infra: false, strike: false }, tierIdx);
+    }
+    if (fixed.changes.length) ev('attempt.header_repaired', `header repaired before the Gate Keeper: ${fixed.changes.join('; ').slice(0, 600)}`, 'debug', { changes: fixed.changes });
+    store.updateAttempt(attempt.id, { files: mat.files });
+
+    // 5. Gate Keeper (always on the complete materialised files)
+    if (!this.queue.transition(task.id, leaseId, ['leased'], 'gating')) throw new AbortedError('lease lost before gating');
+    const carriedMap = new Map(carried.map((c) => [c.path, c.content]));
+    const gate = await run.gate.evaluate({
+      task, attemptId: attempt.id, slot, prepared, files: mat.files, checks: mergeGateChecks(run.plan),
+      compareTimeoutMs: cfg.compareTimeoutMs, signal, carried: carriedMap, compared: this.comparedRvas(run.row.id, task),
+    });
+    if (signal.aborted) throw new AbortedError();
+    const written = gate.written.length ? gate.written : mat.files;
+    store.updateAttempt(attempt.id, { status: 'completed', files: written, finishedAt: Date.now() });
+    if (gate.verdict.decision === 'pass') await this.learn(run, task, written, carriedMap).catch((e) => ev('knowledge.failed', `knowledge extraction failed: ${(e as Error).message}`, 'warn'));
+    this.route(run, task, leaseId, attempt, gate.verdict, { infra: gate.infra, strike: gate.strike }, tierIdx, prepared.srTaskId);
+    if (gate.verdict.decision === 'reject' && !gate.infra && !gate.strike) this.splitMatched(run, task, gate.verdict);
+    if (gate.verdict.decision === 'pass' && prepared.srTaskId && repo.recordAttribution && store.getTask(task.id)?.lastVerdictId === gate.verdict.id) {
+      const draftedBy = draftedByText(personOf(cfg.draftedBy), [finisher]);
+      const r = await repo.recordAttribution({ task, srTaskId: prepared.srTaskId, model: finisher, draftedBy, slot }).catch((e: Error) => ({ ok: false, problems: [e.message] }));
+      ev(r.ok ? 'task.attributed' : 'task.attribution_failed', r.ok ? `claim and task attributed to ${finisher} (drafted by ${draftedBy})` : `could not record ${finisher} as the finishing model: ${r.problems.join('; ').slice(0, 300)}`, r.ok ? 'debug' : 'warn', { model: finisher });
+    }
+  }
+
+  /**
+   * One attempt of a deterministic tier (docs/recon/INTEGRATION_CONTRACT.md, outcome mapping): the engine gets
+   * the packet, the slot's worktree and the checkout, never packs, stored candidates or model-written files.
+   * Solved functions go through the shared tail and the unchanged Gate Keeper; nothing solved routes with the
+   * engine's reason codes and no gate; a failed process is an infrastructure failure, not charged.
+   */
+  private async engineAttempt(c: {
+    run: ActiveRun; tierIdx: number; slot: number; task: TaskRow; leaseId: string; prepared: PreparedTask;
+    carried: Array<{ path: string; content: string }>; spliced: { files: Array<{ path: string; content: string }>; model?: string | null; codeOrigin?: string; adaptedBodies?: string; notes: string[] } | null;
+    signal: AbortSignal; ev: AnswerTail['ev']; track: (a: Attempt) => void;
+  }): Promise<void> {
+    const { store, repo, recon } = this.deps;
+    const { run, tierIdx, slot, task, leaseId, prepared, carried, spliced, signal, ev } = c;
+    const runId = run.row.id;
+    const node = run.plan.tiers[tierIdx]!.node;
+    const history = buildHistory(store, task);
+    const freeAttempt = !!spliced && task.fix?.verdictId === task.lastVerdictId;
+    const model = recon?.modelName ?? null;
+    const attempt: Attempt = {
+      id: newId('att'), taskId: task.id, runId, n: task.attemptsTotal + 1, tier: tierIdx, nodeId: node.id, accountId: null, model, status: 'running',
+      bundleHash: null, usage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheWriteTokens: 0 }, costUsd: 0,
+      latencyMs: null, error: null, files: null, startedAt: Date.now(), finishedAt: null, difficulty: task.difficulty, contextTokens: 0, contextRawTokens: 0,
+    };
+    store.insertAttempt(attempt);
+    c.track(attempt);
+    if (run.workerBySlot.has(slot)) store.db.prepare('UPDATE attempts SET worker_id = ? WHERE id = ?').run(run.workerBySlot.get(slot), attempt.id);
+    const tail = (text: string, finisher: string) => this.answerTail({
+      run, task, leaseId, attempt, tierIdx, slot, prepared, carried, spliced, freeAttempt, outputMode: 'edits', elided: [], elisions: [], history, text, finisher, signal, ev,
+    });
+    const nothing = (code: string, why: string) => {
+      store.updateAttempt(attempt.id, { status: 'completed', finishedAt: Date.now() });
+      return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, code, why), { infra: false, strike: false }, tierIdx);
+    };
+
+    // A packet sent back to have its stored candidate gated again: that is a free attempt, as on any tier.
+    if (spliced && freeAttempt) {
+      const regate = task.fix?.check === 'regate';
+      store.updateAttempt(attempt.id, { model: freeAttemptModel(regate ? 'stored candidate' : 'splice', spliced.model ?? null), latencyMs: 0 });
+      ev('attempt.spliced', `${regate ? 're-gated' : 'rebuilt on upstream'} without a model call: ${spliced.notes.join('; ').slice(0, 600)}`, 'info', { notes: spliced.notes });
+      return tail(JSON.stringify({ files: spliced.files, ...(spliced.codeOrigin ? { codeOrigin: spliced.codeOrigin } : {}), ...(spliced.adaptedBodies ? { adaptedBodies: spliced.adaptedBodies } : {}) }), spliced.model ?? 'decomp-orchestrator');
+    }
+    // A fix needs the code that failed, which the engine never reads: the next tier takes it.
+    if (task.fix) return nothing('RECON_NOT_FOR_FIXES', 'a packet sent back from a batch check needs its earlier candidate, which the deterministic tier does not read');
+    if (!recon) return nothing('RECON_UNAVAILABLE', 'no reconstruction engine is configured on this server');
+    const limit = node.data.recon?.maxFunctionBytes;
+    if (limit && task.functions.every((f) => f.size > limit)) return nothing('RECON_SIZE_LIMIT', `every function is larger than this tier's limit of ${limit} bytes`);
+
+    const where = repo.engineContext?.(slot) ?? null;
+    const budgets = { ...(node.data.recon?.candidates ? { candidates: node.data.recon.candidates } : {}), ...(node.data.recon?.compiles ? { compiles: node.data.recon.compiles } : {}) };
+    const r = await recon.solve({
+      packet: { functions: task.functions.map((f) => ({ rva: f.rva.toLowerCase(), size: f.size, ...(f.name ? { name: f.name.slice(0, 300) } : {}) })), unit: task.unit, allowedPaths: prepared.allowedPaths.slice(0, 8) },
+      ...(where ? { worktree: where.worktree, checkout: where.checkout, dataDir: where.dataDir } : {}),
+      ...(Object.keys(budgets).length ? { budgets } : {}),
+      ...(limit ? { options: { maxFunctionBytes: limit } } : {}),
+    }, { signal, ...(node.data.recon?.timeoutSec ? { timeoutMs: node.data.recon.timeoutSec * 1000 } : {}) });
+    store.updateAttempt(attempt.id, { latencyMs: r.durationMs, bundleHash: r.ok ? r.result.inputDigest : null });
+    if (!r.ok) {
+      if (r.kind === 'aborted' || signal.aborted) throw new AbortedError();
+      this.recordRecon(run, task, attempt, r, null);
+      store.updateAttempt(attempt.id, { status: 'abandoned', error: `engine ${r.kind}: ${r.detail}`.slice(0, 500), finishedAt: Date.now() });
+      // The engine keeps failing on this packet: the next tier takes it rather than nobody.
+      if (task.infraFailures + 1 >= this.opts.maxInfraFailures && tierIdx + 1 < run.plan.tiers.length) {
+        return this.route(run, task, leaseId, attempt, syntheticVerdict(task, attempt, 'RECON_INFRA', `the engine failed ${task.infraFailures + 1} times (${r.kind}): ${r.detail}`), { infra: false, strike: false }, tierIdx);
+      }
+      return this.infraFailure(run, task, leaseId, `engine ${r.kind}: ${r.detail}`);
+    }
+    const res = r.result;
+    this.recordRecon(run, task, attempt, r, res);
+    const solved = res.functions.filter((f) => f.status === 'solved');
+    const codes = res.functions.map((f) => `${f.rva} ${f.status} ${f.reasonCode}`).join('; ');
+    ev('recon.result', `${model}: ${solved.length}/${res.functions.length} solved (${codes})`.slice(0, 600), 'info', { solved: solved.length, functions: res.functions.length, ms: r.durationMs });
+    if (!solved.length || !res.edits.length) {
+      const one = res.functions.find((f) => f.status === 'blocked') ?? res.functions.find((f) => f.status === 'unsupported') ?? res.functions[0];
+      return nothing(`RECON_${(one?.status ?? 'unsolved').toUpperCase()}`, `the engine solved none of the packet's functions: ${codes}`.slice(0, 1_000));
+    }
+    await tail(JSON.stringify({ edits: res.edits, ...(res.codeOrigin ? { codeOrigin: res.codeOrigin } : {}), ...(res.adaptedBodies ? { adaptedBodies: res.adaptedBodies } : {}) }), model!);
+    // The Gate Keeper rejected a function the engine verified: that is the engine's defect, recorded as such.
+    const verdict = store.verdictsForTask(task.id).find((v) => v.attemptId === attempt.id);
+    const disagree = verdict ? solved.filter((f) => verdict.compare?.some((x) => x.rva.toLowerCase() === f.rva && x.result !== 'pass')) : [];
+    if (disagree.length) ev('recon.disagreement', `the Gate Keeper does not confirm ${disagree.length} function(s) the engine verified: ${disagree.map((f) => f.rva).join(', ')}`, 'error', { rvas: disagree.map((f) => f.rva) });
+  }
+
+  /** One row per function the engine was asked about: status, codes and counts (nothing of the target's code). */
+  private recordRecon(run: ActiveRun, task: TaskRow, attempt: Attempt, r: EngineRun, res: EngineResult | null) {
+    const ins = this.deps.store.db.prepare(`INSERT INTO recon_results (run_id, task_id, attempt_id, rva, size, engine_version, rule_store_version, input_digest, status, reason_code,
+      counters_json, rule_trail_json, origin_labels_json, evidence_json, infra_kind, duration_ms, created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+    const now = Date.now();
+    for (const f of task.functions) {
+      const got = res?.functions.find((x) => x.rva === f.rva.toLowerCase());
+      ins.run(run.row.id, task.id, attempt.id, f.rva.toLowerCase(), f.size, res?.engineVersion ?? null, res?.ruleStoreVersion ?? null, res?.inputDigest ?? null,
+        got?.status ?? 'infra', got?.reasonCode ?? (r.ok ? 'MISSING' : `INFRA_${r.kind.toUpperCase().replace(/-/g, '_')}`),
+        JSON.stringify(got?.counters ?? {}), JSON.stringify(got?.ruleTrail ?? []), JSON.stringify(got?.originLabels ?? []), JSON.stringify(got?.evidenceSummary ?? []),
+        r.ok ? null : r.kind, r.durationMs, now);
     }
   }
 
@@ -3408,7 +3538,9 @@ export class RunEngine {
     // Format-only rejections (header/lint/output contract with no byte evidence against the code)
     // say nothing about how hard the function is: retry on the same tier without counting toward
     // promotion or escalation — at most FORMAT_RETRIES times per packet, then normal rules apply.
-    if (isFormatOnly(verdict) && store.verdictsForTask(task.id).filter((v) => v.route === 'retry' && isFormatOnly(v)).length < FORMAT_RETRIES) {
+    // A deterministic tier gives the same answer to the same input: one attempt, then the next tier (D-009).
+    const once = limit.kind === 'deterministic';
+    if (!once && isFormatOnly(verdict) && store.verdictsForTask(task.id).filter((v) => v.route === 'retry' && isFormatOnly(v)).length < FORMAT_RETRIES) {
       if (this.settle(run, task, leaseId, 'pending', { ...common, attemptsTotal, bestExactBytes, cheatStrikes, notBefore: 0 }, verdict, 'retry')) events.emit('task.retry', `retry ${fnLabel} on the same tier (format only, not counted toward escalation): ${summarise(verdict)}`, { runId, taskId: task.id, level: 'debug' });
       return;
     }
@@ -3417,7 +3549,7 @@ export class RunEngine {
 
     // One setting decides how long a packet stays on a tier: the flow node's attempts. Neither the
     // run's old "promote after failures" nor the node's "stuck after" moves it on any earlier.
-    const exhausted = attemptsAtTier >= limit.maxAttempts || !tierNode.retryLoop;
+    const exhausted = once || attemptsAtTier >= limit.maxAttempts || !tierNode.retryLoop;
     if (!exhausted) {
       if (this.settle(run, task, leaseId, 'pending', { ...common, attemptsTotal, attemptsAtTier, attemptsAtDifficulty, bestExactBytes, noImprovementStreak, cheatStrikes, notBefore: 0 }, verdict, 'retry')) events.emit('task.retry', `retry ${fnLabel}: ${summarise(verdict)}`, { runId, taskId: task.id, level: 'debug' });
       return;
@@ -3623,6 +3755,30 @@ export function isHeldOnly(v: Verdict): boolean {
 export function isFormatOnly(v: Verdict): boolean {
   const blocks = v.findings.filter((f) => f.severity === 'block');
   return blocks.length > 0 && blocks.every((f) => FORMAT_CODES.test(f.code)) && !(v.compare ?? []).some((c) => c.result !== 'pass');
+}
+
+/** What the shared tail of an attempt needs, whoever wrote the answer. */
+interface AnswerTail {
+  run: ActiveRun;
+  task: TaskRow;
+  leaseId: string;
+  attempt: Attempt;
+  tierIdx: number;
+  slot: number;
+  prepared: PreparedTask;
+  carried: Array<{ path: string; content: string }>;
+  spliced: { files: Array<{ path: string; content: string }> } | null;
+  freeAttempt: boolean;
+  outputMode: 'files' | 'edits' | 'either';
+  elided: string[];
+  elisions: Elision[];
+  history: HistoryEntry[];
+  /** The answer as a WorkerOutput JSON text. */
+  text: string;
+  /** The model (or engine) that wrote it: attribution and the header's model line. */
+  finisher: string;
+  signal: AbortSignal;
+  ev: (kind: string, msg: string, level?: 'debug' | 'info' | 'warn' | 'error', data?: Record<string, unknown>) => void;
 }
 
 function syntheticVerdict(task: TaskRow, attempt: Attempt, code: string, message: string): Verdict {

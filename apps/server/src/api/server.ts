@@ -109,8 +109,11 @@ export async function buildServer(app: App) {
         workerSlots: p.workerSlots, gatekeepers: p.gatekeepers.length, route: p.route, routeSource: p.routeSource,
       };
     }
+    // A deterministic tier needs no account; neither does the orchestrator of a flow with no model tier.
+    const modelFree = flow.nodes.filter((n) => n.type === 'worker').every((n) => n.data.kind === 'deterministic');
     const unresolved = flow.nodes
       .filter((n) => n.type !== 'gatekeeper' || n.data.gate.llmReview)
+      .filter((n) => !(n.type === 'worker' && n.data.kind === 'deterministic') && !(n.type === 'orchestrator' && modelFree))
       .filter((n) => pool.resolve(n.data.pool, n.type === 'worker' ? 'worker' : n.type).length === 0)
       .map((n) => ({ level: 'warn' as const, nodeId: n.id, message: `no account/model in the pool serves "${n.data.label || n.id}" with its binding` }));
     // Pre-run capacity check for the per-worker function cap: ?batch=500&cap=60&stealing=1

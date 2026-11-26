@@ -26,6 +26,10 @@ export interface EngineProcessOptions {
   args?: string[];
   timeoutMs: number;
   signal?: AbortSignal;
+  /** The arguments name a request file the caller wrote: nothing goes to stdin, so the host can cancel through it. */
+  requestFile?: boolean;
+  /** Module paths after the engine's own (a virtual environment's site-packages). */
+  pythonPath?: string[];
 }
 
 /** A Windows path as the WSL distribution sees it (`D:\a\b` -> `/mnt/d/a/b`); other paths pass through. */
@@ -96,10 +100,10 @@ export async function runEngine(request: EngineRequest, o: EngineProcessOptions)
   try {
     r = await o.host.run(o.python ?? 'python3', o.args ?? ['-s', '-B', '-m', 'recon', 'serve'], {
       cwd: o.engineDir,
-      env: { PYTHONPATH: o.engineDir, PYTHONHASHSEED: '0', PYTHONDONTWRITEBYTECODE: '1' },
+      env: { PYTHONPATH: [o.engineDir, ...(o.pythonPath ?? [])].join(o.host.kind === 'wsl' || process.platform !== 'win32' ? ':' : ';'), PYTHONHASHSEED: '0', PYTHONDONTWRITEBYTECODE: '1' },
       timeoutMs: o.timeoutMs,
       signal: o.signal,
-      stdin: JSON.stringify(checked.data) + '\n',
+      ...(o.requestFile ? {} : { stdin: JSON.stringify(checked.data) + '\n' }),
       maxOutputBytes: MAX_LINE_BYTES * 2,
     });
   } catch (e) {

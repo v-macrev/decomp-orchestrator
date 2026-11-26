@@ -77,7 +77,9 @@ export class ComplexityClassifier {
       const c = classify(s.score, t);
       return { fn, features, score: s.score, difficulty: c.difficulty, borderline: c.borderline, llm: false };
     });
-    if (cfg.routing.enabled && cfg.routing.llmTieBreak) await this.tieBreak(runId, assessed, cfg.routing, plan);
+    // A run of deterministic tiers only makes no model call, not even to break a tie.
+    const modelFree = plan.tiers.every((t) => t.node.data.kind === 'deterministic');
+    if (cfg.routing.enabled && cfg.routing.llmTieBreak && !modelFree) await this.tieBreak(runId, assessed, cfg.routing, plan);
     return partitionRouted(assessed, cfg.packetMaxFunctions, t, cfg.routing.enabled);
   }
 

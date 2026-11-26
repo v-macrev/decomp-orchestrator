@@ -165,8 +165,28 @@ export const GateChecks = z.object({
 });
 export type GateChecks = z.infer<typeof GateChecks>;
 
+/** Worker: limits of one deterministic attempt (operation counts and one wall-clock bound). */
+export const ReconSettings = z.object({
+  /** Candidates generated per function. */
+  candidates: z.number().int().min(1).max(10_000).optional(),
+  /** Candidate sources compiled per function. */
+  compiles: z.number().int().min(1).max(10_000).optional(),
+  /** Wall-clock bound of one engine process, in seconds. */
+  timeoutSec: z.number().int().min(10).max(7_200).optional(),
+  /** Functions larger than this (bytes) are not tried by this tier. */
+  maxFunctionBytes: z.number().int().min(1).max(1_000_000).optional(),
+});
+export type ReconSettings = z.infer<typeof ReconSettings>;
+
+export const WorkerKind = z.enum(['llm', 'deterministic']);
+export type WorkerKind = z.infer<typeof WorkerKind>;
+
 export const FlowNodeData = z.object({
   label: z.string().default(''),
+  /** Worker: who writes the answer. `deterministic` is the reconstruction engine: no account, no model call. */
+  kind: WorkerKind.default('llm'),
+  /** Worker (deterministic): the engine's limits. */
+  recon: ReconSettings.optional(),
   instances: z.number().int().min(1).max(256).default(1),
   pool: PoolBinding.default(PoolBinding.parse({})),
   /** Worker: the only retry setting. Attempts at this tier, then the next tier (on the last, dead). */

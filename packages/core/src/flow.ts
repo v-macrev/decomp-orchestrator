@@ -224,6 +224,7 @@ export function defaultFlow(): Flow {
     position: { x, y },
     data: {
       label: id,
+      kind: 'llm',
       instances: 1,
       pool: { strategy: 'pool', accountIds: [], tags: [] },
       maxAttempts: 6,
@@ -258,6 +259,43 @@ export function defaultFlow(): Flow {
       { id: 'e-escalate-1', source: 'worker-fast', target: 'worker-balanced', kind: 'escalate' },
       { id: 'e-escalate-2', source: 'worker-balanced', target: 'worker-frontier', kind: 'escalate' },
       { id: 'e-report', source: 'gate', target: 'orchestrator', kind: 'report' },
+    ],
+  };
+}
+
+/**
+ * The deterministic-first preset: every packet goes to the reconstruction engine first (no account, no model
+ * call, one attempt), then up the default model ladder when the engine does not solve it. Without accounts
+ * the engine tier alone runs, and what it does not solve ends there.
+ */
+export function deterministicFirstFlow(opts: { withModels?: boolean } = {}): Flow {
+  const base = defaultFlow();
+  const engine: FlowNode = {
+    id: 'worker-engine', type: 'worker', position: { x: 340, y: -180 },
+    data: { ...base.nodes.find((n) => n.id === 'worker-fast')!.data, label: 'Reconstruction engine', kind: 'deterministic', instances: 2, maxAttempts: 1, stuckAfter: 1, capability: 'fast', costWeight: 0.01, stealDown: false, pool: { strategy: 'pool', accountIds: [], tags: [] }, recon: { timeoutSec: 900 } },
+  };
+  if (opts.withModels === false) {
+    const orchestrator = base.nodes.find((n) => n.type === 'orchestrator')!;
+    const gate = base.nodes.find((n) => n.type === 'gatekeeper')!;
+    return {
+      id: 'deterministic-only', name: 'Reconstruction engine only', nodes: [orchestrator, engine, gate],
+      edges: [
+        { id: 'e-dispatch', source: orchestrator.id, target: engine.id, kind: 'dispatch', difficulties: ['easy', 'medium', 'hard'] },
+        { id: 'e-submit-engine', source: engine.id, target: gate.id, kind: 'submit' },
+        { id: 'e-retry-engine', source: gate.id, target: engine.id, kind: 'reject_retry' },
+        { id: 'e-report', source: gate.id, target: orchestrator.id, kind: 'report' },
+      ],
+    };
+  }
+  return {
+    id: 'deterministic-first', name: 'Engine first, then models',
+    nodes: [...base.nodes, engine],
+    edges: [
+      ...base.edges.filter((e) => e.kind !== 'dispatch'),
+      { id: 'e-dispatch', source: 'orchestrator', target: engine.id, kind: 'dispatch', difficulties: ['easy', 'medium', 'hard'] },
+      { id: 'e-submit-engine', source: engine.id, target: 'gate', kind: 'submit' },
+      { id: 'e-retry-engine', source: 'gate', target: engine.id, kind: 'reject_retry' },
+      { id: 'e-escalate-0', source: engine.id, target: 'worker-fast', kind: 'escalate' },
     ],
   };
 }

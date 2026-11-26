@@ -126,6 +126,8 @@ export interface RepoAdapter {
   docFile?(rel: string): Promise<string | null>;
   /** Local pack directory of a function, if one exists (skill matching for shadow-evaluation cases). */
   packFor?(fn: FunctionTarget): Promise<string | null>;
+  /** Where a deterministic tier's engine reads and works for this slot (paths as the repository host sees them). */
+  engineContext?(slot: number): { worktree: string; checkout: string; dataDir: string } | null;
   /** Give back local claims taken by `prepare` for packets that will not be submitted. */
   releaseClaims?(rvas: string[], reason: string): Promise<Array<{ rva: string; ok: boolean; error: string | null }>>;
   /**

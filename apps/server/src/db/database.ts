@@ -350,6 +350,32 @@ const MIGRATIONS: string[] = [
   `
   ALTER TABLE tasks ADD COLUMN hold_json TEXT;
   `,
+  // What the deterministic tier's engine said about each function it was given: status, fixed reason code,
+  // counters, rule trail and labels. Counts and codes only; nothing of the target's code.
+  `
+  CREATE TABLE recon_results (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    attempt_id TEXT,
+    rva TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    engine_version TEXT,
+    rule_store_version TEXT,
+    input_digest TEXT,
+    status TEXT NOT NULL,
+    reason_code TEXT NOT NULL,
+    counters_json TEXT NOT NULL DEFAULT '{}',
+    rule_trail_json TEXT NOT NULL DEFAULT '[]',
+    origin_labels_json TEXT NOT NULL DEFAULT '[]',
+    evidence_json TEXT NOT NULL DEFAULT '[]',
+    infra_kind TEXT,
+    duration_ms INTEGER,
+    created_at INTEGER NOT NULL
+  );
+  CREATE INDEX recon_results_run ON recon_results(run_id, rva);
+  CREATE INDEX recon_results_rva ON recon_results(rva, engine_version);
+  `,
 ];
 
 export function openDatabase(path: string): DB {

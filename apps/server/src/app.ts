@@ -6,6 +6,11 @@ import { fromRoot, type ServerConfig } from './config.js';
 import { openDatabase } from './db/database.js';
 import { Store } from './db/store.js';
 import { RunEngine } from './orchestrator/engine.js';
+import { ReconRunner, readEngineVersion } from './recon/runner.js';
+import { toHostPath } from './recon/process.js';
+import { LocalHost, WslHost } from './repo/host.js';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { seedRepoLessons } from './orchestrator/lessons.js';
 import { AccountPool } from './pool/scheduler.js';
 import { ProviderRegistry } from './providers/registry.js';
@@ -60,7 +65,7 @@ export async function createApp(cfg: ServerConfig, opts: { quiet?: boolean } = {
   const providers = new ProviderRegistry({ oracle: sim ?? undefined });
   const skills = new SkillRegistry(store, cfg.dbPath === ':memory:' ? null : fromRoot(cfg.skillsDir));
   skills.failStaleJobs();
-  const engine = new RunEngine({ store, pool, providers, repo, events, skills }, cfg.engine);
+  const engine = new RunEngine({ store, pool, providers, repo, events, skills, recon: reconRunner(cfg) }, cfg.engine);
   const shadow = new ShadowEvaluator({ store, registry: skills, repo, pool, providers, events, engine, context: engine.contextV2 });
   const curator = new SkillCurator({ store, registry: skills, repo, events, engine, shadow, model: new CuratorModel(pool, providers), cwd: fromRoot('.') }, { shadow: { cases: cfg.skills.shadowCases, repeats: cfg.skills.shadowRepeats } });
   engine.afterRun = (runId) => {
@@ -82,6 +87,19 @@ export async function createApp(cfg: ServerConfig, opts: { quiet?: boolean } = {
       store.db.close();
     },
   };
+}
+
+/** The deterministic tiers' engine, on the repository's host; null when `recon.enabled` is off. */
+export function reconRunner(cfg: ServerConfig): ReconRunner | null {
+  if (!cfg.recon.enabled) return null;
+  const wsl = cfg.mode === 'repo' && cfg.repo?.host.kind === 'wsl' ? cfg.repo.host.distro : null;
+  const host = wsl ? new WslHost(wsl) : new LocalHost();
+  const own = fromRoot(path.join('engine', 'recon'));
+  return new ReconRunner({
+    host, engineDir: cfg.recon.engineDir ?? toHostPath(host, own), python: cfg.recon.python, pythonPath: cfg.recon.pythonPath,
+    version: readEngineVersion(own), timeoutMs: cfg.recon.timeoutSec * 1000,
+    scratch: cfg.mode === 'repo' && cfg.repo ? host.path.join(wsl ? cfg.repo.localDir : fromRoot(cfg.repo.localDir), 'orchestrator', 'recon') : path.join(tmpdir(), 'decomp-recon'),
+  });
 }
 
 export function srRepoConfig(cfg: ServerConfig): SrRepoConfig {

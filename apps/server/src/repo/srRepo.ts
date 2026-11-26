@@ -145,6 +145,11 @@ export class SrRepo implements RepoAdapter {
     return this.p.resolve(this.cfg.worktreeRoot, slot >= this.slotCount ? 'staging' : `slot-${slot}`);
   }
 
+  /** The engine works in the slot's worktree, reads the checkout's private config, and keeps its data under `.local/`. */
+  engineContext(slot: number) {
+    return { worktree: this.wt(slot), checkout: this.cfg.repoPath, dataDir: this.p.join(this.cfg.localDir, 'orchestrator', 'recon') };
+  }
+
   private git(cwd: string, args: string[], timeoutMs = 60_000) {
     return this.host.run('git', args, { cwd, timeoutMs, maxOutputBytes: 64 * 1024 * 1024 });
   }
