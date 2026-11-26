@@ -347,6 +347,12 @@ Engine measured:  7ea7e13 and the per-engine journal
 D-051 engine:     208bc13, prewarm 119 min (no error, no death), campaign 21 min: development reach candidates 590, primary
                   CALLEE_SIGNATURE_UNKNOWN 694, INDIRECT_CALL 334; held-out 33, 32, 18; BYTE_MATCHED 2. Neutral, as D-051 predicted:
                   the leaf extents turn calls to no extent into calls to import thunks, whose signatures stay unknown until D-052
+D-052 + D-053:    c08ac11, prewarm 56 min (normal forms all reused: 7 s), unknown signatures 92,778 (D-051: 97,302), 1,347
+                  calls resolved by import declarations; campaign: development reach candidates 674 (590), CALLEE_SIGNATURE_UNKNOWN
+                  577 (694), READS_A_LOCATION_NOBODY_SET 356 (373); held-out candidates 40 (33), CALLEE_SIGNATURE_UNKNOWN 21 (32);
+                  BYTE_MATCHED 2. What moved stops next at CALLEE_NOT_DECLARED (261, was 186): a candidate is written as a member
+                  of its class in the unit, and the member form refuses every call; and at STACK_ARGUMENT (23 new: imports with
+                  more than four parameters)
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 
@@ -358,8 +364,8 @@ By family: Knowledge 1,585, ABI 413, Source 73, Machine 28, Search 24, Unit 16.
 **No function was judged on its budget.** The 16 functions suspended at level 0 were resumed at four times the budgets and
 each ended in a state of its own; none was left resumable, and none was counted as unreconstructable because a budget ran out.
 
-**Still open in Phase 7:** the constant scan and the ceiling estimate; the campaign on the D-052 engine (imported functions
-declared by the platform's headers, d00c193), whose prewarm is running.
+**Still open in Phase 7:** the constant scan and the ceiling estimate; calls in member forms (the gate of every function
+with a call that reaches a candidate), arguments on the stack, thread-local storage.
 
 ## Items found by the audit that block or shape later phases
 
