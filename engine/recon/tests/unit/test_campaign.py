@@ -206,8 +206,9 @@ def test_the_pool_answers_every_task_and_a_task_that_kills_its_worker_is_infrast
     assert got == {t: ("ok", 2 * t + 1) for t in range(20)}
     got = {}
     pool = Pool(int, (7,), die_on, most=2)
-    pool.run([1, 7, -1, 3], lambda t, kind, v, m: got.__setitem__(t, kind))
-    assert got == {1: "ok", 7: "died", -1: "error", 3: "ok"}
+    pool.run([1, 7, -1, 3], lambda t, kind, v, m: got.__setitem__(t, (kind, v)))
+    assert {t: k for t, (k, _v) in got.items()} == {1: "ok", 7: "died", -1: "error", 3: "ok"}
+    assert got[-1][1].startswith("ValueError at test_campaign.py:") and got[-1][1].endswith(" die_on")   # where, not what
     assert pool.stats.died == 2                      # tried again once before it is answered
 
 

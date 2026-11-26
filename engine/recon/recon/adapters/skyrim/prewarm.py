@@ -51,15 +51,20 @@ def run(worktree: Path, checkout: Path, knowledge: str, jobs: int = 1, log: Call
             log(f"prewarm: callers indexed in {report['callers_s']} s")
         chunks = [everything[k:k + CHUNK] for k in range(0, len(everything), CHUNK)]
         sums: dict[str, int] = {}
+        errors: dict[str, int] = {}
         state = {"n": 0, "last": time.monotonic(), "t0": time.monotonic()}
 
-        def done(task, kind, value, measure, phase=phase, sums=sums, state=state, chunks=chunks) -> None:
+        def done(task, kind, value, measure, phase=phase, sums=sums, errors=errors, state=state, chunks=chunks) -> None:
             state["n"] += 1
             if kind == "ok":
                 for k, v in value.items():
                     sums[k] = sums.get(k, 0) + v
             else:
                 sums[f"chunk_{kind}"] = sums.get(f"chunk_{kind}", 0) + 1
+                what = f"{kind}: {value}"
+                if what not in errors:
+                    log(f"prewarm {phase}: a chunk failed, {what}")
+                errors[what] = errors.get(what, 0) + 1
             if time.monotonic() - state["last"] >= every_s or state["n"] == len(chunks):
                 state["last"] = time.monotonic()
                 el = time.monotonic() - state["t0"]
@@ -71,7 +76,7 @@ def run(worktree: Path, checkout: Path, knowledge: str, jobs: int = 1, log: Call
         pool = Pool(_init, (str(worktree), str(checkout), knowledge), _work, most=jobs, log=log)
         pool.run([(phase, c) for c in chunks], done)
         report[phase] = {"s": round(time.monotonic() - state["t0"], 1), **sums, "workers_most": pool.stats.most,
-                         "workers_died": pool.stats.died, "worker_largest_mib": pool.stats.largest >> 20}
+                         "workers_died": pool.stats.died, "worker_largest_mib": pool.stats.largest >> 20, "errors": errors}
     store = pack.store
     report["store"] = {k: store.count(k) for k in ("normal", "callees", "sites", "signature", "alternatives", "callers")}  # type: ignore[union-attr]
     return report

@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import multiprocessing as mp
 import time
+import traceback
 from collections import deque
 from dataclasses import dataclass, field
 from multiprocessing.connection import Connection, wait
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 GIB = 1 << 30
@@ -40,6 +42,16 @@ def resident(pid: int | str = "self") -> tuple[int, int]:
         return 0, 0
 
 
+def where(e: BaseException) -> str:
+    """An exception's kind and the innermost frame of the engine's own code it was raised in: file name, line, function.
+    No path and no value: only where in the engine it happened."""
+    frames = [f for f in traceback.extract_tb(e.__traceback__) if "recon" in Path(f.filename).parts]
+    if not frames:
+        return type(e).__name__
+    f = frames[-1]
+    return f"{type(e).__name__} at {Path(f.filename).name}:{f.lineno} {f.name}"
+
+
 def _main(conn: Connection, init: Callable, init_args: tuple, work: Callable) -> None:
     state = init(*init_args)
     while True:
@@ -49,7 +61,7 @@ def _main(conn: Connection, init: Callable, init_args: tuple, work: Callable) ->
         try:
             out = ("ok", work(state, task))
         except Exception as e:  # noqa: BLE001 - a defect of the work, answered so that it is recorded
-            out = ("error", type(e).__name__)
+            out = ("error", where(e))
         conn.send((out, resident()))
 
 
@@ -190,4 +202,4 @@ class Pool:
                     self.workers.remove(w)
 
 
-__all__ = ["GIB", "Pool", "Stats", "meminfo", "resident"]
+__all__ = ["GIB", "Pool", "Stats", "meminfo", "resident", "where"]

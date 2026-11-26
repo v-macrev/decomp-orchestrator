@@ -481,16 +481,34 @@ class Program:
         except NotReconstructed:
             return None
 
-    def _infer(self, at: int, k: int = 0) -> Signature:
-        """From the function's own code: callees by their signatures, calls through a value by what the site shows."""
-        fn = self.normal(at)
+    def _resolver(self, fn: Fn) -> tuple[Callable[[Arg], Signature | None], dict]:
+        """How `fn`'s calls are read: a direct callee by its signature, a call through a value by what the site shows.
+        Every reading of `fn`'s own code goes through this one resolver, so they agree on what its results are."""
         through = indirect_signatures(fn, self.conv)
 
         def resolve(t: Arg) -> Signature | None:
             return self.callee(t) if isinstance(t, Const) else through.get(t)  # type: ignore[arg-type]
+        return resolve, through
+
+    def _results(self, at: int) -> list:
+        fn = self.normal(at)
+        resolve, _through = self._resolver(fn)
         self._inferring += 1
         try:
-            result, why = sg.results(fn, self.conv, resolve)[k]
+            return sg.results(fn, self.conv, resolve)
+        finally:
+            self._inferring -= 1
+
+    def _infer(self, at: int, k: int = 0) -> Signature:
+        """From the function's own code: callees by their signatures, calls through a value by what the site shows."""
+        fn = self.normal(at)
+        resolve, through = self._resolver(fn)
+        self._inferring += 1
+        try:
+            results = sg.results(fn, self.conv, resolve)
+            if k >= len(results):
+                raise NotReconstructed("RESULT_READING_ABSENT")
+            result, why = results[k]
             _low, slots = lw.lower(fn, self.conv, self.abi, resolve, result)
         finally:
             self._inferring -= 1
@@ -525,7 +543,7 @@ class Program:
     def _open_readings(self, at: int, best: Signature | None, sites: list[dict]) -> tuple[Signature, ...]:
         found: list[Signature] = []
         try:   # what its own code leaves open: the other results it may have
-            n = len(sg.results(self.normal(at), self.conv, self.callee))
+            n = len(self._results(at))
             for k in range(1, n):
                 try:
                     found.append(self._infer(at, k))

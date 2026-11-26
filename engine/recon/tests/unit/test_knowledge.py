@@ -426,6 +426,13 @@ def test_a_function_that_calls_through_a_value_has_a_signature_and_so_do_its_cal
         cd.Generator(p, BASE + 0x2000).make(cd.Choice(), set())
 
 
+def test_what_a_function_leaves_open_is_read_with_the_same_calls_as_its_signature():
+    p = program(virtual(0x2000))
+    at = BASE + 0x2000
+    assert len(p._results(at)) == 1          # the site says nothing reads a result after the call
+    assert p.alternatives(at) == ()          # so there is no other reading to try, and asking for one does not fail
+
+
 def test_what_a_call_site_shows_is_read_from_the_caller_s_own_values():
     p = program(virtual(0x2000))
     fn = p.normal(BASE + 0x2000)
