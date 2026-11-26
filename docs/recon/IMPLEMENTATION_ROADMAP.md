@@ -282,6 +282,39 @@ through the unchanged Gate Keeper, and its batch dry-runs clean. Then stop: the 
 * New units: the engine reads the skeleton the tooling wrote, but the trial covered existing units only.
 * D-006, the provenance wording of engine output: decided on 2026-11-26, the default stays (`skyrim/solve.py`).
 
+## Phase 7: measurement and search plumbing — first increment, 2026-11-26
+
+D1, D3 and D8 of `docs/DETERMINISTIC_MATCHING_CONVERGENCE.md`, in that order (D-037 to D-040).
+
+```text
+Increment:        D1 + D3 + D8 (search plumbing), blockers: no external reference could reach the comparator; budgets unread;
+                  the execution check unmeasured. Chosen by the plan's order (section 10), before any blocker ranking exists.
+Changed:          engine/recon: core/budget.py (new), core/synthesis/search.py, core/synthesis/candidates.py, core/ir/smt.py,
+                  core/emitter/cpp.py, core/inference/{signature,types}.py, adapters/x64_msvc/{batch,symbols}.py (symbols new),
+                  adapters/skyrim/{pack,solve}.py, adapters/skyrim/filter_audit.py (new), cli/{main,commands}.py;
+                  tests: synth.py, test_source.py, test_end_to_end.py, fixtures external*.cpp and filtered*.cpp (original)
+Tests:            engine 505 passed, 0 skipped, Linux; 470 passed, 1 skipped (+ 34 end-to-end passed), Windows
+Development set:  not re-run in this increment (the reach and solve sets are re-run with the manifest and taxonomy, next)
+Held-out set:     synthetic held-out unchanged: the end-to-end test of at least 11 of 16 matched still passes
+Denominator:      not measured in this increment
+Regressions:      none in the suites; the 18 synthetic targets still all BYTE_MATCHED and pass the harness's comparator
+Overfitting:      rules added 0; no target RVA, name or byte in engine source or tests (fixtures are original); the constant-scan test
+                  is still to be written
+Next:             the manifest, held-out split and taxonomy, then a re-run of the 2,375 reach set and the 93 solve set (section 10, step 3)
+```
+
+**Gate items met in this increment**
+
+| Item | Result |
+|---|---|
+| A synthetic function calling a declared external function reaches `BYTE_MATCHED` | 3 of 3 (`external.cpp`), each passed by the harness's comparator with the linker map's decorated names; moved, the binding fails |
+| Budgets measurably bound candidates and compiles | each of `candidates`, `compiles`, `expansions`, `irNodes`, `solverUnits` set to 0 and 1: counter within the limit, `BUDGET_EXHAUSTED` with that kind, in process; the first four also through the command |
+| A resumed search equals an uninterrupted one, field for field | in process (15 cases, the frontier through its file form) and through the command with `--frontiers` |
+| The D8 false-rejection count is reported | **0** (synthetic: 1 rejected of 279 trees; real sample of 100 functions: 4 rejected of 632, none compiles) |
+
+**Still open in Phase 7:** D2 (callee depth and fixpoint rounds as budgets), D4 to D7, the manifest, the held-out split, the taxonomy,
+the constant scan and the ceiling estimate. The member emitter still refuses callees (D10, Phase 8), so D1 changes no real result yet.
+
 ## Items found by the audit that block or shape later phases
 
 | Id | Item | Needed by |
@@ -300,6 +333,7 @@ through the unchanged Gate Keeper, and its batch dry-runs clean. Then stop: the 
 2. ~~Phase 3, integer lifting and analysis~~ (done above). ~~Phase 4, the IR~~ (done above).
 3. ~~Phase 5, the vertical slice on synthetic functions~~ (done above).
 4. ~~Phase 6, the deterministic tier in the orchestrator~~ (done above; the batch waits for the user to submit).
-5. By the failure counts: declarations of callees and of other classes, then typed members carved from byte arrays.
+5. Phase 7 of the convergence plan: ~~D1, D3, D8~~ (done above); then D2, D4 to D7, the manifest, taxonomy and ceiling estimate.
+6. By the failure counts: declarations of callees and of other classes, then typed members carved from byte arrays.
 
 The next capability is always chosen by the coverage and failure reports, not by interest.

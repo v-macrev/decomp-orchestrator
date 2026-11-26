@@ -109,12 +109,14 @@ class Compiler:
 
 @dataclass(frozen=True)
 class Distance:
-    """How far a candidate's function is from the target's bytes. `total` 0: nothing differs that this looks at."""
+    """How far a candidate's function is from the target's bytes. `total` 0: nothing differs that this looks at, apart
+    from the `unknown` references, which no evidence names and which only the comparator can settle."""
 
     total: int
     size: int                # difference in bytes
     instructions: int        # instructions to change, insert or remove
-    references: int          # references that lead elsewhere
+    references: int          # references that evidence names and that lead elsewhere than the target's
+    unknown: int = 0         # references that no evidence names: never counted as wrong, never as right
 
 
 def _rows(code: bytes, holes: dict[int, str]) -> list[tuple]:
@@ -132,21 +134,26 @@ def _rows(code: bytes, holes: dict[int, str]) -> list[tuple]:
 
 
 def distance(f: coff.Function, target: bytes, rva: int, resolve) -> Distance:
-    """`resolve(reloc, place)`: the RVA a reference of the candidate means, or None when it is not known."""
+    """`resolve(reloc)`: the RVA a reference of the candidate means by the evidence, or None when no evidence names it.
+
+    A named reference counts as wrong when the target's field leads elsewhere. An unnamed one is masked like a named one
+    and counted apart: whether it is right is the comparator's question, so a candidate that differs only there has
+    distance 0 and goes to the comparator."""
     import difflib
 
-    wrong = 0
+    wrong = unknown = 0
     holes: dict[int, str] = {}
-    theirs: dict[int, str] = {}
     for r in f.relocs:
         meant = resolve(r)
+        if meant is None:
+            unknown += 1
+            holes[r.offset] = "?"
+            continue
         holes[r.offset] = f"{meant}"
         if r.kind in coff.REL32 and r.offset + 4 <= len(target):
             disp = int.from_bytes(target[r.offset:r.offset + 4], "little", signed=True)
             add = int.from_bytes(f.code[r.offset:r.offset + 4], "little", signed=True)
-            goes = rva + r.offset + 4 + coff.REL32[r.kind] + disp - add
-            theirs[r.offset] = f"{goes}"
-            wrong += goes != meant
+            wrong += rva + r.offset + 4 + coff.REL32[r.kind] + disp - add != meant
         else:
             wrong += 1
     if len(f.code) == len(target):
@@ -154,12 +161,16 @@ def distance(f: coff.Function, target: bytes, rva: int, resolve) -> Distance:
         for o in holes:
             a[o:o + 4] = b[o:o + 4] = b"\0\0\0\0"
         if a == b:
-            return Distance(wrong, 0, 0, wrong)
+            return Distance(wrong, 0, 0, wrong, unknown)
+    theirs = _branches(target, rva)
+    for o, v in holes.items():
+        if v == "?" and o in theirs:
+            theirs[o] = "?"             # an unnamed reference stands for whatever the target's field leads to
     mine = [x for x, _r in _rows(f.code, holes)]
-    other = [x for x, _r in _rows(target, _branches(target, rva))]
+    other = [x for x, _r in _rows(target, theirs)]
     same = sum(m.size for m in difflib.SequenceMatcher(None, mine, other, autojunk=False).get_matching_blocks())
     n = max(len(mine), len(other)) - same
-    return Distance(max(1, n + wrong), abs(len(f.code) - len(target)), n, wrong)
+    return Distance(max(1, n + wrong), abs(len(f.code) - len(target)), n, wrong, unknown)
 
 
 def _branches(code: bytes, rva: int) -> dict[int, str]:

@@ -32,6 +32,8 @@ class Slot:
 
     kind: str
     width: int
+    #: "signed" or "unsigned" when a declaration says so; code alone never decides it
+    sign: str = ""
 
 
 @dataclass(frozen=True)

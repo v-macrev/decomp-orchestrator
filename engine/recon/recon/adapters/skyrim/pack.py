@@ -1,13 +1,14 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Reconstruction of functions of an image described by a pack: the image and the extents of its functions.
 
-A pack is what a synthetic target comes as. It has no names, no sources and no declarations, so everything the source
+A pack is what a synthetic target comes as. It has no sources. It may have declarations of external functions, each with
+the linker map entry that placed it: those name their functions and give their signatures. Everything else the source
 needs is inferred: signatures from the code of the function and its callees, layouts from accesses.
 """
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from recon.adapters.skyrim.image import PinnedImage
@@ -18,7 +19,9 @@ from recon.adapters.x64_msvc import unwind as uw
 from recon.adapters.x64_msvc.abi import CALLING, SOURCE
 from recon.adapters.x64_msvc.batch import Compiler, distance
 from recon.adapters.x64_msvc.cl import Toolchain
-from recon.core.inference.signature import NotReconstructed
+from recon.adapters.x64_msvc.symbols import SymbolMap, scoped
+from recon.core import budget as bg
+from recon.core.inference.signature import NotReconstructed, Signature, Slot
 from recon.core.ir import passes, validate
 from recon.core.ir.model import Fn
 from recon.core.synthesis import search
@@ -34,6 +37,9 @@ class Pack:
     image: PinnedImage
     size: dict[int, int]             # function RVA -> size
     validated: frozenset[str] | None
+    symbols: SymbolMap = field(default_factory=SymbolMap)
+    #: function RVA -> (decorated name, signature), from declarations the linker map places
+    declarations: dict[int, tuple[str, Signature]] = field(default_factory=dict)
 
     @staticmethod
     def load(path: str | Path, worktree: str | Path, validated: frozenset[str] | None) -> "Pack":
@@ -42,7 +48,18 @@ class Pack:
         if d.get("schema") != 1:
             raise ValueError("unknown pack schema")
         img = PinnedImage(path.parent / d["image"], worktree, d["image_sha256"])
-        return Pack(d["build_id"], img, {int(f["rva"]): int(f["size"]) for f in d["functions"]}, validated)
+        pack = Pack(d["build_id"], img, {int(f["rva"]): int(f["size"]) for f in d["functions"]}, validated)
+        slot = lambda v: None if v is None else Slot(str(v[0]), int(v[1]), str(v[2]) if len(v) > 2 else "")  # noqa: E731
+        two: set[int] = set()
+        for x in d.get("declarations", []):
+            rva, size = int(x["rva"]), x.get("size")
+            pack.symbols.add(x["symbol"], rva, None if size is None else int(size), "declared")
+            if rva in pack.declarations and pack.declarations[rva][0] != x["symbol"]:
+                two.add(rva)         # two declarations of one function: neither says what it is
+            pack.declarations[rva] = (x["symbol"], Signature(tuple(slot(p) for p in x["params"]), slot(x["result"]), (("declared", "declaration"),)))
+        for rva in two:
+            del pack.declarations[rva]
+        return pack
 
     # -- what the engine asks of an image -------------------------------------------------------
     def normal(self, at: int) -> Fn:
@@ -75,8 +92,17 @@ class Pack:
         except ValueError:
             return None
 
+    def declared(self, at: int) -> tuple[str, Signature] | None:
+        """The plain name and the signature a declaration gives the function at `at`."""
+        d = self.declarations.get(at - self.image.image_base)
+        if d is None:
+            return None
+        name = scoped(d[0])
+        return None if name is None else (name, d[1])
+
     def program(self) -> Program:
-        return Program(self.normal, SOURCE, CALLING, self.image.image_base, self.bytes_at, self.constant)
+        """A program for one search: what it analyses is spent from that search's budget."""
+        return Program(self.normal, SOURCE, CALLING, self.image.image_base, self.bytes_at, self.constant, self.declared)
 
 
 class Workshop:
@@ -88,16 +114,26 @@ class Workshop:
         self.report: dict | None = None
 
     def _resolver(self, c: Candidate):
+        """Where a relocation of the candidate's object leads: the symbol map (the candidate itself, declared functions),
+        then the names the pack's own naming gives callees and data by address, then compiler-made constants."""
         base = self.pack.image.image_base
         names = {n: a - base for n, a in (*c.unit.callees, *c.unit.globals)}
-        names[c.unit.name] = self.rva
 
         def resolve(r: coff.Reloc) -> int | None:
+            if coff.plain(r.symbol) == c.unit.name:
+                return self.rva
+            at = self.pack.symbols.resolve(r.symbol)
+            if at is not None:
+                return at
             n = coff.plain(r.symbol)
-            if n in names:
+            if n in names and not self._declared_name(n):
                 return names[n]
             return self._data(r)
         return resolve
+
+    def _declared_name(self, n: str) -> bool:
+        """A plain name a declaration gives: it resolves by its decorated name or not at all."""
+        return any(scoped(s) == n for s, _sig in self.pack.declarations.values())
 
     def _data(self, r: coff.Reloc) -> int | None:
         """Data the object holds itself: the place in read-only memory the target's own field leads to, if it holds the same."""
@@ -122,7 +158,8 @@ class Workshop:
             if x.function is None:
                 out.append(search.Judged(None, 0, x.errors))
                 continue
-            out.append(search.Judged(x.function.key(coff.plain), distance(x.function, self.target, self.rva, self._resolver(c)).total))
+            d = distance(x.function, self.target, self.rva, self._resolver(c))
+            out.append(search.Judged(x.function.key(coff.plain), d.total, (), d.unknown))
         return out
 
     def verify(self, c: Candidate) -> tuple[bool, str]:
@@ -139,9 +176,10 @@ class Workshop:
         return self.report["result"] == "pass" and self.report["reason"] == PASS, str(self.report["reason"])
 
 
-def reconstruct(pack: Pack, program: Program, rva: int, tool: Toolchain, flags: list[str], verifier: Verifier, work: Path) -> tuple[search.Result, Workshop]:
+def reconstruct(pack: Pack, rva: int, tool: Toolchain, flags: list[str], verifier: Verifier, work: Path, budget: bg.Budget | None = None,
+                frontier: search.Frontier | None = None) -> tuple[search.Result, Workshop]:
     shop = Workshop(pack, rva, Compiler(tool, flags, work), verifier)
-    return search.reconstruct(program, pack.image.image_base + rva, shop), shop
+    return search.reconstruct(pack.program(), pack.image.image_base + rva, shop, budget, frontier), shop
 
 
 __all__ = ["Pack", "Workshop", "reconstruct"]

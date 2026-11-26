@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """Synthetic targets: original C++ compiled and linked with the supported toolchain into an image of its own.
 
-`build` runs in the test harness, which may read the fixtures. What it leaves for the engine is a pack: the image and
-a list of function extents. Names, sources, objects and the map stay with the harness."""
+`build` runs in the test harness, which may read the fixtures. What it leaves for the engine is a pack: the image, a
+list of function extents, and for the functions the caller says are declared, their declaration (decorated name and
+signature) with the linker map entry that placed it. Other names, sources, objects and the map stay with the harness."""
 from __future__ import annotations
 
 import hashlib
@@ -20,9 +21,12 @@ class Synthetic:
     names: dict[str, tuple[int, int]]    # what only the harness knows: function name -> (rva, size)
     data: dict[str, int]                 # and where the linker put the constants the compiler named
     sizes: dict[int, int]                # every function's size, by rva
+    decorated: dict[str, int]            # every function's decorated name -> rva, for the harness's own symbol map
 
 
-def build(tool, flags: list[str], work: Path, out: Path, sources=("targets.cpp", "callees.cpp"), targets: str = "targets.cpp") -> Synthetic:
+def build(tool, flags: list[str], work: Path, out: Path, sources=("targets.cpp", "callees.cpp"), targets: str = "targets.cpp",
+          declared: dict | None = None) -> Synthetic:
+    """`declared`: plain name -> (params, result), each slot [kind, width, sign]: what a header says of a function."""
     work.mkdir(parents=True, exist_ok=True)
     out.mkdir(parents=True, exist_ok=True)
     for s in sources:
@@ -50,16 +54,21 @@ def build(tool, flags: list[str], work: Path, out: Path, sources=("targets.cpp",
     sizes = _sizes(tool, work, objs)
     names = {}
     fns = []
+    decls = []
     for rva, name, obj in starts:
         size = sizes[name]
         plain = re.match(r"\?(\w+)@@", name)
         fns.append((rva, size))
         if obj == targets.replace(".cpp", ".obj"):
             names[plain.group(1) if plain else name] = (rva, size)
+        if plain and declared and plain.group(1) in declared:
+            params, result = declared[plain.group(1)]
+            decls.append({"symbol": name, "rva": rva, "size": size, "params": params, "result": result})
     (out / "image.bin").write_bytes(blob)
     (out / "pack.json").write_text(json.dumps({"schema": 1, "build_id": "synthetic", "image": "image.bin", "image_sha256": hashlib.sha256(blob).hexdigest(),
-                                               "functions": [{"rva": r, "size": s} for r, s in sorted(fns)]}, indent=1))
-    return Synthetic(out / "pack.json", names, data, dict(fns))
+                                               "functions": [{"rva": r, "size": s} for r, s in sorted(fns)],
+                                               **({"declarations": decls} if decls else {})}, indent=1))
+    return Synthetic(out / "pack.json", names, data, dict(fns), {name: rva for rva, name, _o in starts})
 
 
 def _sizes(tool, work: Path, objs: list[str]) -> dict[str, int]:

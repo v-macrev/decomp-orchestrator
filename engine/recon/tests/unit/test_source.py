@@ -442,3 +442,122 @@ def test_what_differs_from_the_function_is_no_candidate(monkeypatch):
     shop = Shop(lambda k: 0)
     r = search.reconstruct(program(adder()), BASE + RVA, shop)
     assert r.state == search.NONE and r.reason == "NOT_EQUIVALENT" and not shop.judged and r.disagreed
+
+
+# ------------------------------------------------------------------------------------ budgets and frontiers (D3)
+
+class Oracle:
+    """A workshop whose answers depend on the candidate only, as a compiler's do: a resumed search may ask in another order."""
+
+    def __init__(self, match=None, unknown=0):
+        self.match, self.unknown = match, unknown
+        self.asked: list[str] = []
+        self.verified: list[str] = []
+
+    def judge(self, candidates):
+        out = []
+        for c in candidates:
+            self.asked.append(c.digest)
+            d = 0 if c.choice.changes() == self.match else 1 + len(c.choice.changes())
+            out.append(search.Judged("k" + c.digest, d, (), self.unknown))
+        return out
+
+    def verify(self, c):
+        self.verified.append(c.digest)
+        return (c.choice.changes() == self.match, "all-checks-passed" if c.choice.changes() == self.match else "instruction-mismatch")
+
+
+def multiplier() -> Asm:
+    """a1 * 10, as the compiler writes it: proved to be a multiplication by the solver"""
+    return Asm()(I.create_reg_mem(C.LEA_R32_M, R.EAX, mem(R.RCX, 0, R.RCX, 4)))(rr(C.ADD_R32_RM32, R.EAX, R.EAX))(T.ret())
+
+
+def used(kind, prog, shop=None, **limits):
+    from recon.core.budget import Budget
+
+    r = search.reconstruct(prog(), BASE + RVA, shop or Oracle(), Budget.of(limits))
+    return r, r.counters[f"budget_{kind}"]
+
+
+@pytest.mark.parametrize("kind", ["candidates", "compiles", "expansions", "irNodes", "solverUnits"])
+def test_each_budget_bounds_its_own_work(kind):
+    prog = (lambda: program(multiplier())) if kind == "solverUnits" else (lambda: program(branchy(), stores()))
+    full, need = used(kind, prog)
+    assert full.reason != search.BUDGET_EXHAUSTED and need > 1, (kind, need, full.reason)
+    for limit in (0, 1):
+        r, n = used(kind, prog, **{kind: limit})
+        assert n <= limit and r.counters[f"limit_{kind}"] == limit
+        assert r.reason == search.BUDGET_EXHAUSTED and r.exhausted == kind and r.frontier is not None, (kind, limit, r.reason)
+    if kind == "compiles":
+        shop = Oracle()
+        r, n = used(kind, prog, shop, compiles=1)
+        assert len(shop.asked) + len(shop.verified) == n == 1
+
+
+def test_a_budget_that_runs_out_after_the_match_does_not_hide_it():
+    shop = Oracle(match=())
+    r, _n = used("candidates", lambda: program(branchy(), stores()), shop, candidates=1)
+    assert r.state == search.BYTE_MATCHED and r.counters["budget_candidates"] == 1
+
+
+def made() -> list:
+    """The changes of each candidate of branchy(), in the generator's order."""
+    out = []
+    for r in cd.Generator(program(branchy(), stores()), BASE + RVA).stages():
+        out = [x.choice.changes() for x in r.candidates]
+    return out
+
+
+@pytest.mark.parametrize("kind,limit", [("compiles", 1), ("compiles", 3), ("candidates", 2), ("expansions", 3), ("expansions", 9)])
+@pytest.mark.parametrize("which", [None, -1, 1])
+def test_a_resumed_search_equals_an_uninterrupted_one(kind, limit, which):
+    import json
+
+    from recon.core.budget import Budget
+
+    match = None if which is None else made()[which]
+
+    def run(budget, frontier=None, shop=None):
+        return search.reconstruct(program(branchy(), stores()), BASE + RVA, shop or Oracle(match), budget, frontier)
+    whole = run(Budget.of(None))
+    cut = run(Budget.of({kind: limit}))
+    if cut.state == search.BYTE_MATCHED:         # found before the budget ran out: the same match
+        assert whole.state == search.BYTE_MATCHED and cut.candidate.digest == whole.candidate.digest
+        return
+    assert cut.reason == search.BUDGET_EXHAUSTED and cut.exhausted == kind
+    # the frontier goes through its file form, as it does between processes
+    frontier = search.Frontier.from_json(json.loads(json.dumps(cut.frontier.to_json())))
+    shop = Oracle(match)
+    resumed = run(Budget.of(None), frontier, shop)
+    assert {k: v for k, v in vars(resumed).items() if k != "candidate"} == {k: v for k, v in vars(whole).items() if k != "candidate"}
+    assert (resumed.candidate and resumed.candidate.digest) == (whole.candidate and whole.candidate.digest)
+    assert not set(shop.asked) & set(frontier.judged)           # what the frontier knew was not compiled again
+    assert not set(shop.verified) & set(frontier.verified)
+
+
+def test_a_frontier_of_another_function_is_refused():
+    with pytest.raises(ValueError):
+        search.reconstruct(program(branchy(), stores()), BASE + RVA, Oracle(), None, search.Frontier(BASE + RVA + 1))
+
+
+# ------------------------------------------------------------------------------------ unknown references (D1)
+
+def test_candidates_whose_only_open_points_are_unnamed_references_go_to_the_verifier_in_order():
+    shop = Oracle(match=made()[-1], unknown=1)
+    r = search.reconstruct(program(branchy(), stores()), BASE + RVA, shop)
+    assert r.state == search.BYTE_MATCHED and r.counters["unknown_references"] >= 1
+    assert shop.verified and len(shop.verified) == r.counters["verified"]
+
+
+def test_every_candidate_with_no_known_difference_is_verified_until_one_passes():
+    class Every(Oracle):
+        def judge(self, candidates):
+            self.asked += [c.digest for c in candidates]
+            return [search.Judged("k" + c.digest, 0, (), len(c.choice.changes()) % 2) for c in candidates]
+    shop = Every(match=made()[-1])
+    r = search.reconstruct(program(branchy(), stores()), BASE + RVA, shop)
+    assert r.state == search.BYTE_MATCHED and len(shop.verified) == r.counters["verified"] == len(made())
+    # those without unnamed references first, then by the number of changes, the same every time
+    again = Every(match=shop.match)
+    search.reconstruct(program(branchy(), stores()), BASE + RVA, again)
+    assert again.verified == shop.verified

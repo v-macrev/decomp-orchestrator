@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, replace
 from itertools import combinations
 from typing import Callable, Iterator
 
+from recon.core import budget
 from recon.core.analysis.dataflow import Abi
 from recon.core.emitter.cpp import Emitter, Unit
 from recon.core.inference import lower as lw
@@ -29,18 +30,23 @@ from recon.core.structuring.rotate import unrotate
 UNDO = frozenset({"unsigned-division", "signed-division", "unsigned-remainder", "signed-remainder", "multiplication"})
 MAX_UNDO = 64
 MAX_DEPTH = 4
-MAX_CANDIDATES = 48
-MAX_TRIED = 160
 MAX_FLIPS = 4
+
+
+def ir_nodes(fn: Fn) -> int:
+    """What a function costs the `irNodes` budget: its operations and terminators."""
+    return sum(len(b.ops) + 1 for b in fn.blocks)
 
 
 class Program:
     """The functions of an image, by absolute address, as far as they have been needed."""
 
     def __init__(self, normal: Callable[[int], Fn], conv: Convention, abi: Abi, base: int, image: Callable[[int, int], "bytes | None"],
-                 constant: Callable[[int, int], "int | None"]) -> None:
-        """`normal(address)`: the admitted normal form, or NotReconstructed. `constant`: the bits of read-only memory, or None."""
+                 constant: Callable[[int, int], "int | None"], declared: Callable[[int], "tuple[str, Signature] | None"] = lambda at: None) -> None:
+        """`normal(address)`: the admitted normal form, or NotReconstructed. `constant`: the bits of read-only memory, or None.
+        `declared(address)`: the name and signature a declaration gives the function there (the highest-ranked evidence), or None."""
         self._normal = normal
+        self._declared = declared
         self.conv, self.abi, self.base, self.image, self.constant = conv, abi, base, image, constant
         self._fns: dict[int, Fn | NotReconstructed] = {}
         self._sigs: dict[int, Signature | None] = {}
@@ -52,9 +58,12 @@ class Program:
     def normal(self, at: int) -> Fn:
         if at not in self._fns:
             try:
-                self._fns[at] = self._normal(at)
+                f = self._normal(at)
             except NotReconstructed as e:
                 self._fns[at] = e
+            else:
+                budget.spend("irNodes", ir_nodes(f))     # before it is kept: a larger budget analyses it again
+                self._fns[at] = f
         f = self._fns[at]
         if isinstance(f, NotReconstructed):
             raise f
@@ -63,10 +72,19 @@ class Program:
     def callee(self, target: Arg) -> Signature | None:
         return self.signature(target.value) if isinstance(target, Const) else None
 
+    def name(self, at: int) -> str | None:
+        """The name a declaration gives the function at `at`, when it is a plain identifier the source can call."""
+        d = self._declared(at)
+        return d[0] if d is not None and d[0].isidentifier() else None
+
     def signature(self, at: int) -> Signature | None:
-        """What a function takes and returns, from its own code; None when that cannot be told."""
+        """What a function takes and returns: from its declaration, else from its own code; None when that cannot be told."""
         if at in self._sigs:
             return self._sigs[at]
+        d = self._declared(at)
+        if d is not None:
+            self._sigs[at] = d[1]
+            return d[1]
         if at in self._open:
             self._cyclic.add(at)
             return self._guess.get(at, self._start)
@@ -158,6 +176,10 @@ class Report:
     refused: dict[str, int] = field(default_factory=dict)
     disagreed: dict[str, int] = field(default_factory=dict)
     evidence: tuple[tuple[str, str], ...] = ()
+    #: the budget that ran out before every choice was tried, or ""
+    exhausted: str = ""
+    #: trees execution rejected, kept only when asked (to measure the filter, never to compile in a search)
+    rejected: list[Candidate] = field(default_factory=list)
 
 
 def size_of(types: ty.Types) -> Callable[[ty.CType], int]:
@@ -238,7 +260,7 @@ class Generator:
             return None
         seen.add(body.digest())
         rva = self.at - self.p.base
-        unit = Emitter(t, self.p.base, rva).unit(body, rva)
+        unit = Emitter(t, self.p.base, rva, names=self.p.name).unit(body, rva)
         verdict = ev.compare(body, self.fn, self.p.conv, sig, self._called(callees), size_of(t), self.p.image)
         return Candidate(c, unit, body, body.digest(), verdict, sig, body.assumptions, self.fn.assumptions, f.history, t)
 
@@ -285,19 +307,28 @@ class Generator:
             if self.open:
                 yield replace(a, flips=tuple(range(self.open)))
 
-    def stages(self, limit: int = MAX_CANDIDATES) -> Iterator[Report]:
-        """What has been found after the first stage, and again after the second."""
+    def stages(self, keep_rejected: bool = False) -> Iterator[Report]:
+        """What has been found after the first stage, and again after the second.
+
+        Each choice tried spends one `expansions`, each candidate kept one `candidates`, of the active budget (outside a
+        search, of a budget with the defaults). When one runs out, or another runs out inside a choice, the report says
+        which in `exhausted` and is the last. `keep_rejected`: keep the trees execution rejected, to measure the filter."""
+        b = budget.current() or budget.Budget.of(None)
         r = Report(evidence=tuple((f"result:{k}", e.value) for k, (_s, e) in enumerate(self.results)))
         seen: set[str] = set()
         for c in self.choices():
             if c is None:
                 yield r
                 continue
-            if len(r.candidates) >= limit or r.tried >= MAX_TRIED:
-                break
-            r.tried += 1
             try:
+                if not b.left("candidates"):
+                    raise budget.BudgetExhausted("candidates")
+                b.spend("expansions")
+                r.tried += 1
                 x = self.make(c, seen)
+            except budget.BudgetExhausted as e:
+                r.exhausted = e.kind
+                break
             except NotReconstructed as e:
                 r.refused[e.code] = r.refused.get(e.code, 0) + 1
                 continue
@@ -306,9 +337,12 @@ class Generator:
                 continue
             if not x.verdict.agree:
                 r.disagreed[x.verdict.why] = r.disagreed.get(x.verdict.why, 0) + 1
+                if keep_rejected:
+                    r.rejected.append(x)
                 continue
+            b.spend("candidates")
             r.candidates.append(x)
         yield r
 
 
-__all__ = ["Candidate", "Choice", "Evidence", "Generator", "MAX_CANDIDATES", "Program", "Report", "Slot", "UNDO", "size_of"]
+__all__ = ["Candidate", "Choice", "Evidence", "Generator", "Program", "Report", "Slot", "UNDO", "ir_nodes", "size_of"]

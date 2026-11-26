@@ -37,9 +37,9 @@ raise SystemExit(main())
 """
 
 
-def engine(target, toolchain, worktree, out: Path, functions=(), seed="0", forbidden=None):
+def engine(target, toolchain, worktree, out: Path, functions=(), seed="0", forbidden=None, extra=()):
     argv = ["reconstruct", "--pack", str(target.s.pack), "--worktree", str(worktree), "--recipe", str(toolchain.path), *toolchain.location,
-            "--work", str(out / "work"), "--out", str(out / "out")]
+            "--work", str(out / "work"), "--out", str(out / "out"), *extra]
     for rva in functions:
         argv += ["--function", hex(rva)]
     code = RUN.format(forbidden=[str(ROOT / "tests"), str(target.work)] if forbidden is None else forbidden, argv=argv)
@@ -56,11 +56,11 @@ class Target:
         self.at = {rva: n for n, (rva, _s) in s.names.items()}
 
 
-def _build(toolchain, worktree, base: Path, sources, targets) -> Target:
+def _build(toolchain, worktree, base: Path, sources, targets, declared=None) -> Target:
     sys.path[:0] = [str(worktree / "tools/verifier"), str(worktree / "tools")]
     import synth
 
-    s = synth.build(toolchain.tool, toolchain.flags, base / "build", base / "pack", sources, targets)
+    s = synth.build(toolchain.tool, toolchain.flags, base / "build", base / "pack", sources, targets, declared)
     return Target(s, base / "build", (base / "pack/image.bin").read_bytes())
 
 
@@ -105,6 +105,9 @@ def judge(target, toolchain, worktree, rva, text: str, where: Path, size=None, w
             symbols[s.name] = (at + dict(wrong).get(at, 0), target.s.sizes.get(at))
         elif s.name in target.s.data:
             symbols[s.name] = (target.s.data[s.name], None)
+        elif s.name in target.s.decorated:      # the linker map's own name: the harness's evidence, not the engine's
+            at = target.s.decorated[s.name]
+            symbols[s.name] = (at + dict(wrong).get(at, 0), target.s.sizes.get(at))
     assert own is not None
     v = Verifier(worktree, "synthetic", target.image, toolchain.recipe)
     return v.verify(rva, size or target.s.sizes[rva], own, text.encode("ascii"), blob, symbols)
@@ -112,6 +115,16 @@ def judge(target, toolchain, worktree, rva, text: str, where: Path, size=None, w
 
 def by_name(target, res) -> dict:
     return {target.at[int(f["rva"], 0)]: f for f in res["functions"] if int(f["rva"], 0) in target.at}
+
+
+#: what the header of external.cpp's callees says of them: plain name -> (params, result), each [kind, width, sign]
+EXTERNAL = {"Scaled": ([["i", 32, "signed"]], ["i", 32, "signed"]),
+            "Mixed": ([["i", 32, "unsigned"], ["i", 32, "signed"]], ["i", 32, "unsigned"])}
+
+
+@pytest.fixture(scope="module")
+def external(toolchain, upstream_worktree, tmp_path_factory):
+    return _build(toolchain, upstream_worktree, tmp_path_factory.mktemp("external"), ("external.cpp", "external_callees.cpp"), "external.cpp", EXTERNAL)
 
 
 # ------------------------------------------------------------------------------------ the gate
@@ -150,6 +163,104 @@ def test_the_held_out_functions_are_matched_or_refused_by_name(held, toolchain, 
         else:
             assert re.fullmatch(r"[A-Z_]+", f["reason"]), f["reason"]
     assert sum(f["state"] == "BYTE_MATCHED" for f in fs.values()) >= 11
+
+
+@pytest.mark.parametrize("name,callee", [("Halved", "Scaled"), ("Offset", "Scaled"), ("Stir", "Mixed")])
+def test_a_function_calling_a_declared_external_function_is_matched(name, callee, external, toolchain, upstream_worktree, tmp_path):
+    """Phase 7 gate (D1): the call is to the declared name, bound by the declaration and the linker map, and the
+    harness's comparator, with the map's own decorated names, passes it."""
+    rva = external.s.names[name][0]
+    p, res = engine(external, toolchain, upstream_worktree, tmp_path, [rva])
+    f = res["functions"][0]
+    assert f["state"] == "BYTE_MATCHED" and f["reason"] == "all-checks-passed", (f, p.stderr[-2000:])
+    text = (tmp_path / "out" / f["source"]).read_text()
+    assert re.search(rf"\b{callee}\(", text) and not re.search(r"\bFunction[0-9A-F]+\(", text.replace(f["source"][:-4] + "(", ""))
+    rep = judge(external, toolchain, upstream_worktree, rva, text, tmp_path / "judge")
+    assert rep["result"] == "pass" and rep["reason"] == "all-checks-passed"
+    # the harness's binding of the declared name is what passes it: moved elsewhere, it fails
+    callee_rva = external.s.decorated[next(n for n in external.s.decorated if n.startswith(f"?{callee}@@"))]
+    rep = judge(external, toolchain, upstream_worktree, rva, text, tmp_path / "wrong", wrong=[(callee_rva, 16)])
+    assert rep["result"] != "pass"
+
+
+@pytest.mark.parametrize("where", ["Offset", "Mixed"])
+def test_a_declaration_names_only_the_function_it_is_placed_at(where, external, toolchain, upstream_worktree, tmp_path):
+    """A declaration is evidence, not a fit. Placed at another function (one of its own, or one another declaration
+    already names, which makes both ambiguous), it does not name the function the code calls, whatever the bytes."""
+    d = json.loads(external.s.pack.read_text())
+    rva, size = external.s.names[where] if where in external.s.names else next((x["rva"], x["size"]) for x in d["declarations"] if x["symbol"].startswith(f"?{where}@@"))
+    d["declarations"] = [{**x, "rva": rva, "size": size} if x["symbol"].startswith("?Scaled@@") else x for x in d["declarations"]]
+    e = tmp_path / "pack"
+    e.mkdir()
+    (e / "image.bin").write_bytes(external.image)
+    (e / "pack.json").write_text(json.dumps(d))
+    from types import SimpleNamespace
+
+    t = SimpleNamespace(s=SimpleNamespace(pack=e / "pack.json"), work=external.work)
+    fns = [external.s.names["Halved"][0], external.s.names["Stir"][0]]
+    _p, res = engine(t, toolchain, upstream_worktree, tmp_path, fns)
+    for f in res["functions"]:
+        assert f["reason"] != "ENGINE_ERROR", f
+        text = (tmp_path / "out" / f["source"]).read_text() if f.get("source") else ""
+        assert "Scaled(" not in text, text
+        if where == "Mixed":
+            assert "Mixed(" not in text, text
+        if f["state"] == "BYTE_MATCHED":       # under the names the code gives callees, which the harness checks too
+            assert judge(external, toolchain, upstream_worktree, int(f["rva"], 0), text, tmp_path / f["rva"])["result"] == "pass"
+
+
+BUDGETED = ("Total", "Withdraw", "Clamp")
+
+
+@pytest.mark.parametrize("kind", ["candidates", "compiles", "expansions", "irNodes"])
+def test_each_budget_set_to_one_bounds_its_counter(kind, target, toolchain, upstream_worktree, tmp_path):
+    """Phase 7 gate (D3), through the command and the real compiler."""
+    rvas = [target.s.names[n][0] for n in BUDGETED]
+    p, res = engine(target, toolchain, upstream_worktree, tmp_path, rvas, extra=["--budget", f"{kind}=1"])
+    assert p.returncode in (0, 1), p.stderr
+    for f in res["functions"]:
+        assert f["counters"][f"budget_{kind}"] <= 1 and f["counters"][f"limit_{kind}"] == 1, f
+        assert f["state"] == "BYTE_MATCHED" or (f["reason"] == "BUDGET_EXHAUSTED" and f["exhausted"] == kind), f
+    assert any(f["reason"] == "BUDGET_EXHAUSTED" for f in res["functions"])
+
+
+def test_a_search_resumed_from_its_saved_frontier_equals_an_uninterrupted_one(done, target, toolchain, upstream_worktree, tmp_path):
+    _out, whole = done
+    rva = target.s.names["Withdraw"][0]
+    _p, cut = engine(target, toolchain, upstream_worktree, tmp_path / "cut", [rva], extra=["--budget", "compiles=1", "--frontiers", str(tmp_path / "f")])
+    assert cut["functions"][0]["reason"] == "BUDGET_EXHAUSTED" and cut["functions"][0]["frontier"]
+    _p, resumed = engine(target, toolchain, upstream_worktree, tmp_path / "resumed", [rva], extra=["--frontiers", str(tmp_path / "f")])
+    a = dict(resumed["functions"][0])
+    assert a.pop("resumed") == cut["functions"][0]["frontier"]
+    b = next(f for f in whole["functions"] if int(f["rva"], 0) == rva)
+    assert a == b
+
+
+@pytest.fixture(scope="module")
+def filtered(toolchain, upstream_worktree, tmp_path_factory):
+    return _build(toolchain, upstream_worktree, tmp_path_factory.mktemp("filtered"), ("filtered.cpp", "filtered_callees.cpp"), "filtered.cpp")
+
+
+def test_the_execution_check_rejects_nothing_the_comparator_passes(target, held, external, filtered, toolchain, upstream_worktree, tmp_path):
+    """D8: every tree the execution check rejects, on every synthetic corpus, compiled and compared. Kept as a regression
+    test: a false rejection fails it."""
+    import os
+
+    total = {}
+    for name, t in (("targets", target), ("heldout", held), ("external", external), ("filtered", filtered)):
+        argv = ["measure-filter", "--pack", str(t.s.pack), "--worktree", str(upstream_worktree), "--recipe", str(toolchain.path), *toolchain.location,
+                "--work", str(tmp_path / name / "work"), "--out", str(tmp_path / name)]
+        code = RUN.format(forbidden=[str(ROOT / "tests"), str(t.work)], argv=argv)
+        p = subprocess.run([sys.executable, "-B", "-c", code], cwd=ROOT, env={**os.environ, "PYTHONHASHSEED": "0"}, capture_output=True, text=True, timeout=1800)
+        rep = json.loads((tmp_path / name / "filter-audit.json").read_text())
+        assert p.returncode == 0 and rep["false_rejections"] == 0, (name, rep, p.stderr[-2000:])
+        for k in ("functions", "accepted", "rejected", "compiled", "no_known_difference", "false_rejections"):
+            total[k] = total.get(k, 0) + rep[k]
+        for k, n in rep["rejected_why"].items():
+            total["why:" + k] = total.get("why:" + k, 0) + n
+    print("D8 synthetic", json.dumps(total, sort_keys=True))
+    # the measurement ran on what the check rejected (measured at Phase 7: 1 rejected tree of 279, which does not compile)
+    assert total["rejected"] >= 1 and total["accepted"] > 100 * total["rejected"] // 2, total
 
 
 # ------------------------------------------------------------------------------------ that it could fail
@@ -297,7 +408,9 @@ def test_distance_is_zero_only_for_the_same_code(toolchain, tmp_path):
     code[o:o + 4] = (0x2000 - (0x1000 + o + 4)).to_bytes(4, "little", signed=True)
     assert distance(d, bytes(code), 0x1000, lambda r: 0x2000).total == 0
     assert distance(d, bytes(code), 0x1000, lambda r: 0x2010).references == 1
-    assert distance(d, bytes(code), 0x1000, lambda r: None).total == 1
+    # a reference nothing names is not a known difference: it is counted apart, and the verifier decides
+    assert (distance(d, bytes(code), 0x1000, lambda r: None).total, distance(d, bytes(code), 0x1000, lambda r: None).unknown) == (0, 1)
+    assert distance(d, bytes(code[:-1]) + b"\xcc", 0x1000, lambda r: None).total >= 1     # and one that is, is
     assert distance(d, a.code, 0x1000, lambda r: 0x2000).total > 1
 
 

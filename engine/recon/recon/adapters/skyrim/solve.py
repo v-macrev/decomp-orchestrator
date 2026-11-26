@@ -33,7 +33,11 @@ from recon.adapters.x64_msvc import coff
 from recon.adapters.x64_msvc import declarations as D
 from recon.adapters.x64_msvc.batch import distance
 from recon.adapters.x64_msvc.cl import CompilerFailed, Toolchain, ToolchainUnavailable, diagnostics, discover
+from recon.adapters.x64_msvc.symbols import SymbolMap
 from recon.adapters.x64_msvc.validate import load_validated
+from recon import ENGINE_VERSION, RULE_STORE_VERSION
+from recon.core import budget as bg
+from recon.core.canonical import digest
 from recon.core.emitter.member import Declared, MemberUnit, member_form
 from recon.core.inference.signature import NotReconstructed
 from recon.core.synthesis import search
@@ -97,8 +101,9 @@ class UnitWorkshop:
         return self.built[c.digest]
 
     def resolve(self, own: str):
+        """The function itself under its own name, else what the names upstream records say; nothing from the bytes."""
         def r(rel: coff.Reloc) -> int | None:
-            return self.rva if rel.symbol == own else None
+            return self.rva if rel.symbol == own else self.ctx.symbols.resolve(rel.symbol)
         return r
 
     def judge(self, candidates: list[Candidate]) -> list[search.Judged]:
@@ -109,7 +114,8 @@ class UnitWorkshop:
                 out.append(search.Judged(None, 0, (b,) if isinstance(b, str) else ("DOES_NOT_COMPILE",)))
                 continue
             fn, _obj, _src = b
-            out.append(search.Judged(fn.key(coff.plain), distance(fn, self.target, self.rva, self.resolve(fn.symbol)).total))
+            d = distance(fn, self.target, self.rva, self.resolve(fn.symbol))
+            out.append(search.Judged(fn.key(coff.plain), d.total, (), d.unknown))
         return out
 
     def verify(self, c: Candidate) -> tuple[bool, str]:
@@ -117,7 +123,11 @@ class UnitWorkshop:
         if b is None or isinstance(b, str):
             return False, "EXACT_UNIT_DOES_NOT_COMPILE"
         fn, obj, src = b
-        symbols = {r.symbol: (self.rva, self.size) for r in fn.relocs if r.symbol == fn.symbol}
+        symbols: dict[str, tuple[int, int | None]] = {}
+        for r in fn.relocs:
+            got = (self.rva, self.size) if r.symbol == fn.symbol else self.ctx.symbols.lookup(r.symbol)
+            if got is not None:
+                symbols[r.symbol] = got
         report = self.ctx.verifier.verify(self.rva, self.size, fn.symbol, src.encode("utf-8"), obj, symbols)
         ok = report["result"] == "pass" and report["reason"] == PASS
         if ok:
@@ -140,7 +150,8 @@ class Context:
         if not validated:
             raise NotReconstructed("LIFT_COVERAGE_MISSING")
         self.pack = Pack("pinned", image, {t.rva: t.size for t in inv.targets}, validated)
-        self.program = self.pack.program()
+        self.symbols = recorded_symbols(worktree)
+        self.recipe_digest = hashlib.sha256(recipe_bytes).hexdigest()
         self.verifier = Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes)
         self.header_rel, self.header_text = header_rel, header_text
         tag = hashlib.sha256(f"{header_rel}\0{time.monotonic_ns()}".encode()).hexdigest()[:10]
@@ -170,6 +181,17 @@ class Context:
         for p in (self.temp_header, self.temp_source):
             p.unlink(missing_ok=True)
         shutil.rmtree(self.work, ignore_errors=True)
+
+
+def recorded_symbols(worktree: Path) -> SymbolMap:
+    """The names upstream's data/progress.json records, by address: plain or scoped names, so overloads are ambiguous."""
+    out = SymbolMap()
+    for f in json.loads((worktree / "data/progress.json").read_text(encoding="utf-8"))["functions"]:
+        name = f.get("name") or ""
+        if name and all(p.isidentifier() for p in name.split("::")):
+            rva = f["rva"]
+            out.add(name, int(rva, 16) if isinstance(rva, str) else int(rva), f.get("size"), "recorded")
+    return out
 
 
 def base_text(worktree: Path, rel: str) -> str | None:
@@ -238,12 +260,24 @@ def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[l
             cls, method = m.group(1), m.group(2)
             shop = UnitWorkshop(ctx, rva, cls, method)
             t0 = time.monotonic()
+            # a frontier is resumed by the same engine, rules, image, recipe, header and function, whatever the budget
+            key = digest({"engine": ENGINE_VERSION, "rules": RULE_STORE_VERSION, "build": ctx.pack.image.build_id, "recipe": ctx.recipe_digest,
+                          "header": hashlib.sha256(ctx.header_text.encode("utf-8")).hexdigest(), "rva": rva, "name": f"{cls}::{method}"})[:32]
+            saved = data / "frontiers" / f"{key}.json"
             try:
-                r = search.reconstruct(ctx.program, ctx.pack.image.image_base + rva, shop)
+                past = search.Frontier.from_json(json.loads(saved.read_text(encoding="utf-8"))) if saved.is_file() else None
+            except (ValueError, KeyError, TypeError):
+                past = None
+            try:
+                r = search.reconstruct(ctx.pack.program(), ctx.pack.image.image_base + rva, shop, bg.Budget.of(req.get("budgets")), past)
             except NotReconstructed as e:
                 out.append(Outcome(rva, "unsupported", e.code))
                 continue
-            counters = {k: int(v) for k, v in r.counters.items()} | {"compiles": shop.compiles, "ms": int(1000 * (time.monotonic() - t0))}
+            if r.reason == search.BUDGET_EXHAUSTED and r.frontier is not None:
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                saved.write_text(json.dumps(r.frontier.to_json(), sort_keys=True), encoding="utf-8")
+            counters = {k: int(v) for k, v in r.counters.items()} | {"compiles": shop.compiles, "ms": int(1000 * (time.monotonic() - t0)),
+                                                                     "resumed": int(past is not None)}
             progress("function", {"done": len(out) + 1, "of": len(fns), "compiles": shop.compiles})
             refused = sorted({x for x in shop.forms.values() if isinstance(x, str)})
             if r.state == search.BYTE_MATCHED and shop.chosen is not None:

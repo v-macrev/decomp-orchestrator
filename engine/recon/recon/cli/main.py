@@ -130,6 +130,19 @@ def main(argv: list[str] | None = None) -> int:
     r.add_argument("--work", required=True, help="scratch directory of the compiler")
     r.add_argument("--out", required=True)
     r.add_argument("--function", action="append", default=[], help="RVA; every function of the pack when not given")
+    r.add_argument("--budget", action="append", default=[], metavar="KIND=N", help="an operation budget of each function's search (candidates, compiles, solverUnits, irNodes, expansions)")
+    r.add_argument("--frontiers", help="where a search that exhausts a budget saves its frontier, and resumes from it")
+    f = sub.add_parser("measure-filter", help="D8: compile and compare every tree the execution check rejects; counts (exit 1: a false rejection)")
+    f.add_argument("--pack", help="a synthetic pack; without it, a sample of the real target's unmatched functions")
+    f.add_argument("--worktree", required=True, help="upstream worktree at the pinned base: the comparator")
+    f.add_argument("--checkout", help="the checkout whose toolchain (and, for the real target, image) to use")
+    f.add_argument("--toolset", help="the toolset directory, when it is elsewhere")
+    f.add_argument("--recipe", help="the recipe file (synthetic), or its path in the worktree (real; the default recipe if not given)")
+    f.add_argument("--work", required=True, help="scratch directory of the compiler")
+    f.add_argument("--out", help="where filter-audit.json goes (a .local directory for the real target)")
+    f.add_argument("--want", type=int, default=100, help="real target: stop after this many functions the generator made trees for (the check ran)")
+    f.add_argument("--scan-limit", type=int, default=4000)
+    f.add_argument("--max-bytes", type=int, default=1024)
     args = ap.parse_args(argv)
     if args.cmd == "serve":
         if args.request:
@@ -140,7 +153,8 @@ def main(argv: list[str] | None = None) -> int:
                 sys.stderr.write(f"the request file cannot be read: {type(e).__name__}\n")
                 return 2
         return serve(sys.stdin, sys.stdout, sys.stderr)
-    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare", "validate-lift", "coverage", "reconstruct", "reach"):
+    if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare", "validate-lift", "coverage", "reconstruct", "reach",
+                    "measure-filter"):
         from recon.cli import commands
 
         return getattr(commands, "cmd_" + args.cmd.replace("-", "_"))(args)

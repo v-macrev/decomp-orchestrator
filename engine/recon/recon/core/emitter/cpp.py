@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 import struct
 from dataclasses import dataclass
+from typing import Callable
 
 from recon.core.inference import types as ty
 from recon.core.inference.signature import NotReconstructed
@@ -65,11 +66,14 @@ def float_text(bits: int, w: int) -> str:
 
 
 class Emitter:
-    def __init__(self, types: ty.Types, image_base: int, rva: int, name: str | None = None, prefix: str = "") -> None:
+    def __init__(self, types: ty.Types, image_base: int, rva: int, name: str | None = None, prefix: str = "",
+                 names: "Callable[[int], str | None]" = lambda at: None) -> None:
+        """`names(address)`: the name a declaration gives a callee, or None for the name made from its address."""
         self.t = types
         self.base = image_base
         self.name = name or f"Function{rva:X}"
         self.prefix = prefix
+        self.names = names
         self.callees: dict[int, str] = {}
         self.globals: dict[int, tuple[str, ty.CType]] = {}
         self.locals: dict[int, str] = {}
@@ -106,7 +110,9 @@ class Emitter:
             self.locals[x.id] = role if count[role] == 1 else f"{role}{count[role]}"
 
     def callee(self, at: int) -> str:
-        return self.callees.setdefault(at, f"{self.prefix}Function{at - self.base:X}" if at != self.own else self.name)
+        if at not in self.callees:
+            self.callees[at] = self.name if at == self.own else (self.names(at) or f"{self.prefix}Function{at - self.base:X}")
+        return self.callees[at]
 
     def member(self, off: int) -> str:
         return f"member{off:X}"

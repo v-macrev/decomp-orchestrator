@@ -14,6 +14,9 @@ from typing import Iterator, Union
 from recon.core.inference.signature import FLOAT, INT, Evidence, NotReconstructed, Signature, Slot
 from recon.core.ir.model import Arg, Const, Fn, Op, Phi
 
+#: the weight of a declared sign: more than any count of uses can reach
+DECLARED = 1 << 20
+
 M64 = (1 << 64) - 1
 
 
@@ -157,6 +160,8 @@ class Types:
             v = self.params[f, k] = self.new(s.width)
             if s.kind == FLOAT:
                 v.kind = "float"
+            elif s.sign:                     # a declared type outweighs whatever the code suggests
+                setattr(v, s.sign, getattr(v, s.sign) + DECLARED)
         return self.find(self.params[f, k])
 
     def unify(self, a: Var, b: Var) -> None:

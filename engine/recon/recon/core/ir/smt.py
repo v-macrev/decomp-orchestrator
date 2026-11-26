@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from recon.core import budget
 from recon.core.evaluate import apply as compute
 from recon.core.ir.model import FRAME, Arg, Const, Fn, Op
 from recon.core.ir import rules as ru
@@ -44,6 +45,7 @@ def check(claim) -> str:
     claim = z.simplify(claim)
     if z.is_true(claim):
         return PROVED
+    budget.spend("solverUnits")      # one check; its own resource limit bounds what one costs
     s = _solver()
     s.add(z.Not(claim))
     r = s.check()

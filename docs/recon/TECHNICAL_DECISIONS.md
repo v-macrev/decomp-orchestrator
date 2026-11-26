@@ -249,3 +249,44 @@ The engine returns edits only when every function of the packet is solved: a uni
 only fail at the Gate Keeper. Engine runs therefore use packets of one function. Its tier makes one attempt per packet (the same input gives the same
 answer), does not steal or get stolen from, has no budget pause, outage or prewarm, and late classification never moves a packet away from it (D-009).
 What it does not solve goes to the next tier with the engine's reason code and no gate call.
+
+## D-037 · 2026-11-26 · External references are named by evidence, ranked, and the comparator checks the binding
+Defect D1 of the convergence plan. `adapters/x64_msvc/symbols.py` keeps a symbol map from evidence only, highest rank first: the function itself
+under its unit's name, a declaration placed by a linker map (a decorated name, so its types are part of the name), and a name the project records
+for an address (`data/progress.json`: plain or scoped names, so overloads are not told apart). A name the best-ranked evidence gives two addresses
+is ambiguous and resolves to nothing; so do two declarations of one address. A relocation is looked up by its decorated name, then by its scoped
+form. A declared function is called by its declared name and takes its declared signature, sign included (`Slot.sign`, which outweighs anything
+the code suggests); the emitter writes its prototype from that signature, so the decoration agrees with the declaration only when the types do.
+`distance` counts references nothing names apart from wrong ones; every compiled candidate with no known difference goes to the comparator, in
+the order (known differences, unnamed references, changes from the canonical form), until one passes or the `compiles` budget is spent. Nothing
+binds a reference because the bytes then line up. One exception stays: compiler-made constants (`__real@`, `__xmm@`, `__ymm@`), whose name is their
+value, are bound to the read-only place the target's field leads to when it holds that value. A synthetic pack's callees without a declaration
+keep the address-derived names of Phase 5. On the real target the recorded names now reach the resolver and the comparator's symbol map, but
+the member emitter still refuses callees (D10), so no real result changes yet.
+
+## D-038 · 2026-11-26 · Budgets count operations and are spent where the work is done
+Defect D3. `core/budget.py`: `candidates` (trees kept), `expansions` (choices tried), `compiles` (each candidate of a ranking batch and each exact
+unit), `solverUnits` (solver checks, each bounded by the solver's own resource limit), `irNodes` (operations and terminators of each normal form
+analysed). The generator, the program, the solver and the search spend from the active budget; running out ends the search with
+`BUDGET_EXHAUSTED`, the kind, and a frontier (D-039), and never hides a match found before. Defaults are the old constants (48 candidates, 160
+expansions) and room for the rest (400 compiles, 2,000 solver checks, 200,000 IR nodes); the constants `MAX_CANDIDATES` and `MAX_TRIED` are gone
+(part of D2; the callee depth and the fixpoint rounds remain). A request's budgets bound each function's search, and each search gets a program
+of its own so that its counters do not depend on what another search analysed. Counters `budget_<kind>` and `limit_<kind>` are in every result.
+A wall-clock limit is the server's and an infrastructure failure, never exhaustion.
+
+## D-039 · 2026-11-26 · A frontier is what the compiler and the verifier said
+A frontier holds, by candidate digest, the compiler's judgement and the verifier's answer. A search given one makes the same candidates again (the
+generator is deterministic and cheap next to the compiler), takes those answers instead of asking again, and spends its budget as if it had
+asked, so it ends exactly where an uninterrupted search with that budget ends, field for field (tested in process and through the command). A
+frontier is resumed only by the same engine, rules, image, recipe and function (and, for `solve`, the same header), whatever the budget; it lives
+in the private data directory (`dataDir/frontiers/`, or `reconstruct --frontiers`).
+
+## D-040 · 2026-11-26 · The execution check stays a filter, measured and watched
+Defect D8. `measure-filter` keeps every tree the execution check rejects, compiles it, and sends each one with no known difference to the
+comparator (`adapters/skyrim/filter_audit.py`). Measured on 2026-11-26: on the four synthetic corpora (58 functions) the check let 278 trees through
+and rejected 1, which does not compile; on the real target, a fixed sample of the unmatched functions up to 1 KiB was scanned until 100 had trees
+(1,732 scanned): 628 let through, 4 rejected (one function, all "a truth value that is neither 0 nor 1"), none of which compiles. False rejections:
+**0 measured**. The check stays a filter; the synthetic measurement is a regression test that fails on any false rejection. Open: the four real
+rejections could not be compared because they do not compile, and their reason points at a world the generator made up (a truth value read from
+made-up memory) rather than at the tree; the audit now records the compiler's codes, and the count is measured again when the generator gains
+dimensions (Phase 9).

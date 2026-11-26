@@ -179,10 +179,18 @@ def cmd_reconstruct(args) -> int:
     from recon.adapters.skyrim.verify import Verifier
     from recon.adapters.x64_msvc import cl
     from recon.adapters.x64_msvc import validate as v
+    from recon import RULE_STORE_VERSION
+    from recon.core import budget as bg
     from recon.core.canonical import digest
-    from recon.core.synthesis.search import BYTE_MATCHED
+    from recon.core.synthesis.search import BUDGET_EXHAUSTED, BYTE_MATCHED, Frontier
 
     try:
+        limits = {}
+        for x in args.budget:
+            kind, _eq, n = x.partition("=")
+            if kind not in bg.KINDS or not n.isdigit():
+                raise ValueError(f"a budget is KIND=N with KIND one of {', '.join(bg.KINDS)}")
+            limits[kind] = int(n)
         recipe = Path(args.recipe).read_bytes()
         rec = json.loads(recipe)
         validated = v.load_validated()
@@ -202,20 +210,32 @@ def cmd_reconstruct(args) -> int:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     verifier = Verifier(Path(args.worktree), pack.build_id, pack.image.pe.blob, recipe)
-    program = pack.program()
+    frontiers = Path(args.frontiers) if args.frontiers else None
     rows = []
     broken = 0
     for rva in wanted:
         row: dict = {"rva": f"0x{rva:x}", "size": pack.size[rva]}
         rows.append(row)
+        # what a frontier may be resumed by: the same engine, rules, image, recipe and function, whatever the budget
+        key = digest({"engine": ENGINE_VERSION, "rules": RULE_STORE_VERSION, "image": pack.image.sha256, "recipe": digest(rec), "rva": rva})[:32]
+        saved = frontiers / f"{key}.json" if frontiers else None
         try:
-            r, shop = pk.reconstruct(pack, program, rva, tool, rec["flags"], verifier, Path(args.work))
+            past = Frontier.from_json(json.loads(saved.read_text(encoding="utf-8"))) if saved and saved.is_file() else None
+            r, shop = pk.reconstruct(pack, rva, tool, rec["flags"], verifier, Path(args.work), bg.Budget.of(limits), past)
         except Exception as e:  # noqa: BLE001 - a defect of the engine, which must not lose the other functions
             broken += 1
             row.update(state="NONE", reason="ENGINE_ERROR", detail=type(e).__name__)
             continue
         row.update(state=r.state, reason=r.reason, counters=r.counters, refused=r.refused, disagreed=r.disagreed, errors=r.errors, nearest=r.nearest,
                    evidence=[list(e) for e in r.evidence])
+        if past is not None:
+            row["resumed"] = key
+        if r.reason == BUDGET_EXHAUSTED:
+            row["exhausted"] = r.exhausted
+            if saved is not None and r.frontier is not None:
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                saved.write_text(json.dumps(r.frontier.to_json(), sort_keys=True), encoding="utf-8", newline="\n")
+                row["frontier"] = key
         if r.candidate is not None:
             c = r.candidate
             name = f"{c.unit.name}.cpp"
@@ -229,6 +249,59 @@ def cmd_reconstruct(args) -> int:
     (out / "result.json").write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8", newline="\n")
     print(json.dumps({"states": report["states"], "functions": len(rows), "engine_errors": broken, "digest": report["digest"]}, sort_keys=True))
     return 3 if broken else 0 if states == Counter({BYTE_MATCHED: len(rows)}) else 1
+
+
+def cmd_measure_filter(args) -> int:
+    """D8: the execution check's false rejections, over a synthetic pack or a sample of the real target (counts only)."""
+    from recon import ENGINE_VERSION
+    from recon.adapters.skyrim import filter_audit as fa
+    from recon.adapters.skyrim.pack import Pack
+    from recon.adapters.skyrim.verify import Verifier
+    from recon.adapters.x64_msvc import cl
+    from recon.adapters.x64_msvc import validate as v
+    from recon.adapters.x64_msvc.batch import Compiler
+
+    try:
+        validated = v.load_validated()
+        if not validated:
+            raise ValueError("no usable lift_coverage.json: run validate-lift --write")
+        if args.pack:
+            recipe = Path(args.recipe).read_bytes()
+            pack = Pack.load(args.pack, args.worktree, validated)
+            population = sorted(pack.size)
+        else:
+            from recon.adapters.skyrim.image import PinnedImage, locate_image
+            from recon.adapters.skyrim.inventory import load_inventory
+            from recon.adapters.skyrim.solve import DEFAULT_RECIPE
+
+            if not args.out or ".local" not in Path(args.out).resolve().parts:
+                raise ValueError("a measurement of the real target writes under a .local directory (--out)")
+            recipe = (Path(args.worktree) / (args.recipe or DEFAULT_RECIPE)).read_bytes()
+            image = PinnedImage(locate_image(args.checkout), args.worktree)
+            inv = load_inventory(args.worktree)
+            pack = Pack("pinned", image, {t.rva: t.size for t in inv.targets}, validated)
+            population = [t.rva for t in inv.unmatched() if t.size <= args.max_bytes]
+        rec = json.loads(recipe)
+        tool = cl.discover(args.checkout, rec["compiler"]["binary_sha256"], args.toolset)
+    except (OSError, ValueError, KeyError, cl.ToolchainUnavailable) as e:
+        print(f"cannot use the input: {type(e).__name__}: {e}", file=sys.stderr)
+        return 2
+    flags = [f for f in rec["flags"] if f != "/c"]
+    compiler = Compiler(tool, flags, Path(args.work))
+    verifier = Verifier(Path(args.worktree), pack.build_id or "pinned", pack.image.pe.blob, recipe)
+    a = fa.Audit()
+    scanned = 0
+    for rva in fa.sample(population, 0 if args.pack else len(population)):
+        if args.want and a.with_trees >= args.want or args.scan_limit and scanned >= args.scan_limit:
+            break
+        scanned += 1
+        fa.audit_function(pack, rva, compiler, verifier, a)
+    report = {"engine": ENGINE_VERSION, "population": len(population), "scanned": scanned, **a.to_json()}
+    if args.out:
+        Path(args.out).mkdir(parents=True, exist_ok=True)
+        (Path(args.out) / "filter-audit.json").write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8")
+    print(json.dumps(report, sort_keys=True))
+    return 0 if a.false_rejections == 0 else 1
 
 
 def cmd_reach(args) -> int:
