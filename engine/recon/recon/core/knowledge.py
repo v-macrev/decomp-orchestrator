@@ -58,11 +58,12 @@ class Store(Protocol):
 ANALYSIS_CODE = ("core", "adapters/x64_msvc", "adapters/skyrim/pack.py", "adapters/skyrim/image.py", "adapters/skyrim/verify.py", "__init__.py")
 
 
-#: the modules a normal form is made by, and files read as they are without following their imports (`Pack.normal` lives in
-#: pack.py, which also imports the search; the search does not make normal forms)
-NORMAL_ROOTS = ("recon.adapters.x64_msvc.program", "recon.adapters.x64_msvc.unwind", "recon.adapters.x64_msvc.validate",
-                "recon.adapters.x64_msvc.abi", "recon.core.ir.passes", "recon.core.ir.validate", "recon.adapters.skyrim.image")
-NORMAL_FILES = ("adapters/skyrim/pack.py", "adapters/x64_msvc/lift_coverage.json", "__init__.py")
+#: the modules a normal form is made by (`Pack.normal` is `recon.adapters.skyrim.normal`), and files read as they are
+#: without following their imports
+NORMAL_ROOTS = ("recon.adapters.skyrim.normal", "recon.adapters.x64_msvc.program", "recon.adapters.x64_msvc.unwind",
+                "recon.adapters.x64_msvc.validate", "recon.adapters.x64_msvc.abi", "recon.core.ir.passes", "recon.core.ir.validate",
+                "recon.adapters.skyrim.image")
+NORMAL_FILES = ("adapters/x64_msvc/lift_coverage.json", "__init__.py")
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -132,11 +133,12 @@ def namespace(*inputs: object) -> str:
     return hashlib.sha256(repr((code_digest(), *inputs)).encode()).hexdigest()
 
 
-def namespaces(*inputs: object) -> dict[str, str]:
+def namespaces(*inputs: object, extra: tuple = ()) -> dict[str, str]:
     """A namespace for each kind of fact: the normal kinds under the code that makes normal forms, the others under all of
-    the analysis code."""
+    the analysis code. `extra`: what only the other kinds depend on (what is declared of imported functions), so that a
+    change of it leaves the normal forms where they are."""
     normal = hashlib.sha256(repr(("normal", normal_code_digest(), *inputs)).encode()).hexdigest()
-    return {**dict.fromkeys(NORMAL_KINDS, normal), "*": namespace(*inputs)}
+    return {**dict.fromkeys(NORMAL_KINDS, normal), "*": namespace(*inputs, *extra)}
 
 
 # -- the facts as data ---------------------------------------------------------------------------

@@ -7,17 +7,16 @@ needs is inferred: signatures from the code of the function and its callees, lay
 """
 from __future__ import annotations
 
-import bisect
+import hashlib
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from recon.adapters.skyrim.image import PinnedImage
+from recon.adapters.skyrim.normal import leaf_size, normal_form
 from recon.adapters.skyrim.verify import PASS, Verifier
 from recon.adapters.x64_msvc import coff
-from recon.adapters.x64_msvc.leaf import leaf_extent
-from recon.adapters.x64_msvc import program as pg
-from recon.adapters.x64_msvc import unwind as uw
+from recon.adapters.x64_msvc.imports import Import
 from recon.adapters.x64_msvc.abi import CALLING, SOURCE
 from recon.adapters.x64_msvc.batch import Compiler, distance
 from recon.adapters.x64_msvc.cl import Toolchain
@@ -25,7 +24,6 @@ from recon.adapters.x64_msvc.symbols import SymbolMap, scoped
 from recon.core import budget as bg
 from recon.core import knowledge as kn
 from recon.core.inference.signature import NotReconstructed, Signature, Slot
-from recon.core.ir import passes, validate
 from recon.core.ir.model import Fn
 from recon.core.synthesis import search
 from recon.core.synthesis.candidates import Candidate, Program
@@ -47,6 +45,12 @@ class Pack:
     store: "kn.Store | None" = None
     #: RVA -> the extent of the leaf function there, or None: found where something calls it (`extent`)
     _leaves: dict[int, int | None] = field(default_factory=dict, repr=False)
+    #: slot RVA of the import address table -> what the loader puts there (D-052)
+    imports: dict[int, Import] = field(default_factory=dict)
+    #: imported function name -> the signature the platform's headers declare
+    import_signatures: dict[str, Signature] = field(default_factory=dict)
+    #: the import address table, [begin, end) RVAs
+    iat: tuple[int, int] = (0, 0)
     _starts: list[int] | None = field(default=None, repr=False)
 
     @staticmethod
@@ -84,39 +88,19 @@ class Pack:
     def _leaf(self, rva: int) -> int | None:
         if self._starts is None:
             self._starts = sorted(self.size)
-        starts = self._starts
-        k = bisect.bisect_right(starts, rva)
-        if k and starts[k - 1] + self.size[starts[k - 1]] > rva:
-            return None                                  # a place inside a listed function
-        try:
-            sec = self.image.pe.section_for(rva)
-        except self.image.up.pecoff.Reject:
-            return None
-        if not sec.flags & SCN_MEM_EXECUTE:
-            return None
-        hi = sec.vaddr + min(sec.raw_size, sec.vsize or sec.raw_size)
-        if k < len(starts):
-            hi = min(hi, starts[k])
-        if hi <= rva:
-            return None
-        return leaf_extent(self.image.read(rva, hi - rva), rva, self.image.image_base, self.size.__contains__)[0]
+        return leaf_size(self.image, self.size, self._starts, rva)
 
     def normal(self, at: int) -> Fn:
         rva = at - self.image.image_base
         n = self.extent(rva)
         if n is None:
             raise NotReconstructed("NOT_A_FUNCTION_OF_THE_PACK")
-        entries = [(b, e, uw.read_unwind(self.image.read, u)) for b, e, u in self.image.runtime_functions() if rva <= b < rva + n]
-        a = pg.analyse(self.image.read(rva, n), rva, self.image.image_base, self.validated, entries)
-        if isinstance(a, pg.Refusal):
-            raise NotReconstructed(a.code)
-        fn = pg.to_ir(a, self.image.image_base, entries, self.image.read)
-        if isinstance(fn, pg.Refusal):
-            raise NotReconstructed(fn.detail.upper().replace("-", "_"))
-        return validate.require(validate.admit(passes.normalise(fn, CALLING), CALLING))
+        return normal_form(self.image, self.validated, rva, n)
 
     def constant(self, at: int, width: int) -> int | None:
         rva = at - self.image.image_base
+        if self.iat[0] <= rva < self.iat[1] or rva in self.imports:
+            return None                     # what the file holds there is not what the loader writes
         try:
             s = self.image.pe.section_for(rva)
             if s.flags & (SCN_MEM_WRITE | SCN_MEM_EXECUTE):
@@ -132,17 +116,42 @@ class Pack:
             return None
 
     def declared(self, at: int) -> tuple[str, Signature] | None:
-        """The plain name and the signature a declaration gives the function at `at`."""
+        """The plain name and the signature a declaration gives the function at `at`. An import's thunk (a function that
+        is one jump through a slot of the import address table) has the import's signature, under `library!name`, which
+        is no name the source can call: it is known for what it takes and returns, not yet written as a call (D-052)."""
         d = self.declarations.get(at - self.image.image_base)
         if d is None:
-            return None
+            return self._thunk(at - self.image.image_base)
         name = scoped(d[0])
         return None if name is None else (name, d[1])
+
+    def _thunk(self, rva: int) -> tuple[str, Signature] | None:
+        n = self.extent(rva)
+        if n not in (6, 7):
+            return None
+        b = self.image.read(rva, n)
+        op = b[n - 6:]
+        if op[:2] != bytes((0xFF, 0x25)) or (n == 7 and b[0] != 0x48):    # jmp [rip+disp32], or with REX.W
+            return None
+        imp = self.imports.get(rva + n + int.from_bytes(op[2:6], "little", signed=True))
+        sig = self.import_signatures.get(imp.name) if imp is not None and imp.name else None
+        return None if sig is None else (f"{imp.library}!{imp.name}", sig)  # type: ignore[union-attr]
+
+    def slot_signature(self, at: int) -> Signature | None:
+        """The signature of the imported function whose slot of the import address table is at `at`, or None."""
+        imp = self.imports.get(at - self.image.image_base)
+        return self.import_signatures.get(imp.name) if imp is not None and imp.name else None
+
+    def imports_digest(self) -> str:
+        """A digest of what is declared of imported functions: which slot holds which, and their signatures."""
+        rows = sorted((rva, i.library, i.name or "", repr(self.import_signatures.get(i.name or ""))) for rva, i in self.imports.items())
+        return hashlib.sha256(repr(rows).encode()).hexdigest()
 
     def namespace(self) -> dict[str, str]:
         """What the facts about this pack's functions depend on beyond their own extents, by kind: the engine's code (only
         the code that makes normal forms, for the facts read off them), the image, the validated forms."""
-        return kn.namespaces("skyrim-pack", self.image.sha256, sorted(self.validated) if self.validated is not None else None)
+        return kn.namespaces("skyrim-pack", self.image.sha256, sorted(self.validated) if self.validated is not None else None,
+                             extra=(self.imports_digest(),))
 
     def key(self, at: int) -> str | None:
         """What the normal form at `at` depends on within the namespace: where its extent starts and how long it is."""
@@ -161,7 +170,7 @@ class Pack:
     def program(self) -> Program:
         """A program for one search: what it analyses is spent from that search's budget, and kept in the store if any."""
         return Program(self.normal, SOURCE, CALLING, self.image.image_base, self.bytes_at, self.constant, self.declared,
-                       store=self.store, key=self.key, universe=self.functions)
+                       store=self.store, key=self.key, universe=self.functions, slot=self.slot_signature)
 
 
 class Workshop:

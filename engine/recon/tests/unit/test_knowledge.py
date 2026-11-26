@@ -21,14 +21,14 @@ from recon.adapters.x64_msvc import program as pg  # noqa: E402
 from recon.adapters.x64_msvc.abi import CALLING, SOURCE  # noqa: E402
 from recon.core import knowledge as kn  # noqa: E402
 from recon.core.budget import Budget, BudgetExhausted, active  # noqa: E402
-from recon.core.inference.signature import NotReconstructed, Signature, Slot  # noqa: E402
+from recon.core.inference.signature import INT, NotReconstructed, Signature, Slot  # noqa: E402
 from recon.core.ir import passes, validate  # noqa: E402
 from recon.core.synthesis import candidates as cd  # noqa: E402
 
 TESTS = Path(__file__).resolve().parents[1]
 
 
-def program(*fns: Asm, store=None, declared=None, universe: bool = False) -> cd.Program:
+def program(*fns: Asm, store=None, declared=None, universe: bool = False, slot=None) -> cd.Program:
     """Functions at their own RVAs; a function's key digests its bytes, as an adapter's digests its extent of the image."""
     code = {f.rva: f for f in fns}
 
@@ -46,7 +46,7 @@ def program(*fns: Asm, store=None, declared=None, universe: bool = False) -> cd.
 
     return cd.Program(normal, SOURCE, CALLING, BASE, lambda at, n: None, lambda a, w: None,
                       declared or (lambda at: None), store=store, key=key,
-                      universe=(lambda: [BASE + r for r in code]) if universe else None)
+                      universe=(lambda: [BASE + r for r in code]) if universe else None, slot=slot or (lambda at: None))
 
 
 def chain(depth: int, step: int = 0x100) -> list[Asm]:
@@ -431,6 +431,18 @@ def test_a_tail_jump_through_a_value_leaves_the_signature_unknown_rather_than_em
     p = program(thunk)
     assert cd.indirect_signatures(p.normal(BASE + 0x2000), SOURCE) == {}
     assert p.signature(BASE + 0x2000) is None
+
+
+def test_a_call_through_a_slot_that_holds_an_import_has_the_import_s_declared_signature():
+    slot_at = BASE + 0x9000
+    f = Asm(0x2000)                                  # f(_, b): return imported(5, b) + 1, through its slot of the import address table
+    f(T.sub_rsp(40))(I.create_reg_i32(C.MOV_R32_IMM32, R.ECX, 5))(I.create_mem(C.CALL_RM64, mem(R.RIP, slot_at)))
+    f(I.create_reg_i32(C.ADD_RM32_IMM8, R.EAX, 1))(T.add_rsp(40))(T.ret())
+    declared = Signature((Slot(INT, 32), Slot(INT, 32)), Slot(INT, 32), (("declared", "import"),))
+    s = program(f, slot=lambda at: declared if at == slot_at else None).signature(BASE + 0x2000)
+    assert s is not None and len(s.params) == 2 and s.result == Slot(INT, 32)  # the second argument is f's own, passed on
+    site = program(f).signature(BASE + 0x2000)                                  # no declaration: the site shows one argument
+    assert site is not None and len(site.params) == 0
 
 
 def test_what_a_function_leaves_open_is_read_with_the_same_calls_as_its_signature():

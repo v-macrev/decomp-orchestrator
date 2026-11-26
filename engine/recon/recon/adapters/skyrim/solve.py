@@ -34,11 +34,14 @@ from recon.adapters.skyrim.verify import PASS, Verifier
 from recon.adapters.x64_msvc import coff
 from recon.adapters.x64_msvc import declarations as D
 from recon.adapters.x64_msvc import unwind as uw
+from recon.adapters.x64_msvc.headers import import_signatures
+from recon.adapters.x64_msvc.imports import iat_range, import_slots
 from recon.adapters.x64_msvc.batch import distance
 from recon.adapters.x64_msvc.cl import CompilerFailed, Toolchain, ToolchainUnavailable, diagnostics, discover
 from recon.adapters.x64_msvc.symbols import SymbolMap
 from recon.adapters.x64_msvc.validate import load_validated
 from recon.core import budget as bg
+from recon.core import knowledge as kn
 from recon.core.emitter.member import Declared, MemberUnit, member_form
 from recon.core.inference.signature import NotReconstructed
 from recon.core.synthesis import search
@@ -151,10 +154,37 @@ def pack_of(worktree: Path, checkout: Path, knowledge: str | None) -> tuple[Pack
         if not validated:
             raise NotReconstructed("LIFT_COVERAGE_MISSING")
         pack = Pack("pinned", image, unwind_extents(image, extents(inv)[0]), validated)
+        with_imports(pack, checkout)
         if knowledge:
             pack.open_store(knowledge)
         _PACKS[k] = (pack, frozenset(t.rva for t in inv.targets))
     return _PACKS[k]
+
+
+def with_imports(pack: Pack, checkout: Path) -> Pack:
+    """What the image imports, slot by slot, and the signatures the platform's headers declare of those functions (D-052).
+    The signatures are derived once for an image, a compiler and the code that derives them, and kept (privately, under
+    the checkout's recon data) for every later process. Without a compiler nothing is declared: the imports stay unknown."""
+    image = pack.image
+    pack.imports = import_slots(image.pe.blob, image.read)
+    pack.iat = iat_range(image.pe.blob)
+    names = sorted({i.name for i in pack.imports.values() if i.name})
+    try:
+        tool = discover(checkout)
+    except ToolchainUnavailable:
+        return pack
+    code = kn.code_digest(files={"adapters/x64_msvc/headers.py", "adapters/x64_msvc/cl.py", "adapters/x64_msvc/coff.py"})
+    key = hashlib.sha256(json.dumps([image.sha256, tool.digest(), code, names]).encode()).hexdigest()[:32]
+    where = Path(checkout) / ".local/orchestrator/recon/imports"
+    path = where / f"{key}.json"
+    if path.is_file():
+        found = {n: kn.signature_of(d) for n, d in json.loads(path.read_text(encoding="utf-8")).items()}
+    else:
+        found = import_signatures(tool, where / f"work-{os.getpid()}", names)
+        write_atomically(path, json.dumps({n: kn.signature_data(s) for n, s in sorted(found.items())}, sort_keys=True))
+        shutil.rmtree(where / f"work-{os.getpid()}", ignore_errors=True)
+    pack.import_signatures = {n: s for n, s in found.items() if s is not None}
+    return pack
 
 
 def unwind_extents(image: PinnedImage, size: dict[int, int]) -> dict[int, int]:

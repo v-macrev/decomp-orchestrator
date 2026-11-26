@@ -419,3 +419,26 @@ parameters it sets itself and no result. A tail jump passes on whatever the func
 function's own, which no use at the site reads: such a site shows nothing, and the function's signature now stays unknown
 instead of being read as taking and returning nothing. 189 of the leaves are such jumps through the import address table (an
 imported function's thunk), and they stay unknown until imported functions are declared; that is the measured next blocker.
+
+## D-052 · 2026-11-26 · Imported functions are declared by the platform's headers, read back through the compiler
+D-051 left 189 of the leaves that were no extent as thunks of imported functions: one jump through a slot of the import address
+table. An imported function is known by its name, and the image says which: the import directory lists, per library, each slot
+and its function by name or by ordinal (`x64_msvc/imports.py`). Its signature is in the headers of the toolchain and SDK the build
+compiles against, and the compiler is what reads them (`x64_msvc/headers.py`): one translation unit per group of headers has, for
+each name a header declares (`__if_exists`), a `constexpr` encoding of the function's type (each parameter's and the result's
+kind and width) placed in the object as a named constant, which is read back from the COFF symbols. Nothing about any function is
+written by hand. A name no group declares, a variadic one, an overloaded one (the compiler rejects its line, and only that line
+is dropped) or one passing an aggregate by value has no signature and stays unknown; so does a decorated C++ name, which is no
+identifier. The signatures are derived once per image, compiler and deriving code and kept privately under the checkout's recon
+data, beside the knowledge store.
+
+A thunk is declared as `library!name`, which no source can call: it gives what the function takes and returns to its callers'
+inference, and is not emitted as a call yet. A call through a slot (`call [slot]`) resolves through the same declarations. The
+table's bytes in the file are not what the loader writes, so they are no constant of the program. What is declared of imports
+(slots, names, signatures) is part of the namespace of every fact but normal forms, so a change re-derives them. Normal forms
+are now made in their own module (`adapters/skyrim/normal.py`), which is what the store files them under, so a change to the
+pack's other code no longer recomputes them.
+
+Measured on the pinned image: 606 slots (28 by ordinal) from 32 libraries, 578 names, 392 declared; 113 of the 287 callees
+that were no extent are now declared thunks. Of the 186 names not declared, 83 are decorated C++ names of the runtime, 42
+runtime and 61 platform identifiers that no group declares as a plain register-passed function.

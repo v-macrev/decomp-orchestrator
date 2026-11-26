@@ -177,12 +177,16 @@ class Program:
 
     def __init__(self, normal: Callable[[int], Fn], conv: Convention, abi: Abi, base: int, image: Callable[[int, int], "bytes | None"],
                  constant: Callable[[int, int], "int | None"], declared: Callable[[int], "tuple[str, Signature] | None"] = lambda at: None,
-                 store=None, key: Callable[[int], "str | None"] = lambda at: None, universe: Callable[[], Iterable[int]] | None = None) -> None:
+                 store=None, key: Callable[[int], "str | None"] = lambda at: None, universe: Callable[[], Iterable[int]] | None = None,
+                 slot: Callable[[int], "Signature | None"] = lambda at: None) -> None:
         """`normal(address)`: the admitted normal form, or NotReconstructed. `constant`: the bits of read-only memory, or None.
         `declared(address)`: the name and signature a declaration gives the function there (the highest-ranked evidence), or None.
         `key(address)`: a digest of everything the normal form there depends on, or None when it is not to be kept.
-        `universe()`: every function of the program, for the index of callers."""
+        `universe()`: every function of the program, for the index of callers.
+        `slot(address)`: the signature a declaration gives the function whose address the memory at `address` holds (an
+        imported function, through its slot of the import address table), or None."""
         self._normal = normal
+        self._slot = slot
         self._declared = declared
         self._store, self._key, self._universe = store, key, universe
         self.conv, self.abi, self.base, self.image, self.constant = conv, abi, base, image, constant
@@ -485,12 +489,21 @@ class Program:
             return None
 
     def _resolver(self, fn: Fn) -> tuple[Callable[[Arg], Signature | None], dict]:
-        """How `fn`'s calls are read: a direct callee by its signature, a call through a value by what the site shows.
+        """How `fn`'s calls are read: a direct callee by its signature; a call through a value read from a slot that holds
+        a declared function (an import) by that declaration; any other call through a value by what the site shows.
         Every reading of `fn`'s own code goes through this one resolver, so they agree on what its results are."""
         through = indirect_signatures(fn, self.conv)
+        imported: dict[int, Signature] = {}
+        for v, (_b, o) in fn.defining().items():
+            if isinstance(o, Op) and o.kind == "load" and o.args and isinstance(o.args[0], Const):
+                sig = self._slot(o.args[0].value)
+                if sig is not None:
+                    imported[v] = sig
 
         def resolve(t: Arg) -> Signature | None:
-            return self.callee(t) if isinstance(t, Const) else through.get(t)  # type: ignore[arg-type]
+            if isinstance(t, Const):
+                return self.callee(t)
+            return imported.get(t) or through.get(t)  # type: ignore[arg-type]
         return resolve, through
 
     def _results(self, at: int) -> list:
