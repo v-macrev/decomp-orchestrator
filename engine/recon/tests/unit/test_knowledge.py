@@ -459,6 +459,43 @@ def test_what_a_call_site_shows_is_read_from_the_caller_s_own_values():
     assert len(sig.params) == 2 and sig.result is None   # this, passed on, and the 5 it sets; nothing read after it
 
 
+def two_calls(rva: int, second) -> Asm:
+    """g(): a(5, 7, 8, 9); then one argument, 3, to the second call; what the first call left in the other argument
+    locations is still there, listed at the second call, and no argument of the caller's"""
+    a = Asm(rva)
+    a(T.sub_rsp(40))
+    for reg, v in ((R.ECX, 5), (R.EDX, 7), (R.R8D, 8), (R.R9D, 9)):
+        a(I.create_reg_i32(C.MOV_R32_IMM32, reg, v))
+    a.branch(C.CALL_REL32_64, 0x5000)
+    a(I.create_reg_i32(C.MOV_R32_IMM32, R.ECX, 3))
+    second(a)
+    a(T.add_rsp(40))(T.ret())
+    return a
+
+
+def test_what_an_earlier_call_left_in_an_argument_location_is_not_set_by_the_caller():
+    g = two_calls(0x3000, lambda a: a.branch(C.CALL_REL32_64, 0x6000))
+    sites = cd.call_sites(program(g).normal(BASE + 0x3000), SOURCE)
+    assert [n for n, _w in sites[str(BASE + 0x5000)][0]["set"]] == ["r8", "r9", "rcx", "rdx"]
+    assert [n for n, _w in sites[str(BASE + 0x6000)][0]["set"]] == ["rcx"]
+
+
+def test_what_an_earlier_call_left_is_no_argument_of_a_call_through_a_value():
+    g = two_calls(0x3000, lambda a: a(I.create_mem(C.CALL_RM64, mem(R.RIP, BASE + 0x9000))))
+    (sig,) = cd.indirect_signatures(program(g).normal(BASE + 0x3000), SOURCE).values()
+    assert len(sig.params) == 1 and sig.params[0].kind == INT
+
+
+def test_a_callee_read_from_its_callers_takes_what_they_set_after_an_earlier_call():
+    callee = Asm(0x6000)(I.create_reg_mem(C.LEA_R32_M, R.EAX, mem(R.RCX, 1)))(I.create_reg_reg(C.ADD_R32_RM32, R.EAX, R.EDX))(T.ret())
+    first = Asm(0x5000)(T.ret())
+    g = two_calls(0x3000, lambda a: a.branch(C.CALL_REL32_64, 0x6000))
+    p = program(callee, first, g, universe=True)
+    p.index_callers()
+    sites = [s for c in p.callers(BASE + 0x6000) for s in p.sites(c).get(str(BASE + 0x6000), [])]
+    assert sites and all([n for n, _w in s["set"]] == ["rcx"] for s in sites)
+
+
 # ------------------------------------------------------------------------------------ namespaces
 
 def test_normal_forms_are_filed_under_the_code_that_makes_them_and_nothing_else():

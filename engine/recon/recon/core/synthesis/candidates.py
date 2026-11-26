@@ -59,14 +59,55 @@ def computed_width(fn: Fn, d: dict, v: Arg) -> int:
     return v.width if isinstance(v, Const) else fn.width(v)
 
 
+def caller_set(fn: Fn, conv: Convention, d: dict) -> Callable[[Arg, str], bool]:
+    """Whether a value in an argument location at a call site is one the caller put there of its own: a constant, or a
+    value it computed. Not an entry value it merely passes on, not an undefined one, and not what an earlier call left: the
+    convention lets a callee leave anything in the volatile locations other than its result, so a caller never means them
+    as arguments, though every call's normal form lists every argument location with whatever it holds. An earlier call's
+    result is the caller's when the caller moved it; left where the call put it (the floating result is also the first
+    floating argument location) it is not told apart from what any call leaves there, and is not counted. A merge is the
+    caller's own when one of its values is (the least fixed point, so a loop of merges of nothing set is not)."""
+    params = {v for _n, v in fn.params}
+    results = (conv.result_int, conv.result_float)
+    left: set[int] = set()
+    placed: dict[int, str] = {}                   # an earlier call's result -> where the call left it
+    for b in fn.blocks:
+        for o in (*b.ops, b.term):
+            if o.kind == "call":
+                for n, v in zip(o.attr("defs") or (), o.defs):  # type: ignore[call-overload]
+                    if n in results:
+                        placed[v] = n
+                    else:
+                        left.add(v)
+    own: set[int] = set()
+    users: dict[int, list[int]] = {}
+    for v, o in d.items():
+        if isinstance(o, Op):
+            if v not in params and v not in left and o.kind != "undef":
+                own.add(v)
+        elif o is not None:                       # a merge
+            for _k, a in o.args:
+                if isinstance(a, Const):
+                    own.add(v)
+                elif isinstance(a, int):
+                    users.setdefault(a, []).append(v)
+    work = list(own)
+    while work:
+        for u in users.get(work.pop(), ()):
+            if u not in own:
+                own.add(u)
+                work.append(u)
+    return lambda v, at: isinstance(v, Const) or (isinstance(v, int) and v in own and placed.get(v) != at)
+
+
 def call_sites(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
     """What a caller's normal form shows of each call it makes (tails are left out: what they pass is the caller's own).
 
     Per call: `set`, the argument locations the caller puts a value of its own in, with the value's width; `reads`, the
     result locations whose value it uses after the call, with the width. A location it merely passes on from its own entry is
     not set: it may be an argument of the caller that the callee ignores."""
-    params = {v for _n, v in fn.params}
     d = {v: o for v, (_b, o) in fn.defining().items()}
+    own = caller_set(fn, conv, d)
     uses: dict[int, int] = {}          # a value that only reaches a return may merely have been left there: not a use
     for b in fn.blocks:
         for a in [a for o in b.ops for a in o.args] + [a for p in b.phis for _k, a in p.args] + (list(b.term.args) if b.term.kind != "return" else []):
@@ -81,7 +122,7 @@ def call_sites(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
             for n, v in zip(o.attr("args") or (), o.args[1:]):  # type: ignore[call-overload]
                 if isinstance(v, Const):
                     put.append([n, 64])
-                elif isinstance(v, int) and v not in params and not (isinstance(d.get(v), Op) and d[v].kind == "undef"):  # type: ignore[union-attr]
+                elif own(v, n):
                     put.append([n, computed_width(fn, d, v)])
             reads = [[n, fn.width(v)] for n, v in zip(o.attr("defs") or (), o.defs)  # type: ignore[call-overload]
                      if n in (conv.result_int, conv.result_float) and uses.get(v, 0)]
@@ -106,16 +147,13 @@ def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
     A tail jump through a value shows nothing: what it passes on is whatever the function was given, and its result is the
     function's own, which no use at the site reads. It has no reading here, so that the function's signature stays unknown
     rather than being read as taking nothing and returning nothing (D-051)."""
-    params = {v for _n, v in fn.params}
     d = {v: o for v, (_b, o) in fn.defining().items()}
+    own = caller_set(fn, conv, d)
     uses: dict[int, int] = {}          # a value that only reaches a return may merely have been left there: not a use
     for b in fn.blocks:
         for a in [a for o in b.ops for a in o.args] + [a for p in b.phis for _k, a in p.args] + (list(b.term.args) if b.term.kind != "return" else []):
             if isinstance(a, int):
                 uses[a] = uses.get(a, 0) + 1
-
-    def own(v: Arg) -> bool:
-        return isinstance(v, Const) or (isinstance(v, int) and v not in params and not (isinstance(d.get(v), Op) and d[v].kind == "undef"))  # type: ignore[union-attr]
 
     def width(v: Arg) -> int:
         return computed_width(fn, d, v)
@@ -126,12 +164,12 @@ def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
             if o.kind != "call" or not o.args or not isinstance(o.args[0], int) or o.args[0] in out:
                 continue
             have = dict(zip(o.attr("args") or (), o.args[1:]))  # type: ignore[call-overload]
-            last = max((k for k, (i_loc, f_loc) in enumerate(conv.slots) if (i_loc in have and own(have[i_loc])) or (f_loc in have and own(have[f_loc]))), default=-1)
+            last = max((k for k, (i_loc, f_loc) in enumerate(conv.slots) if (i_loc in have and own(have[i_loc], i_loc)) or (f_loc in have and own(have[f_loc], f_loc))), default=-1)
             slots = []
             for i_loc, f_loc in conv.slots[: last + 1]:
-                if i_loc in have and own(have[i_loc]):
+                if i_loc in have and own(have[i_loc], i_loc):
                     slots.append(_int_slot(width(have[i_loc])))
-                elif f_loc in have and own(have[f_loc]):
+                elif f_loc in have and own(have[f_loc], f_loc):
                     slots.append(_float_slot(width(have[f_loc])))
                 else:
                     slots.append(Slot(INT, 64))      # passed on from the caller's own entry

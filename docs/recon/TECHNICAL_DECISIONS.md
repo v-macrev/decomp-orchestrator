@@ -442,3 +442,18 @@ pack's other code no longer recomputes them.
 Measured on the pinned image: 606 slots (28 by ordinal) from 32 libraries, 578 names, 392 declared; 113 of the 287 callees
 that were no extent are now declared thunks. Of the 186 names not declared, 83 are decorated C++ names of the runtime, 42
 runtime and 61 platform identifiers that no group declares as a plain register-passed function.
+
+## D-053 · 2026-11-26 · What an earlier call left in an argument location is no argument the caller set
+`READS_A_LOCATION_NOBODY_SET` was the primary blocker of 390 development functions on the D-051 engine, but the taxonomy
+ranks the ABI family before Knowledge: read with their callees' signatures, 374 of them stop at an unknown callee first. The
+undefined read appeared only when the search tried a callee's reading from its callers' sites, and in 527 places it was an
+argument of exactly such a callee: the reading gave it more parameters than the caller passes. Every call's normal form lists
+every argument location with whatever it holds, and after an earlier call those are what that call left (r8, r9, rdx,
+xmm1...), which the convention lets a callee leave as anything: no caller means them as arguments. The site readings
+(`call_sites`, `indirect_signatures`) counted them as set. One rule now serves both (`caller_set`): a location is set by the
+caller when it holds a constant or a value the caller computed; not an entry value passed on, not an undefined one, not what
+an earlier call left outside its result, and not an earlier call's result left where the call put it (the floating result is
+also the first floating argument location, so a result passed on unmoved is not told apart from what any call leaves; the
+reading then has fewer parameters, which lowering never refuses, rather than more). A merge is the caller's when one of its
+values is, as a least fixed point. Of the 390, 44 also read the thread's segment base at entry (thread-local storage), which
+is a capability of its own.
