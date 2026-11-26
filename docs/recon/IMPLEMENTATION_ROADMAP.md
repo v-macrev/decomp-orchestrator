@@ -315,6 +315,48 @@ Next:             the manifest, held-out split and taxonomy, then a re-run of th
 **Still open in Phase 7:** D2 (callee depth and fixpoint rounds as budgets), D4 to D7, the manifest, the held-out split, the taxonomy,
 the constant scan and the ceiling estimate. The member emitter still refuses callees (D10, Phase 8), so D1 changes no real result yet.
 
+## Phase 7: persistent whole-program analysis and the first measured campaign — 2026-11-26
+
+D2, D4, D6, D7, the manifest, the held-out split and the taxonomy (D-041 to D-044); then, on the user's direction that coverage
+comes before speed, the persistent analysis that replaced the depth limit: strongly connected components of the call graph
+solved bottom-up to a deterministic fixed point, facts committed transactionally to a content-addressed store, callers'
+evidence kept as alternatives, resumable budget levels, a per-engine campaign journal and an adaptive worker pool (D-045 to
+D-047); calls through a value read from their sites, extents from the exception directory and of leaf functions (D-048,
+D-049, D-051); and two defects the real runs exposed, fixed with references in the tests (D-050, and the resolver of c736029).
+
+```text
+Increment:        Phase 7 rest (D2, D4, D6, D7, manifest, split, taxonomy) + D-045..D-051. Blocker addressed: CALLEE_SIGNATURE_UNKNOWN,
+                  the largest by count after Phase 6 (1,657 of 2,375), and the depth limit that caused part of it.
+Changed:          engine/recon: core/knowledge.py, core/workers.py, adapters/skyrim/{prewarm,campaign}.py, adapters/x64_msvc/leaf.py (new);
+                  core/synthesis/candidates.py, core/inference/signature.py, core/{budget,taxonomy}.py, adapters/skyrim/{pack,solve,
+                  inventory,manifest,reach}.py, cli; tests: test_knowledge, test_campaign, test_phi_walks, test_leaf (new)
+Tests:            engine 568 passed, Linux; 567 passed, 1 skipped, Windows
+Whole program:    114,652 functions analysed once into the store (107 min, 3 workers, largest worker 525 MiB, no error, no death);
+                  916 cyclic components solved, the largest of 573 functions; 200 of 200 sampled signatures read from the store
+                  equal those computed without it; reach over 50 functions 149 s warm, 804 s cold, 37 of 3,742 signatures computed
+Development set:  2,141 functions: BYTE_MATCHED 2 (20 bytes), OPEN 2,139; reach candidates 592; RESUMABLE 0, INFRA 0
+Held-out set:     108 functions: OPEN 108; reach candidates 33 (development and held-out are reported apart, never merged)
+Denominator:      the 2,249 functions of at most 128 bytes in an existing unit that `sr next` offers today (2,375 in Phase 6:
+                  the offered set has moved since); the coverage denominator and the VERIFIED definition are unchanged
+Compared:         reach candidates 625 (Phase 6: 140); primary CALLEE_SIGNATURE_UNKNOWN 722 (Phase 6: 1,657); INDIRECT_CALL 355 (340);
+                  BYTE_MATCHED unchanged at 2
+Regressions:      none in the suites
+Overfitting:      no target RVA, name or byte in engine source or tests; every new rule is the x64 convention's or a reading of the
+                  image's own tables, tested on original fixtures
+Engine measured:  7ea7e13 and the per-engine journal (the D-051 engine, 208bc13, is being measured next)
+Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
+```
+
+**Primary blockers, development set** (first blocker of each open function): `CALLEE_SIGNATURE_UNKNOWN` 691,
+`READS_A_LOCATION_NOBODY_SET` 372, `INDIRECT_CALL` 336, `CALLEE_NOT_DECLARED` 186, `CLASS_NOT_DECLARED` 175,
+`MEMBER_NOT_DECLARED` 161, `CONSTRUCT_UNSUPPORTED` 48, `GLOBAL_NOT_DECLARED` 30, `PARAMETER_IN_TWO_LOCATIONS` 30, others under 30.
+By family: Knowledge 1,585, ABI 413, Source 73, Machine 28, Search 24, Unit 16.
+
+**No function was judged on its budget.** The 16 functions suspended at level 0 were resumed at four times the budgets and
+each ended in a state of its own; none was left resumable, and none was counted as unreconstructable because a budget ran out.
+
+**Still open in Phase 7:** the constant scan and the ceiling estimate; the campaign on the D-051 engine.
+
 ## Items found by the audit that block or shape later phases
 
 | Id | Item | Needed by |
