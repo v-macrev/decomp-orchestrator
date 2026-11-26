@@ -2391,6 +2391,9 @@ Acceptance gate:
   provider calls.
 - Saved flows and runs load; the live database shape migrates.
 
+> **Superseded.** Phases 7 to 10 below are replaced by Phases 7 to 13 of
+> [DETERMINISTIC_MATCHING_CONVERGENCE.md](DETERMINISTIC_MATCHING_CONVERGENCE.md). They are kept for history.
+
 ### Phase 7: Compiler-aware synthesis
 
 Deliver:
