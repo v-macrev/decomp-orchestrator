@@ -10,7 +10,10 @@ here has a wall-clock limit: the operation budgets bound the work.
 """
 from __future__ import annotations
 
+import faulthandler
 import multiprocessing as mp
+import os
+import signal
 import time
 import traceback
 from collections import deque
@@ -53,6 +56,8 @@ def where(e: BaseException) -> str:
 
 
 def _main(conn: Connection, init: Callable, init_args: tuple, work: Callable) -> None:
+    if hasattr(signal, "SIGUSR1"):        # `kill -USR1 <pid>` prints where the worker is, without stopping it
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
     state = init(*init_args)
     while True:
         task = conn.recv()
@@ -74,6 +79,7 @@ class _Worker:
     rss: int = 0
     peak: int = 0
     retiring: bool = False
+    noted: float = 0.0            # how long the task had run when it was last reported as long
 
 
 @dataclass
@@ -90,14 +96,15 @@ class Pool:
     """`work(state, task)` in worker processes, `state = init(*init_args)` once per worker."""
 
     def __init__(self, init: Callable, init_args: tuple, work: Callable, most: int = 1, reserve: int | None = None,
-                 share: float = 0.5, step_s: float = 20.0, log: Callable[[str], None] = lambda s: None) -> None:
+                 share: float = 0.5, step_s: float = 20.0, log: Callable[[str], None] = lambda s: None,
+                 long_s: float = 600.0) -> None:
         """`most`: never more workers than this. `reserve`: memory to leave free (a quarter of the machine, at least 2 GiB,
         unless given). `share`: the part of the machine one worker may grow to before it is retired after its task."""
         self.init, self.init_args, self.work, self.most = init, init_args, work, max(1, most)
         m = meminfo()
         self.total = m[1] if m else 0
         self.reserve = reserve if reserve is not None else (max(2 * GIB, self.total // 4) if m else 0)
-        self.share, self.step_s, self.log = share, step_s, log
+        self.share, self.step_s, self.log, self.long_s = share, step_s, log, long_s
         self.allowed = 1
         self.ctx = mp.get_context("spawn")
         self.workers: list[_Worker] = []
@@ -143,6 +150,23 @@ class Pool:
             self.stats.grew.append((round(now, 1), self.allowed))
             self.log(f"workers: memory available {avail // (1 << 20)} MiB, a worker takes up to {per // (1 << 20)} MiB; at most {self.allowed}")
 
+    def _note_long(self) -> None:
+        """A task that has run `long_s`, then twice as long, and so on, is reported with the worker's stack (on POSIX the
+        worker prints it to its standard error). Only reported: a long task is left to finish, never ended or judged."""
+        now = time.monotonic()
+        for w in self.workers:
+            if w.task is None:
+                continue
+            ran = now - w.since
+            if ran >= max(self.long_s, 2 * w.noted):
+                w.noted = ran
+                self.log(f"workers: worker {w.proc.pid} has been on one task for {ran / 60:.0f} min")
+                if hasattr(signal, "SIGUSR1"):
+                    try:
+                        os.kill(w.proc.pid, signal.SIGUSR1)
+                    except OSError:
+                        pass
+
     def run(self, tasks: Iterable, done: Callable[[Any, str, Any, dict], None]) -> None:
         """Every task, answered through `done(task, kind, value, measures)`: kind "ok" (value: what `work` returned), "error"
         (value: the exception's kind) or "died" (the worker died twice on it)."""
@@ -157,9 +181,10 @@ class Pool:
                     self._spawn()
                 for w in self.workers:
                     if w.task is None and queue:
-                        w.task, w.since = queue.popleft(), time.monotonic()
+                        w.task, w.since, w.noted = queue.popleft(), time.monotonic(), 0.0
                         w.conn.send(w.task)
                 ready = wait([w.conn for w in self.workers if w.task is not None] + [w.proc.sentinel for w in self.workers if w.task is not None], 5)
+                self._note_long()
                 for w in list(self.workers):
                     if w.task is None:
                         continue

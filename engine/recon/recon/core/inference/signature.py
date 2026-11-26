@@ -141,25 +141,59 @@ def computed(fn: Fn, conv: Convention, callee: CalleeOf) -> dict[int, int]:
 
 # ---------------------------------------------------------------------------------------- results
 
-def _zero_above(fn: Fn, d: Mapping[int, object], a: Arg, w: int, seen: frozenset[int] = frozenset()) -> bool:
-    """Whether every bit from `w` up is zero, seen through phis."""
+def _zero_above(fn: Fn, d: Mapping[int, object], a: Arg, w: int) -> bool:
+    """Whether every bit from `w` up is zero, seen through phis.
+
+    A value that reaches itself through phis is taken to be zero above `w` unless something else says otherwise: the
+    greatest fixed point. It is computed over the values reachable from `a`, each once (every value starts true and is
+    made false when its own rule fails, which is passed on to the values that use it), so a ladder of phis that reach
+    the same values along many paths costs what its size costs, not the number of its paths."""
     if isinstance(a, Const):
         return a.value >> w == 0
-    if a in seen:
-        return True
-    o = d.get(a)
-    if isinstance(o, Phi):
-        return all(_zero_above(fn, d, x, w, seen | {a}) for _k, x in o.args)
-    if isinstance(o, Op):
-        if o.kind == "zext":
-            return fn.width(o.args[0]) <= w or _zero_above(fn, d, o.args[0], w, seen)
-        if o.kind == "and":
-            return any(_zero_above(fn, d, x, w, seen) for x in o.args)
-        if o.kind == "ite":
-            return all(_zero_above(fn, d, x, w, seen) for x in o.args[1:])
-        if o.kind == "lshr" and isinstance(o.args[1], Const):
-            return fn.width(a) - o.args[1].value <= w
-    return False
+
+    def rule(v: int) -> tuple[str, list[Arg]] | bool:
+        o = d.get(v)
+        if isinstance(o, Phi):
+            return "all", [x for _k, x in o.args]
+        if isinstance(o, Op):
+            if o.kind == "zext":
+                return True if fn.width(o.args[0]) <= w else ("all", [o.args[0]])
+            if o.kind == "and":
+                return "any", list(o.args)
+            if o.kind == "ite":
+                return "all", list(o.args[1:])
+            if o.kind == "lshr" and isinstance(o.args[1], Const):
+                return fn.width(v) - o.args[1].value <= w
+        return False
+
+    rules: dict[int, tuple[str, list[Arg]] | bool] = {}
+    users: dict[int, list[int]] = {}
+    todo = [a]
+    while todo:
+        v = todo.pop()
+        if v in rules:
+            continue
+        rules[v] = r = rule(v)
+        if not isinstance(r, bool):
+            for x in r[1]:
+                if not isinstance(x, Const):
+                    users.setdefault(x, []).append(v)  # type: ignore[arg-type]
+                    todo.append(x)
+    value = {v: r if isinstance(r, bool) else True for v, r in rules.items()}
+
+    def holds(x: Arg) -> bool:
+        return x.value >> w == 0 if isinstance(x, Const) else value[x]  # type: ignore[index]
+    work = list(rules)
+    while work:
+        v = work.pop()
+        r = rules[v]
+        if isinstance(r, bool) or not value[v]:
+            continue
+        mode, xs = r
+        if not (all(map(holds, xs)) if mode == "all" else any(map(holds, xs))):
+            value[v] = False
+            work.extend(users.get(v, ()))
+    return value[a]  # type: ignore[index]
 
 
 def _float_width(fn: Fn, d: Mapping[int, object], vals: list[Arg], callee: CalleeOf) -> int:
@@ -195,6 +229,34 @@ def _float_width(fn: Fn, d: Mapping[int, object], vals: list[Arg], callee: Calle
     return min(made) if made else 0
 
 
+def _by_chance(d: Mapping[int, object], uses: Mapping[int, int], given: Mapping[int, object] | set, constants: set,
+               root: Arg) -> bool:
+    """Whether the value has another use than being returned, so that it may merely have been left there: through
+    phis and widenings, every value it may be has one (`via`: the uses on the way there, 0 for the returned value
+    itself). A phi met again adds nothing, and what is said of any other value depends only on the value and `via`,
+    so each is looked at once, however many paths reach it."""
+    todo: list[tuple[Arg, int]] = [(root, 0)]
+    done: set = set()
+    while todo:
+        a, via = todo.pop()
+        if isinstance(a, Const):
+            if a.value not in constants:
+                return False
+            continue
+        o = d.get(a)
+        key = a if isinstance(o, Phi) else (a, via)
+        if key in done:
+            continue
+        done.add(key)
+        if isinstance(o, Phi):
+            todo.extend((x, 1) for _k, x in o.args)
+        elif isinstance(o, Op) and o.kind in ("zext", "trunc", "cat", "and") and uses.get(a, 0) <= via and not isinstance(o.args[-1], Const):
+            todo.append((o.args[-1], 1))
+        elif not (a in given or uses.get(a, 0) > via or isinstance(o, Op) and o.kind == "call"):
+            return False
+    return True
+
+
 def results(fn: Fn, conv: Convention, callee: CalleeOf) -> list[tuple[Slot | None, Evidence]]:
     """What the function may return, best supported first."""
     low = computed(fn, conv, callee)
@@ -214,18 +276,8 @@ def results(fn: Fn, conv: Convention, callee: CalleeOf) -> list[tuple[Slot | Non
 
     constants = {a.value for b in fn.blocks for o in b.ops if not o.pure for a in o.args if isinstance(a, Const)}
 
-    def by_chance(a: Arg, via: int = 0, seen: frozenset[int] = frozenset()) -> bool:
-        """Whether the value has another use than being returned (`via`: uses on the way there), so that it may merely have been left there."""
-        if isinstance(a, Const):
-            return a.value in constants
-        if a in seen:
-            return True
-        o = d.get(a)
-        if isinstance(o, Phi):
-            return all(by_chance(x, 1, seen | {a}) for _k, x in o.args)
-        if isinstance(o, Op) and o.kind in ("zext", "trunc", "cat", "and") and uses.get(a, 0) <= via and not isinstance(o.args[-1], Const):
-            return by_chance(o.args[-1], 1, seen)
-        return a in given or uses.get(a, 0) > via or isinstance(o, Op) and o.kind == "call"
+    def by_chance(a: Arg) -> bool:
+        return _by_chance(d, uses, given, constants, a)
 
     found: list[tuple[Slot | None, Evidence]] = []
     copied = {n for o in fn.observations if o.kind == "copy" for n in o.detail.split(",")}

@@ -384,3 +384,20 @@ starts and ends. Every entry that starts outside the known extents and overlaps 
 a chained entry continues another function and starts none, and an entry inside a known extent is a part of it. These functions
 are callees and members of the index of callers only: the population, the denominator and what is offered are unchanged. A leaf
 function without unwind data is still no extent.
+
+## D-050 · 2026-11-26 · The walks through phis that read a result look at each value once; a long task is reported with its stack
+The whole-program prewarm stopped progressing: three workers spent two hours each inside one function's result reading. Whether a
+returned value may only have been left in the result register (`by_chance`), and whether it is zero above 32 bits
+(`_zero_above`), were answered by following every path through phis, carrying the path so that a loop ends. A ladder of merges
+that reach the same values along two paths each has 2^n paths for 2n values. Neither answer depends on the path: in `by_chance`
+a phi met again adds nothing to a conjunction and every other value's verdict depends only on the value and whether it is the
+returned value itself, so the answer is the conjunction over the values reachable, each looked at once; `_zero_above` mixes
+"all" and "any", and "a phi met again holds" is the greatest fixed point, which is now computed directly: every reachable value
+starts true and is made false when its own rule fails, passed on to its users. Both are linear in the values reached. The
+path-following walks are kept verbatim in the tests as the reference, and the new walks give their answers on every root of
+random SSA-shaped value graphs with loops (418,158 roots compared once, 5,000 in the suite). Signatures are filed under the new
+code's digest and computed again, as any change of the analysis code requires.
+
+So that the next such stall is seen at once: the pool reports a task that has run 10 minutes, then each time twice as long, and on
+POSIX has the worker print its stack (`faulthandler` on SIGUSR1, which also answers `kill -USR1 <pid>` by hand). The task is left
+to finish: a long task is never ended or judged. A worker's error names the innermost engine frame (file name, line, function).

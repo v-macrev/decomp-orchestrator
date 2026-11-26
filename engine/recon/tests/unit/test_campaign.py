@@ -212,6 +212,23 @@ def test_the_pool_answers_every_task_and_a_task_that_kills_its_worker_is_infrast
     assert pool.stats.died == 2                      # tried again once before it is answered
 
 
+def nap(st, task):
+    import time
+
+    time.sleep(task)
+    return task
+
+
+def test_a_long_task_is_reported_and_left_to_finish():
+    from recon.core.workers import Pool
+
+    said, got = [], {}
+    Pool(int, (0,), nap, most=1, log=said.append, long_s=1.0).run([7.5], lambda t, kind, v, m: got.__setitem__(t, kind))
+    assert got == {7.5: "ok"}                        # reported, never ended
+    long = [s for s in said if "has been on one task" in s]
+    assert 1 <= len(long) <= 3                       # at 1 s, then about 2 s and 4 s: each time twice as long as the last
+
+
 def test_the_pool_starts_with_one_worker_and_grows_only_while_memory_allows(monkeypatch):
     from recon.core import workers as wk
 
