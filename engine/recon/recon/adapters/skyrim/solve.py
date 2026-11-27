@@ -30,6 +30,7 @@ from recon.adapters.skyrim.image import PinnedImage, locate_image
 from recon.adapters.skyrim.inventory import extents, load_inventory, with_unwind_entries
 from recon.adapters.skyrim.manifest import frontier_key, inputs
 from recon.adapters.skyrim.pack import Pack
+from recon.adapters.skyrim.packfacts import SCN_MEM_EXECUTE
 from recon.adapters.skyrim.verify import PASS, Verifier
 from recon.adapters.x64_msvc import coff
 from recon.adapters.x64_msvc import declarations as D
@@ -85,7 +86,7 @@ class UnitWorkshop:
         if c.digest not in self.forms:
             try:
                 self.forms[c.digest] = member_form(c.body, c.types, self.ctx.pack.image.image_base, self.rva, self.declared,
-                                                   self.ctx.unnamed)
+                                                   self.ctx.unnamed, self.ctx.unnamed_data)
             except NotReconstructed as e:
                 self.forms[c.digest] = e.code
         return self.forms[c.digest]
@@ -108,9 +109,14 @@ class UnitWorkshop:
         return self.built[c.digest]
 
     def _callee(self, c: Candidate, symbol: str) -> int | None:
-        """The RVA of the placeholder callee the candidate's member form calls under `symbol`, or None."""
+        """The RVA of the placeholder (a callee or an object) the candidate's member form names `symbol`, or None."""
         f = self.form(c)
-        return None if isinstance(f, str) else dict(f.callees).get(coff.plain(symbol))
+        return None if isinstance(f, str) else (dict(f.callees) | dict(f.data)).get(coff.plain(symbol))
+
+    def _extent(self, c: Candidate, at: int) -> int | None:
+        """A placeholder callee's size, so that the comparator checks the call lands at its start; None for an object."""
+        f = self.form(c)
+        return None if isinstance(f, str) or at not in dict(f.callees).values() else self.ctx.pack.extent(at)
 
     def resolve(self, own: str, c: Candidate):
         """The function itself under its own name, a placeholder callee at the address its call was made to, else what the
@@ -142,7 +148,7 @@ class UnitWorkshop:
         symbols: dict[str, tuple[int, int | None]] = {}
         for r in fn.relocs:
             at = self._callee(c, r.symbol)
-            got = (self.rva, self.size) if r.symbol == fn.symbol else (at, self.ctx.pack.extent(at)) if at is not None else self.ctx.symbols.lookup(r.symbol)
+            got = (self.rva, self.size) if r.symbol == fn.symbol else (at, self._extent(c, at)) if at is not None else self.ctx.symbols.lookup(r.symbol)
             if got is not None:
                 symbols[r.symbol] = got
         report = self.ctx.verifier.verify(self.rva, self.size, fn.symbol, src.encode("utf-8"), obj, symbols)
@@ -237,7 +243,7 @@ class Context:
         self.pack, self.offered = pack_of(worktree, checkout, knowledge)
         image = self.pack.image
         self.symbols = recorded_symbols(worktree)
-        self._named = self.symbols.addresses()
+        self._named = self.symbols.addresses() | public_addresses(worktree, image.build_id)
         self.recipe_digest = hashlib.sha256(recipe_bytes).hexdigest()
         self.verifier = Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes)
         self.header_rel, self.header_text = header_rel, header_text
@@ -254,6 +260,18 @@ class Context:
         and no declaration names. Such a callee is called by its placeholder (`member.placeholder`)."""
         rva = at - self.pack.image.image_base
         return rva not in self._named and self.pack.declared(at) is None and self.pack.extent(rva) is not None
+
+    def unnamed_data(self, at: int) -> bool:
+        """Whether address `at` holds an object of the image the project has not named: in a section that is not code, not
+        an import slot (the loader writes those; the unit names them by their import), and named by no record and no entry
+        of the project's symbol map. Such an object is read and written by its placeholder (`member.data_placeholder`)."""
+        rva = at - self.pack.image.image_base
+        if rva in self._named or rva in self.pack.imports or self.pack.iat[0] <= rva < self.pack.iat[1]:
+            return False
+        try:
+            return not self.pack.image.pe.section_for(rva).flags & SCN_MEM_EXECUTE
+        except self.pack.image.up.pecoff.Reject:
+            return False
 
     def compile(self, header: str, source: str) -> tuple[coff.Object, bytes] | list[str]:
         """The object of `source` compiled with `header` as the unit's header, or the compiler's error codes."""
@@ -285,6 +303,15 @@ def recorded_symbols(worktree: Path) -> SymbolMap:
             rva = f["rva"]
             out.add(name, int(rva, 16) if isinstance(rva, str) else int(rva), f.get("size"), "recorded")
     return out
+
+
+def public_addresses(worktree: Path, build_id: str | None) -> frozenset[int]:
+    """The addresses the project's public symbol map names (`reports/<build id>/symbol-map.json`); none without one."""
+    path = worktree / "reports" / str(build_id) / "symbol-map.json"
+    if not build_id or not path.is_file():
+        return frozenset()
+    d = json.loads(path.read_text(encoding="utf-8"))
+    return frozenset(int(v["rva"], 16) if isinstance(v["rva"], str) else int(v["rva"]) for v in d.get("symbols", {}).values())
 
 
 def base_text(worktree: Path, rel: str) -> str | None:
@@ -419,6 +446,9 @@ def edits(outcomes: list[Outcome], header_rel: str, cpp_rel: str, text: str) -> 
         else:
             replace.append({"find": old.text, "with": f"{o.declaration};"})
     protos = list(dict.fromkeys(x for o in outcomes for x in o.prototypes.splitlines() if x.strip()))
+    declared = [m.group(1) for x in protos if (m := re.search(r"(\w+)\s*[(;]", x))]
+    if len(set(declared)) != len(declared):
+        return []              # two functions declare one placeholder differently: the unit would not compile
     out = [{"path": cpp_rel, **({"declarations": "\n".join(protos)} if protos else {}),
             "functions": [{"name": o.name, "code": o.definition} for o in outcomes]}]
     if replace or members:

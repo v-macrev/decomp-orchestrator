@@ -311,7 +311,7 @@ def test_two_workers_on_one_store_never_analyse_the_same_function_twice(tmp_path
 # ------------------------------------------------------------------------------------ memory
 
 def test_memory_holds_a_bounded_number_of_normal_forms_and_the_store_holds_them_all(monkeypatch):
-    monkeypatch.setattr(cd, "FN_CACHE", 16)
+    monkeypatch.setattr(__import__("recon.core.inference.whole", fromlist=["x"]), "FN_CACHE", 16)
     fns = chain(80)
     store = kn.MemoryStore()
     p = program(*fns, store=store)
@@ -527,10 +527,12 @@ def test_what_is_read_off_a_normal_form_is_filed_under_its_code_and_the_site_rea
     assert cd.call_sites is __import__("recon.core.inference.sites", fromlist=["x"]).call_sites   # the store's sites come from there
 
 
-def test_the_other_facts_are_filed_under_what_the_pack_imports_and_not_the_member_emitter():
+def test_the_other_facts_are_filed_under_the_analysis_and_not_under_what_writes_source():
     closure = kn.import_closure(kn.ANALYSIS_ROOTS)
-    assert {"core/synthesis/candidates.py", "core/inference/sites.py", "adapters/skyrim/pack.py"} <= closure
-    assert not any(x in closure for x in ("core/emitter/member.py", "adapters/skyrim/solve.py", "adapters/skyrim/campaign.py"))
+    assert {"core/inference/whole.py", "core/inference/sites.py", "adapters/skyrim/packfacts.py", "adapters/skyrim/normal.py"} <= closure
+    assert not any(x.startswith(("core/synthesis", "core/structuring", "core/emitter")) for x in closure)
+    assert not any(x in closure for x in ("adapters/skyrim/pack.py", "adapters/skyrim/solve.py", "adapters/x64_msvc/batch.py"))
+    assert cd.Program is __import__("recon.core.inference.whole", fromlist=["x"]).Program
     assert loaded_by(kn.ANALYSIS_ROOTS) <= closure | set(kn.NORMAL_FILES)
 
 

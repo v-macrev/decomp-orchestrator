@@ -75,7 +75,7 @@ class Emitter:
         self.prefix = prefix
         self.names = names
         self.callees: dict[int, str] = {}
-        self.globals: dict[int, tuple[str, ty.CType]] = {}
+        self.globals: dict[int, tuple[str, ty.CType | None]] = {}      # None: an object only its address is taken of
         self.locals: dict[int, str] = {}
         self.used: set[int] = set()
 

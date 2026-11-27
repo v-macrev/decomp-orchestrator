@@ -479,3 +479,40 @@ of the readings reads them again and keeps the normal forms. Every other fact is
 directly or not (`ANALYSIS_ROOTS`, an import closure checked against what Python actually loads), instead of all of `core`
 and `adapters/x64_msvc`: the member emitter, the solving and the orchestration import the pack, not the other way round, and a
 change to them no longer recomputes every signature. The run manifest still names the broader code (`ANALYSIS_CODE`).
+
+## D-056 · 2026-11-27 · Only a floating read of read-only memory is its value
+The builder wrote every read of read-only memory as the bits it holds. The pinned compiler never loads an integer constant from
+memory (it writes an immediate, a 64-bit one as a 10-byte move), but it does load every floating constant from read-only data.
+So an integer read there in the target is a read of an object, as the source wrote it, and folding it gives a candidate with an
+immediate where the target loads. Integer reads now stay reads of the object (`A.Global`); floating ones are still folded to
+their value. The rule follows from how the compiler materialises constants, not from any one function.
+
+## D-057 · 2026-11-27 · The whole-program analysis is filed under its own code only
+D-055 left the analysis filed under the pack's import closure, and the pack imported the search, the emitter and the compiler.
+The program (`core/inference/whole.py`) and the pack's facts (`adapters/skyrim/packfacts.py`) are now modules of their own that
+import no structuring, emitting, search or compiling, and `ANALYSIS_ROOTS` names the facts' module. `pack.Pack` extends
+`PackFacts` with compiling and verifying. A change to how source is written (as in D-056 and D-058) no longer recomputes a
+signature; a test checks the closure against what Python actually loads.
+
+## D-058 · 2026-11-27 · A member form reads, writes and takes the address of an object the project has not named by its placeholder
+The user's decision of 2026-11-27, extending D-054 from callees to objects. An object of the image is one at an address in a
+section that is not code, not an import slot, and that no record and no entry of the project's public symbol map
+(`reports/<build id>/symbol-map.json`) names; the map's addresses also count as named for D-054's callees now. Such an object
+read or written with a known type is `Data<rva>` declared `extern T Data<rva>;`, the project's typed placeholder (93 in its
+units). An object whose address is only taken (a 64-bit constant that points at it, which the candidate wrote as a number
+and the compiler as a 10-byte immediate) is `Data_<rva>` declared `extern "C" unsigned char Data_<rva>[];`, the project's form
+for an object of unknown type (340 in its units), and written `reinterpret_cast<T>(Data_<rva>)`, which the compiler loads by a
+relocated `lea`. Both names are lower-case hexadecimal like `Function<rva>`; one address with both forms in one function is
+refused (`LAYOUT_CONFLICT`), and a packet whose functions declare one placeholder differently gets no edits. The declarations
+go in the unit's `declarations` edit with the callee prototypes; the project binds them by position as it does callees, and
+the engine gives its comparator the address. An object the project names that the unit does not declare is still refused
+(`GLOBAL_NOT_DECLARED`).
+
+## D-059 · 2026-11-27 · A function no exception may leave is declared `noexcept`
+Of the 132 development functions left at `NO_MATCH` by the D-054 engine, 86 have a C++ frame handler, and every one of the 86
+is flagged by its exception data as a function no exception may leave; 84 have no unwind state at all. That is what the pinned
+compiler makes of a `noexcept` function that calls something that may throw: a frame handler, the runtime's slot set to -2 and
+a nop after the call, guarding nothing but termination. The member form is now declared and defined `noexcept` when the normal
+form says so (`Fn.noexcept`, read from the handler's data since D-028). The other difference of 80 of them was two address
+loads (`lea` of an object, D-058), which the earlier count had classed with reads. Rebuilding cleanup objects as stand-in
+classes, approved with D-058, waits: only 2 of the 132 have a cleanup state, and none of the 80 needs one.

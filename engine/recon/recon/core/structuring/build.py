@@ -465,7 +465,10 @@ class Builder:
     def lvalue(self, a: Arg, w: int, t: ty.CType, more: int = 0) -> A.Expr:
         x = self.t.address(a)
         if x.base is None:
-            c = self.constant(x.offset, w)
+            # A floating constant is the compiler's own (it places a literal in read-only memory and loads it), so it is
+            # written as the literal and the compiler places it again. An integer the compiler always writes into the
+            # instruction: a read of one from read-only memory is a read of an object the source names (D-056).
+            c = self.constant(x.offset, w) if isinstance(t, ty.Float) else None
             if c is not None:
                 return A.Num(c, t)
             return A.Global(x.offset, t)

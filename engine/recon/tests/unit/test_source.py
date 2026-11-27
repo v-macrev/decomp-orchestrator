@@ -591,3 +591,21 @@ def test_a_chain_of_callees_deeper_than_a_constant_has_signatures(depth):
     # how far it looks is the irNodes budget's to say: too little, and the search says so
     r = search.reconstruct(program(*chain(depth)), BASE + RVA, Oracle(), Budget.of({"irNodes": 3 * depth // 2}))
     assert r.reason == search.BUDGET_EXHAUSTED and r.exhausted == "irNodes"
+
+
+def _reads_rip(code, reg):
+    """`reg <- [rip -> BASE + 0x5000]; ret`"""
+    return Asm(RVA)(I.create_reg_mem(code, reg, T.ix.MemoryOperand(R.RIP, R.NONE, 1, BASE + 0x5000, 8)))(T.ret())
+
+
+def test_an_integer_read_of_read_only_memory_stays_a_read_and_a_float_one_is_its_value():
+    """D-056: the compiler writes an integer constant as an immediate and a float as a read of read-only data, so only a
+    float folds; an integer the program reads from such memory is a read of an object, as it was compiled."""
+    ro = lambda a, w: 7 if a == BASE + 0x5000 and w == 32 else None       # noqa: E731
+    i = canonical(program(_reads_rip(C.MOV_R32_RM32, R.EAX), constants=ro)).body
+    assert any(isinstance(x, A.Global) for s in i.stmts for x in A.walk(s))
+    assert not any(isinstance(x, A.Num) and x.value == 7 for s in i.stmts for x in A.walk(s))
+    one = lambda a, w: 0x3F80_0000 if a == BASE + 0x5000 and w == 32 else None   # noqa: E731
+    # the fixture's image has no bytes there, so the check cannot agree; the tree is what this is about
+    f = cd.Generator(program(_reads_rip(C.MOVSS_XMM_XMMM32, R.XMM0), constants=one), BASE + RVA).make(cd.Choice(), set()).body
+    assert f.stmts == (A.Return(A.Num(0x3F80_0000, ty.Float(32))),)

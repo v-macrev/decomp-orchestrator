@@ -7,10 +7,11 @@ as the declarations name them. The declarations are data handed in (offsets, nam
 project's own headers: nothing here knows a compiler or a project.
 
 What the declarations do not give is refused with a fixed code: a member read at an offset where no member of that type
-starts (or no element of an array of that type), a second class, a class by value, a global, and a callee the project
-names (by a record or a declaration) without the unit declaring it. A callee the project has not named yet is called by
-the project's placeholder for it, `Function<rva>` (an honest name for open work, its rule R7), declared by a prototype the
-unit carries after its includes; the project binds such a reference by the target's own field, as the comparator checks.
+starts (or no element of an array of that type), a second class, a class by value, and a callee or an object the
+project names (by a record, a declaration or its symbol map) without the unit declaring it. A callee the project has not
+named yet is called by the project's placeholder for it, `Function<rva>` (an honest name for open work, its rule R7),
+and an object it has not named is read and written as `Data<rva>` (D-058), each declared by a line the unit carries
+after its includes; the project binds such a reference by the target's own field, as the comparator checks.
 The tree is the candidate's own; only the names and the form of the function change, so its meaning is the one that was
 checked.
 """
@@ -19,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from recon.core.emitter.cpp import POSTFIX, Emitter, type_name
+from recon.core.emitter.cpp import POSTFIX, PRIMARY, Emitter, type_name
 from recon.core.inference import types as ty
 from recon.core.inference.signature import NotReconstructed
 from recon.core.structuring import ast as A
@@ -52,6 +53,8 @@ class MemberUnit:
     prototypes: str = ""
     #: (placeholder, RVA) of each callee it calls
     callees: tuple[tuple[str, int], ...] = ()
+    #: (placeholder, RVA) of each object of the image it reads or writes, declared `extern` among the prototypes
+    data: tuple[tuple[str, int], ...] = ()
 
 
 FORMS = ("this", "this_unused", "static")
@@ -68,13 +71,26 @@ def placeholder(rva: int) -> str:
     return f"Function{rva:x}"
 
 
+def data_placeholder(rva: int) -> str:
+    """The project's placeholder name of the object at `rva` that it has not named (its units declare `extern T Data<rva>;`)."""
+    return f"Data{rva:x}"
+
+
+def bytes_placeholder(rva: int) -> str:
+    """The project's placeholder name of an object at `rva` whose type it does not know, declared as bytes
+    (`extern "C" unsigned char Data_<rva>[];`): a body that only takes its address says nothing of its type."""
+    return f"Data_{rva:x}"
+
+
 class MemberEmitter(Emitter):
     def __init__(self, types: ty.Types, image_base: int, rva: int, d: Declared, cls: int | None, this: int | None,
-                 unnamed: Callable[[int], bool] = lambda at: False) -> None:
-        """`unnamed(address)`: whether the project has not named the function there, so that it is called by placeholder."""
+                 unnamed: Callable[[int], bool] = lambda at: False, unnamed_data: Callable[[int], bool] = lambda at: False) -> None:
+        """`unnamed(address)`: whether the project has not named the function there, so that it is called by placeholder;
+        `unnamed_data(address)`: the same of an object, so that it is read and written by placeholder."""
         super().__init__(types, image_base, rva, name=f"{d.cls}::{d.method}")
         self.d, self.k, self.this = d, cls, this
         self.unnamed = unnamed
+        self.unnamed_data = unnamed_data
 
     def type_name(self, t: ty.CType) -> str:
         if isinstance(t, ty.Ptr):
@@ -110,9 +126,26 @@ class MemberEmitter(Emitter):
                 return f"{base}->{m.name}[{(off - m.offset) // size}]"
         raise NotReconstructed("MEMBER_NOT_DECLARED")
 
+    def num(self, x: A.Num) -> tuple[str, int]:
+        t = x.type
+        if x.value and isinstance(t, (ty.Ptr, ty.Int)) and t.width == 64 and self.unnamed_data(x.value):
+            # the address of an object of the image: written as the address of its placeholder, which the compiler
+            # loads by a relocated address and not as a number (D-058)
+            if x.value in self.globals and self.globals[x.value][1] is not None:
+                raise NotReconstructed("LAYOUT_CONFLICT")
+            self.globals[x.value] = (bytes_placeholder(x.value - self.base), None)
+            return f"reinterpret_cast<{self.type_name(t)}>({self.globals[x.value][0]})", POSTFIX
+        return super().num(x)
+
     def _e(self, x: A.Expr) -> tuple[str, int]:
         if isinstance(x, A.Global):
-            raise NotReconstructed("GLOBAL_NOT_DECLARED")
+            if not self.unnamed_data(x.address):
+                raise NotReconstructed("GLOBAL_NOT_DECLARED")
+            if x.address in self.globals and self.globals[x.address][1] != x.type:
+                raise NotReconstructed("LAYOUT_CONFLICT")
+            self.type_name(x.type)                     # a class the unit does not declare is refused here
+            self.globals[x.address] = (data_placeholder(x.address - self.base), x.type)
+            return self.globals[x.address][0], PRIMARY
         if isinstance(x, A.Field):
             b = x.base.type
             if not (isinstance(b, ty.Ptr) and isinstance(b.to, ty.Named) and b.to.number == self.k):
@@ -135,20 +168,26 @@ class MemberEmitter(Emitter):
         params = body.params if form == "static" else body.params[1:]
         ps = ", ".join(f"{self.type_name(p.type)} {self.local(p)}" for p in params)
         rt = self.type_name(body.result)
-        definition = "\n".join([f"{rt} {self.d.cls}::{self.d.method}({ps})", "{", *lines, "}"]) + "\n"
+        # a function whose exception data says no exception may leave it is declared so: the compiler then puts the
+        # same guard around the calls that may throw (D-059)
+        nx = " noexcept" if self.t.fn.noexcept else ""
+        definition = "\n".join([f"{rt} {self.d.cls}::{self.d.method}({ps}){nx}", "{", *lines, "}"]) + "\n"
         protos = []
         for at, name in sorted(self.callees.items()):
             s = self.t.callees[at]
             args = [self.type_name(self.t.ctype(self.t.slot(at, k, q))) for k, q in enumerate(s.params)]
             r = "void" if s.result is None else self.type_name(self.t.ctype(self.t.slot(at, -1, s.result)))
             protos.append(f"{r} {name}({', '.join(f'{a} arg{k + 1}' for k, a in enumerate(args))});")
-        return MemberUnit(definition, f"{'static ' if form == 'static' else ''}{rt} {self.d.method}({ps})", form, len(lines),
-                          "".join(x + "\n" for x in protos), tuple((n, a - self.base) for a, n in sorted(self.callees.items())))
+        for at, (name, t) in sorted(self.globals.items()):
+            protos.append(f'extern "C" unsigned char {name}[];' if t is None else f"extern {self.type_name(t)} {name};")
+        return MemberUnit(definition, f"{'static ' if form == 'static' else ''}{rt} {self.d.method}({ps}){nx}", form, len(lines),
+                          "".join(x + "\n" for x in protos), tuple((n, a - self.base) for a, n in sorted(self.callees.items())),
+                          tuple((n, a - self.base) for a, (n, _t) in sorted(self.globals.items())))
 
 
 def member_form(body: A.Body, types: ty.Types, image_base: int, rva: int, d: Declared,
-                unnamed: Callable[[int], bool] = lambda at: False) -> MemberUnit:
-    """The body as `d.cls::d.method`, or NotReconstructed with the reason. `unnamed(address)`: as `MemberEmitter`'s."""
+                unnamed: Callable[[int], bool] = lambda at: False, unnamed_data: Callable[[int], bool] = lambda at: False) -> MemberUnit:
+    """The body as `d.cls::d.method`, or NotReconstructed with the reason. `unnamed`, `unnamed_data`: as `MemberEmitter`'s."""
     p0 = body.params[0] if body.params else None
     used = p0 is not None and any(isinstance(x, A.Local) and x.id == p0.id for s in body.stmts for x in A.walk(s))
     if not used:
@@ -157,7 +196,8 @@ def member_form(body: A.Body, types: ty.Types, image_base: int, rva: int, d: Dec
         form, cls, this = "this", p0.type.to.number, p0.id
     else:
         form, cls, this = "static", None, None
-    return MemberEmitter(types, image_base, rva, d, cls, this, unnamed).member_unit(body, rva, form)
+    return MemberEmitter(types, image_base, rva, d, cls, this, unnamed, unnamed_data).member_unit(body, rva, form)
 
 
-__all__ = ["FORMS", "Declared", "Member", "MemberEmitter", "MemberUnit", "member_form", "placeholder"]
+__all__ = ["FORMS", "Declared", "Member", "MemberEmitter", "MemberUnit", "bytes_placeholder", "data_placeholder", "member_form",
+           "placeholder"]

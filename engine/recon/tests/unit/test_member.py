@@ -172,6 +172,66 @@ def test_a_callee_the_project_has_not_named_is_called_by_its_placeholder_and_dec
     assert u.prototypes == f"void {name}(long long arg1, int arg2);\n"
 
 
+def _reads_global(t=ty.Int(32, True), address=0x5000):
+    """int Box::Value() { return <the object at `address`>; }, over the adder's types (it calls nothing)"""
+    from recon.core.structuring import ast as A
+    T, BASE, RVA, Asm, C, I, R, mem, adder, canonical, program, Declared, Member, member_form = _member_tests()
+    c = canonical(program(adder()))
+    body = A.Body((), t, (A.Return(A.Global(BASE + address, t)),))
+    return body, c.types, BASE, RVA, Declared("Box", "Value", ()), member_form
+
+
+def test_an_object_the_project_has_not_named_is_read_by_its_placeholder_and_declared_extern():
+    body, types, BASE, RVA, d, member_form = _reads_global()
+    u = member_form(body, types, BASE, RVA, d, unnamed_data=lambda at: at == BASE + 0x5000)
+    assert u.definition == "int Box::Value()\n{\n    return Data5000;\n}\n"
+    assert u.data == (("Data5000", 0x5000),) and u.callees == ()
+    assert u.prototypes == "extern int Data5000;\n"
+    f = member_form(*_reads_global(ty.Float(32))[:5], unnamed_data=lambda at: True)
+    assert f.prototypes == "extern float Data5000;\n"
+
+
+def test_the_address_of_an_object_the_project_has_not_named_is_its_byte_placeholder():
+    from recon.core.structuring import ast as A
+    _body, types, BASE, RVA, d, member_form = _reads_global()
+    I64 = ty.Int(64, True)
+    body = A.Body((), I64, (A.Return(A.Num(BASE + 0x5000, I64)),))
+    u = member_form(body, types, BASE, RVA, d, unnamed_data=lambda at: at == BASE + 0x5000)
+    assert u.definition == "long long Box::Value()\n{\n    return reinterpret_cast<long long>(Data_5000);\n}\n"
+    assert u.prototypes == 'extern "C" unsigned char Data_5000[];\n' and u.data == (("Data_5000", 0x5000),)
+    assert "5000" not in member_form(body, types, BASE, RVA, d).prototypes      # not an object of the image: a number
+    both = A.Body((), I64, (A.Return(A.Binary("+", A.Num(BASE + 0x5000, I64), A.Cast(A.Global(BASE + 0x5000, ty.Int(32, True)), I64), I64)),))
+    with pytest.raises(NotReconstructed, match="LAYOUT_CONFLICT"):          # one object, two declarations
+        member_form(both, types, BASE, RVA, d, unnamed_data=lambda at: True)
+
+
+def test_a_function_no_exception_may_leave_is_declared_noexcept():
+    from dataclasses import replace
+    body, types, BASE, RVA, d, member_form = _reads_global()
+    types.fn = replace(types.fn, noexcept=True)
+    u = member_form(body, types, BASE, RVA, d, unnamed_data=lambda at: True)
+    assert u.declaration == "int Value() noexcept"
+    assert u.definition.startswith("int Box::Value() noexcept\n{")
+
+
+def test_an_object_the_project_names_is_not_given_a_placeholder():
+    body, types, BASE, RVA, d, member_form = _reads_global()
+    with pytest.raises(NotReconstructed, match="GLOBAL_NOT_DECLARED"):
+        member_form(body, types, BASE, RVA, d)
+
+
+def test_a_unit_whose_functions_declare_one_placeholder_differently_gets_no_edits():
+    pytest.importorskip("iced_x86", reason="needs the private venv (engine/recon/scripts/setup-venv.sh)")
+    from recon.adapters.skyrim.solve import Outcome, edits
+    a = Outcome(0x10, "solved", "BYTE_MATCHED", definition="int Box::Get()\n{\n    return Data50;\n}\n",
+                declaration="int Get()", name="Box::Get", prototypes="extern int Data50;\n")
+    b = Outcome(0x30, "solved", "BYTE_MATCHED", definition="float Box::Set()\n{\n    return Data50;\n}\n",
+                declaration="float Set()", name="Box::Set", prototypes="extern float Data50;\n")
+    text = "class Box\n{\npublic:\n};\n"
+    assert edits([a, b], "unit/Box.h", "unit/Box.cpp", text) == []
+    assert edits([a, a], "unit/Box.h", "unit/Box.cpp", text)[0]["declarations"] == "extern int Data50;"
+
+
 def test_a_callee_the_project_names_is_not_given_a_placeholder():
     c, BASE, RVA, OTHER, Declared, Member, member_form = _calls_stores()
     with pytest.raises(NotReconstructed, match="CALLEE_NOT_DECLARED"):
@@ -208,6 +268,33 @@ def test_the_compiler_gives_members_offsets_and_types(toolchain, tmp_path):
     assert "other" not in got and "hidden" not in got        # a pointer to a class; a member this unit cannot name
     assert {"other", "hidden"} <= set(facts.names)
     assert not any(p.name.startswith(".recon-probe") for p in (root / "unit").iterdir())
+
+
+def test_the_compiler_guards_a_noexcept_member_s_calls_and_loads_a_placeholder_s_address(toolchain, tmp_path):
+    """What D-058 and D-059 rest on, with the pinned compiler: the address of a byte placeholder is loaded through a
+    relocation (not as a number), and `noexcept` gives a function that calls what may throw a frame handler and the
+    runtime's slot set to -2."""
+    from recon.adapters.x64_msvc import coff
+    root = tmp_path / "root"
+    (root / "unit").mkdir(parents=True)
+    got = {}
+    for nx in ("", " noexcept"):
+        (root / "unit" / "Box.cpp").write_text("\n".join([
+            'extern "C" unsigned char Data_5000[];', "void Function6000(long long arg1);",
+            f"struct Box {{ void Put(){nx}; }};", f"void Box::Put(){nx}", "{",
+            "    Function6000(reinterpret_cast<long long>(Data_5000));", "}", ""]), encoding="utf-8")
+        obj = tmp_path / f"box{len(nx)}.obj"
+        code, out = toolchain.tool.run("cl", [*(f for f in toolchain.flags if f != "/c"), "/c", f"/Fo{obj}", "unit/Box.cpp"], root)
+        assert code == 0, out
+        o = coff.Object(obj.read_bytes())
+        (fn,) = [f for f in o.functions().values() if coff.plain(f.symbol) == "Put"]
+        got[nx] = (fn, o)
+    plain, guarded = got[""][0], got[" noexcept"][0]
+    for fn in (plain, guarded):
+        assert any(r.symbol == "Data_5000" and r.kind in coff.REL32 for r in fn.relocs)
+    help_slot = b"\x48\xc7\x44\x24"                     # mov qword [rsp+disp8], imm32
+    assert any(guarded.code[k:k + 4] == help_slot and guarded.code[k + 5:k + 9] == b"\xfe\xff\xff\xff" for k in range(len(guarded.code)))
+    assert b"\xfe\xff\xff\xff" not in plain.code and len(guarded.code) > len(plain.code)
 
 
 def test_the_packet_carries_each_placeholder_prototype_once_after_the_unit_s_includes():

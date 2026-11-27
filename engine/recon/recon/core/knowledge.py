@@ -68,10 +68,10 @@ NORMAL_FILES = ("adapters/x64_msvc/lift_coverage.json", "__init__.py")
 #: the module that reads what a normal form shows of its calls (the functions it calls, its call sites): with the normal
 #: form's code, what those facts are filed under, so that a change of it reads them again and keeps the normal forms
 SITE_ROOTS = ("recon.core.inference.sites",)
-#: the module every other fact is derived through (a pack's program, its callbacks and the analysis they import); the
-#: emitters of member forms, the solving and the orchestration import it, not the other way round, so a change to them
-#: leaves the facts where they are
-ANALYSIS_ROOTS = ("recon.adapters.skyrim.pack",)
+#: the module every other fact is derived through (a pack's image facts, its program and the analysis they import); the
+#: search, the structuring, the emitters, the compiler, the solving and the orchestration import it, not the other way
+#: round, so a change to them writes other source and leaves the facts where they are
+ANALYSIS_ROOTS = ("recon.adapters.skyrim.packfacts",)
 
 _ROOT = Path(__file__).resolve().parents[1]
 
@@ -137,7 +137,7 @@ def site_code_digest() -> str:
 
 
 def analysis_code_digest() -> str:
-    """A digest of the code every other fact is derived with: what the pack's module imports, directly or not."""
+    """A digest of the code every other fact is derived with: what the pack's facts import, directly or not."""
     return code_digest(files=import_closure(ANALYSIS_ROOTS) | set(NORMAL_FILES))
 
 
