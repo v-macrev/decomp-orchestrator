@@ -628,3 +628,13 @@ environment is told by the convention alone: entry values of locations that are 
 stack location. Source lowering is unchanged and still refuses all of them. Measured: unknown signatures 89,842 ->
 84,690 (`LOCAL_IN_MEMORY` 3,363 and `VECTOR_VALUE` 784 -> 0; now refused as `STACK_ARGUMENTS` 1,217, `VARIADIC` 1,587);
 development functions at `CALLEE_SIGNATURE_UNKNOWN` 664 -> 625 (held-out 24 -> 18); byte-matched 100 + 10, one won, none lost.
+
+## D-071 · 2026-11-27 · A home slot whose address leaves is a variable argument list only when va_start could walk it
+Under the D-070 engine's 625 development functions at `CALLEE_SIGNATURE_UNKNOWN`, `VARIADIC` was the root under 438 and the
+only one under 49 (216 roots). Nearly every one hands the address of a home slot to a call: the compiler also keeps a local
+whose address is taken in the home slot of a parameter the function does not have, or no longer needs. `va_start` needs every
+position from the first unnamed one on to have its entry value spilled to its own home slot, so that the list runs on into
+the stack arguments. A home slot whose address leaves is now refused as `VARIADIC` only when that holds from its position on
+(or the address is not one fixed slot); any other is a local, which changes no parameter. Measured: `VARIADIC` 1,587 ->
+26; unknown signatures 84,690 -> 81,145; development functions at `CALLEE_SIGNATURE_UNKNOWN` 625 -> 574 (held-out 18 -> 16);
+`MISMATCH` 60 -> 55; byte-matched the same 100 + 10.

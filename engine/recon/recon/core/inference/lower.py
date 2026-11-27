@@ -327,11 +327,31 @@ def _environment(fn: Fn, conv: Convention, abi) -> set[int]:
     return {v for n, v in fn.params if n not in other}
 
 
-def _frame_for_signature(fn: Fn, abi) -> None:
-    """What a frame left in memory may still say about the parameters (D-070): a read at or above the first stack argument
-    is an argument there (STACK_ARGUMENTS), and the address of the home space leaving the function's own reads and writes is
-    how a variable argument list is walked (VARIADIC). Locals in memory, and home space read and written at fixed places,
-    change no parameter."""
+def _spilled(fn: Fn, conv: Convention, abi, d: dict, params: dict) -> set[int]:
+    """The positions whose entry value the function stores to the position's own home slot."""
+    out: set[int] = set()
+    names = {n: v for n, v in fn.params}
+    for _b, o in fn.ops():
+        if o.kind != "store" or len(o.args) < 2:
+            continue
+        at = mem.resolve(o.args[0], d.get, params)
+        if at is None or at[0] != "frame" or (at[1] - abi.word) % abi.word:
+            continue
+        k = (at[1] - abi.word) // abi.word
+        v = o.args[1]
+        while isinstance(v, int) and isinstance(d.get(v), Op) and d[v].kind in ("zext", "sext", "trunc"):
+            v = d[v].args[0]
+        if 0 <= k < len(conv.slots) and v == names.get(f"a{k}"):
+            out.add(k)
+    return out
+
+
+def _frame_for_signature(fn: Fn, conv: Convention, abi) -> None:
+    """What a frame left in memory may still say about the parameters (D-070, D-071): a read at or above the first stack
+    argument is an argument there (STACK_ARGUMENTS). The address of a home slot leaving the function's own reads and writes
+    is how a variable argument list is walked (VARIADIC) when every position from that slot on has its entry value spilled to
+    its own home slot, as `va_start` needs; any other home slot whose address leaves is a local the compiler placed there.
+    Locals in memory change no parameter."""
     first = abi.word + abi.home
     d = {v: o for v, (_b, o) in fn.defining().items()}
     params = {v: n for n, v in fn.params}
@@ -347,6 +367,7 @@ def _frame_for_signature(fn: Fn, abi) -> None:
             at = mem.resolve(o.args[0], d.get, params)
             if at is not None and at[0] == "frame" and at[1] >= first:
                 raise NotReconstructed("STACK_ARGUMENTS")
+    spilled: set[int] | None = None
     work = list(home)
     while work:      # values computed from a home-space address by a fixed offset are home-space addresses too
         v = work.pop()
@@ -362,7 +383,14 @@ def _frame_for_signature(fn: Fn, abi) -> None:
                         home.add(x.defs[0])
                         work.append(x.defs[0])
                     continue
-                raise NotReconstructed("VARIADIC")
+                at = mem.resolve(v, d.get, params)
+                if at is None or at[0] != "frame":
+                    raise NotReconstructed("VARIADIC")
+                if spilled is None:
+                    spilled = _spilled(fn, conv, abi, d, params)
+                k = max(0, -(-(at[1] - abi.word) // abi.word))
+                if all(j in spilled for j in range(k, len(conv.slots))):
+                    raise NotReconstructed("VARIADIC")
 
 
 def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None,
@@ -386,7 +414,7 @@ def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None,
     if any(o.kind == "undef" and not (o.defs[0] in env) for _b, o in fn.ops()):
         raise NotReconstructed("READS_A_LOCATION_NOBODY_SET")
     if signature_only:
-        _frame_for_signature(fn, abi)
+        _frame_for_signature(fn, conv, abi)
         return fn, slots
     if any(o.kind == FRAME for _b, o in fn.ops()):
         raise NotReconstructed("LOCAL_IN_MEMORY")

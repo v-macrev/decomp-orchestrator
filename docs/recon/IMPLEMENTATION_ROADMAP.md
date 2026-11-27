@@ -388,6 +388,9 @@ D-069:            campaign 27 min with 3 workers: CALLEE_SIGNATURE_UNKNOWN 702 -
 D-070:            signature prewarm 23 min, campaign 26 min, 3 workers: unknown signatures 89,842 -> 84,690; development
                   CALLEE_SIGNATURE_UNKNOWN 664 -> 625 (held-out 24 -> 18), BYTE_MATCHED 99 -> 100 (held-out 10), none lost,
                   MISMATCH 63 -> 60. The freed functions stop next at LOCAL_IN_MEMORY 43 -> 69 and CONSTRUCT_UNSUPPORTED 74 -> 80
+D-071:            signature prewarm 24 min, campaign 3 workers: VARIADIC 1,587 -> 26, unknown signatures 84,690 -> 81,145;
+                  development CALLEE_SIGNATURE_UNKNOWN 625 -> 574 (held-out 18 -> 16), MISMATCH 60 -> 55, BYTE_MATCHED the same
+                  100 + 10. Next at INDIRECT_CALL 361 -> 383, LOCAL_IN_MEMORY 69 -> 83, CONSTRUCT_UNSUPPORTED 80 -> 88
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 

@@ -683,3 +683,13 @@ def test_a_value_wider_than_a_register_inside_the_body_does_not_hide_the_paramet
     f = Asm(0x3000)(I.create_reg_mem(C.MOVUPS_XMM_XMMM128, R.XMM0, mem(R.RDX)))(I.create_mem_reg(C.MOVUPS_XMMM128_XMM, mem(R.RCX), R.XMM0))(T.ret())
     s = program(f).signature(BASE + 0x3000)
     assert s is not None and [x.kind for x in s.params] == [INT, INT] and s.result is None
+
+
+def test_a_local_the_compiler_placed_in_the_home_space_is_a_local_and_not_a_variable_argument_list():
+    """D-071: f(): t(&x); return x, with x in the home slot of a parameter f does not have. Its address leaves the function,
+    but no position's entry value is spilled there, which `va_start` needs."""
+    f = Asm(0x3000)(T.sub_rsp(40))(T.lea(R.RCX, mem(R.RSP, 0x38)))
+    f.branch(C.CALL_REL32_64, 0x6000)
+    f(I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem(R.RSP, 0x38)))(T.add_rsp(40))(T.ret())
+    s = program(f, _taker()).signature(BASE + 0x3000)
+    assert s is not None and s.params == () and s.result is not None
