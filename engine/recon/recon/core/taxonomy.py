@@ -53,6 +53,7 @@ _add("Source", "ARRAY_FORM", "ADDRESS_FORM", "ADDRESS_VALUE", "ADDRESS_CONSTANT"
 _add("Search", "NOT_EQUIVALENT", "SEMANTIC_DISAGREEMENT", name="SEMANTIC_DISAGREEMENT")
 _add("Search", "DOES_NOT_COMPILE", "EXACT_UNIT_DOES_NOT_COMPILE", name="DOES_NOT_COMPILE")
 _add("Search", "NO_MATCH", "MISMATCH", name="MISMATCH")
+_add("Search", "IMPLAUSIBLE_DEAD_CODE", "IMPLAUSIBLE_CAST", "IMPLAUSIBLE_CONSTRUCT", name="IMPLAUSIBLE")   # spec 15.4, before compiling
 for _code, _name in _kinds.CODES.items():           # MISMATCH(kind): the kinds are P9's list (contract C2)
     _add("Search", _code, name=_name)
 _add("Search", "NO_CANDIDATE", "GRAMMAR_EXHAUSTED", name="GRAMMAR_EXHAUSTED")
