@@ -451,4 +451,12 @@ def classify(f: coff.Function, target: bytes, rva: int, resolve: Callable[[coff.
     return compare(decode(f.code, refs, None), decode(target, {}, rva))
 
 
-__all__ = ["Ins", "Mismatch", "classify", "compare", "decode"]
+def mismatch_kind(f: coff.Function, target: bytes, rva: int, resolve: Callable[[coff.Reloc], int | None]) -> str:
+    """`classify(...).kind`, or "" when the streams cannot be read (the search then expands every rule family)."""
+    try:
+        return classify(f, target, rva, resolve).kind
+    except Exception:  # noqa: BLE001 - a classifier defect must not lose the candidate; it is only a hint for the search
+        return ""
+
+
+__all__ = ["Ins", "Mismatch", "classify", "compare", "decode", "mismatch_kind"]

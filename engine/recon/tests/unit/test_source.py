@@ -542,21 +542,35 @@ def test_a_frontier_of_another_function_is_refused():
 
 # ------------------------------------------------------------------------------------ unknown references (D1)
 
+def searched(shop) -> list:
+    """The changes of each candidate the search judges, in its order, when nothing passes."""
+    search.reconstruct(program(branchy(), stores()), BASE + RVA, shop)
+    return shop.asked_changes
+
+
+class Recording(Oracle):
+    def judge(self, candidates):
+        self.asked_changes = getattr(self, "asked_changes", []) + [c.choice.changes() for c in candidates]
+        return super().judge(candidates)
+
+
 def test_candidates_whose_only_open_points_are_unnamed_references_go_to_the_verifier_in_order():
-    shop = Oracle(match=made()[-1], unknown=1)
+    shop = Oracle(match=searched(Recording(unknown=1))[-1], unknown=1)
     r = search.reconstruct(program(branchy(), stores()), BASE + RVA, shop)
     assert r.state == search.BYTE_MATCHED and r.counters["unknown_references"] >= 1
     assert shop.verified and len(shop.verified) == r.counters["verified"]
 
 
 def test_every_candidate_with_no_known_difference_is_verified_until_one_passes():
-    class Every(Oracle):
+    class Every(Recording):
         def judge(self, candidates):
+            self.asked_changes = getattr(self, "asked_changes", []) + [c.choice.changes() for c in candidates]
             self.asked += [c.digest for c in candidates]
             return [search.Judged("k" + c.digest, 0, (), len(c.choice.changes()) % 2) for c in candidates]
-    shop = Every(match=made()[-1])
+    order = searched(Every())
+    shop = Every(match=order[-1])
     r = search.reconstruct(program(branchy(), stores()), BASE + RVA, shop)
-    assert r.state == search.BYTE_MATCHED and len(shop.verified) == r.counters["verified"] == len(made())
+    assert r.state == search.BYTE_MATCHED and len(shop.verified) == r.counters["verified"] == len(order)
     # those without unnamed references first, then by the number of changes, the same every time
     again = Every(match=shop.match)
     search.reconstruct(program(branchy(), stores()), BASE + RVA, again)

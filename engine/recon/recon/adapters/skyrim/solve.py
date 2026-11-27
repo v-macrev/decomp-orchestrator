@@ -38,6 +38,7 @@ from recon.adapters.x64_msvc import unwind as uw
 from recon.adapters.x64_msvc.headers import import_signatures
 from recon.adapters.x64_msvc.imports import iat_range, import_slots
 from recon.adapters.x64_msvc.batch import distance
+from recon.adapters.x64_msvc.mismatch import mismatch_kind
 from recon.adapters.x64_msvc.cl import CompilerFailed, Toolchain, ToolchainUnavailable, diagnostics, discover
 from recon.adapters.x64_msvc.symbols import SymbolMap
 from recon.adapters.x64_msvc.validate import load_validated
@@ -47,6 +48,7 @@ from recon.core.emitter.member import Declared, MemberUnit, member_form
 from recon.core.inference.signature import NotReconstructed
 from recon.core.synthesis import search
 from recon.core.synthesis.candidates import Candidate
+from recon.core.synthesis.rules import RULES_VERSION
 
 DEFAULT_RECIPE = "reconstruction/recipes/msvc-19.16.27054-o2.json"
 CODE_ORIGIN = ("produced by a deterministic reconstruction tool from the compared function's behaviour in the pinned image "
@@ -136,8 +138,9 @@ class UnitWorkshop:
                 out.append(search.Judged(None, 0, (b,) if isinstance(b, str) else ("DOES_NOT_COMPILE",)))
                 continue
             fn, _obj, _src = b
-            d = distance(fn, self.target, self.rva, self.resolve(fn.symbol, c))
-            out.append(search.Judged(fn.key(coff.plain), d.total, (), d.unknown))
+            resolve = self.resolve(fn.symbol, c)
+            d = distance(fn, self.target, self.rva, resolve)
+            out.append(search.Judged(fn.key(coff.plain), d.total, (), d.unknown, mismatch_kind(fn, self.target, self.rva, resolve) if d.total else ""))
         return out
 
     def verify(self, c: Candidate) -> tuple[bool, str]:
@@ -427,7 +430,8 @@ def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[l
             progress("function", {"done": len(out) + 1, "of": len(fns), "compiles": shop.compiles})
             refused = sorted({x for x in shop.forms.values() if isinstance(x, str)})
             if r.state == search.BYTE_MATCHED and shop.chosen is not None:
-                trail = ["candidates@1", f"member-form-{shop.chosen.form.replace('_', '-')}@1", "comparator@1"]
+                trail = ["candidates@1", *(f"{step}@{RULES_VERSION}" for step in r.trail), f"member-form-{shop.chosen.form.replace('_', '-')}@1",
+                         "comparator@1"]
                 out.append(Outcome(rva, "solved", "BYTE_MATCHED", counters, trail, shop.chosen.definition, shop.chosen.declaration, f"{cls}::{method}",
                                    shop.chosen.prototypes))
             elif r.state == search.NONE:
