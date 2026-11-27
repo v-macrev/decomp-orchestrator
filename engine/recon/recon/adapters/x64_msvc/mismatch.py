@@ -145,6 +145,9 @@ def _cc_name(ix, v: int) -> str:
 
 _NEG = {"O": "NO", "B": "AE", "E": "NE", "BE": "A", "S": "NS", "P": "NP", "L": "GE", "LE": "G"}
 NEGATE = {**_NEG, **{v: k for k, v in _NEG.items()}}
+#: the condition that holds when the operands of the comparison are exchanged
+_SWAP = {"L": "G", "LE": "GE", "B": "A", "BE": "AE"}
+SWAP = {**_SWAP, **{v: k for k, v in _SWAP.items()}}
 SIGN_CC = {frozenset(p) for p in _SIGNED_CC}
 
 
@@ -277,8 +280,25 @@ def _is_save(x: Ins) -> bool:
     return False
 
 
-def _one(x: Ins) -> str:
-    """The kind an instruction one stream has and the other lacks speaks of."""
+def _widens(xs: list[Ins], k: int) -> bool:
+    """Whether xs[k] zeroes a register whose low byte a set-on-condition then writes: a truth value made a full integer."""
+    x = xs[k]
+    if not _is_zeroing(x):
+        return False
+    ix, names = _regs()
+    mine = _full(ix, names, x.ops[0][1])
+    for y in xs[k + 1:k + 4]:
+        if y.mnemonic.startswith("set") and y.ops and y.ops[0][0] == "r":
+            f = _full(ix, names, y.ops[0][1])
+            if f is not None and mine is not None and f[0] == mine[0]:
+                return True
+    return False
+
+
+def _one(x: Ins, xs: list[Ins] | None = None, k: int = -1) -> str:
+    """The kind an instruction one stream has and the other lacks speaks of (`xs`, `k`: its stream and place there)."""
+    if xs is not None and _widens(xs, k):
+        return K.EXTENSION
     if x.mnemonic in PADDING:
         return K.SIZE_ONLY
     if x.flow in ("jmp", "jcc", "ret") and not x.external:
@@ -299,10 +319,12 @@ def _one(x: Ins) -> str:
 def _pair(x: Ins, y: Ins) -> str:
     """The kind of the difference between two instructions in the same place."""
     if x.flow == "jcc" and y.flow == "jcc" or x.cc and y.cc and x.mnemonic[:3] == y.mnemonic[:3]:
-        if NEGATE.get(x.cc) == y.cc:
+        if NEGATE.get(x.cc) == y.cc or SWAP.get(x.cc) == y.cc or NEGATE.get(SWAP.get(x.cc, "")) == y.cc:
             return K.POLARITY
         if _sign_cc(x.cc, y.cc):
             return K.EXTENSION
+    if x.mnemonic == y.mnemonic in ("cmp", "test") and len(x.ops) == 2 and x.ops == y.ops[::-1]:
+        return K.POLARITY                                   # a comparison written from the other side
     if x.external or y.external or x.flow in ("call", "jmp") or y.flow in ("call", "jmp"):
         if x.token == y.token or x.flow != y.flow or x.external != y.external or x.ref != y.ref:
             return K.CALL
@@ -341,8 +363,10 @@ def _pair(x: Ins, y: Ins) -> str:
     return K.SELECTION
 
 
-def _stretch(a: list[Ins], b: list[Ins], counts: dict[str, int]) -> None:
-    """Give each instruction of a differing stretch a kind: pairs in the same place by `_pair`, the rest by `_one`."""
+def _stretch(sa: list[Ins], i0: int, i9: int, sb: list[Ins], j0: int, j9: int, counts: dict[str, int]) -> None:
+    """Give each instruction of a differing stretch (sa[i0:i9] against sb[j0:j9]) a kind: pairs in the same place by
+    `_pair`, the rest by `_one`."""
+    a, b = sa[i0:i9], sb[j0:j9]
     if len(a) == len(b):
         for x, y in zip(a, b):
             k = _pair(x, y)
@@ -356,9 +380,10 @@ def _stretch(a: list[Ins], b: list[Ins], counts: dict[str, int]) -> None:
                     k = _pair(x, y)
                     counts[k] = counts.get(k, 0) + 1
             continue
-        for x in (*a[i1:i2], *b[j1:j2]):
-            k = _one(x)
-            counts[k] = counts.get(k, 0) + 1
+        for xs, at, n in ((sa, i0 + i1, i2 - i1), (sb, j0 + j1, j2 - j1)):
+            for p in range(at, at + n):
+                k = _one(xs[p], xs, p)
+                counts[k] = counts.get(k, 0) + 1
 
 
 def _refs_and_branches(a: list[Ins], b: list[Ins], pairs, counts: dict[str, int]) -> None:
@@ -413,7 +438,7 @@ def compare(a: list[Ins], b: list[Ins]) -> Mismatch:
         if tag == "equal":
             pairs += list(zip(range(i1, i2), range(j1, j2)))
         else:
-            _stretch(a[i1:i2], b[j1:j2], counts)
+            _stretch(a, i1, i2, b, j1, j2, counts)
     _refs_and_branches(a, b, pairs, counts)
     return _primary(counts, False)
 
