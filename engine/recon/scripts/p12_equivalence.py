@@ -99,18 +99,36 @@ def _patch() -> None:
     V.Verifier.verify, S.solve = verify, solve
     V.Verifier._p12 = True
 
+    from recon.adapters.x64_msvc import cl
+
+    real_run = cl.Toolchain.run
+
+    def run(self, name, args, cwd, *rest, **kw):
+        """Every failed compile's output, kept in the private data directory: a failure of the machine (memory, wine)
+        and one of the header look alike in a record."""
+        code, out = real_run(self, name, args, cwd, *rest, **kw)
+        if code != 0 and _CAPTURE.get("data"):
+            with open(Path(_CAPTURE["data"]) / "cl-failures.log", "a", encoding="utf-8") as f:
+                f.write(f"== {time.strftime('%H:%M:%S')} pid {os.getpid()} code {code} {list(args)[-1]}\n{out[:4000]}\n")
+        return code, out
+
+    cl.Toolchain.run = run
+
 
 def _init(*args):
     from recon.adapters.skyrim import campaign as cp
 
     _patch()
+    _CAPTURE["data"] = args[2]
     return cp._init(*args)
 
 
 def _work(st, task):
     from recon.adapters.skyrim import campaign as cp
 
+    data = _CAPTURE.get("data")
     _CAPTURE.clear()
+    _CAPTURE["data"] = data
     t0 = time.monotonic()
     d = cp._work(st, task)
     d["source"] = _CAPTURE.get("source", "")
