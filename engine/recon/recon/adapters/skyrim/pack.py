@@ -14,6 +14,7 @@ from recon.adapters.skyrim.verify import PASS, Verifier
 from recon.adapters.x64_msvc import coff
 from recon.adapters.x64_msvc.batch import Compiler, distance
 from recon.adapters.x64_msvc.cl import Toolchain
+from recon.adapters.x64_msvc.mismatch import mismatch_kind
 from recon.adapters.x64_msvc.symbols import scoped
 from recon.core import budget as bg
 from recon.core.synthesis import search
@@ -77,8 +78,10 @@ class Workshop:
             if x.function is None:
                 out.append(search.Judged(None, 0, x.errors))
                 continue
-            d = distance(x.function, self.target, self.rva, self._resolver(c))
-            out.append(search.Judged(x.function.key(coff.plain), d.total, (), d.unknown))
+            resolve = self._resolver(c)
+            d = distance(x.function, self.target, self.rva, resolve)
+            kind = mismatch_kind(x.function, self.target, self.rva, resolve) if d.total else ""
+            out.append(search.Judged(x.function.key(coff.plain), d.total, (), d.unknown, kind))
         return out
 
     def verify(self, c: Candidate) -> tuple[bool, str]:
