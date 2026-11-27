@@ -353,6 +353,12 @@ D-052 + D-053:    c08ac11, prewarm 56 min (normal forms all reused: 7 s), unknow
                   BYTE_MATCHED 2. What moved stops next at CALLEE_NOT_DECLARED (261, was 186): a candidate is written as a member
                   of its class in the unit, and the member form refuses every call; and at STACK_ARGUMENT (23 new: imports with
                   more than four parameters)
+D-054 + D-055:    e1e2ad1, prewarm 85 min (normal forms reused; sites and signatures read again, no error, no death), campaign
+                  about 50 min: development BYTE_MATCHED 16 (399 bytes; was 2, 20 bytes), held-out BYTE_MATCHED 1 (9 bytes; was 0),
+                  every one passed by upstream's comparator; reach candidates 789 (674) and 45 (40); CALLEE_NOT_DECLARED 113 (261),
+                  READS_A_LOCATION_NOBODY_SET 100 (356): with the sites read by the D-053 code, most of those now show their real
+                  first blocker, CALLEE_SIGNATURE_UNKNOWN 706 (577); MISMATCH 124 (15): candidates that compile and are compared,
+                  the search's frontier now. Largest worker 2,071 MiB; the least free commit 1.66 GB against the guard's 1.5
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 
@@ -364,8 +370,9 @@ By family: Knowledge 1,585, ABI 413, Source 73, Machine 28, Search 24, Unit 16.
 **No function was judged on its budget.** The 16 functions suspended at level 0 were resumed at four times the budgets and
 each ended in a state of its own; none was left resumable, and none was counted as unreconstructable because a budget ran out.
 
-**Still open in Phase 7:** the constant scan and the ceiling estimate; calls in member forms (the gate of every function
-with a call that reaches a candidate), arguments on the stack, thread-local storage.
+**Still open in Phase 7:** the constant scan and the ceiling estimate; the 124 compared mismatches; callees the project names
+but the unit does not declare; arguments on the stack; thread-local storage; the memory a worker takes on the largest
+functions.
 
 ## Items found by the audit that block or shape later phases
 
