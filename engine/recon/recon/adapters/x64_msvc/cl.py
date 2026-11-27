@@ -71,9 +71,16 @@ class Toolchain:
                 break
         return out
 
-    def run(self, name: str, args: list[str], cwd: Path, timeout: float = 120.0) -> tuple[int, str]:
-        """Exit code and output. The compiler sees the working directory and nothing of this machine's own settings."""
-        exe = str(self.binary(name) if self.wrappers is None else self.wrappers / name)
+    def run(self, name: str, args: list[str], cwd: Path, timeout: float = 120.0, fresh: bool = False) -> tuple[int, str]:
+        """Exit code and output. The compiler sees the working directory and nothing of this machine's own settings. With
+        a compile cache (`ccache`, `RECON_COMPILE_CACHE`) a compile whose every input is keyed is answered from it, unless
+        `fresh`; the object is left where the command line says either way."""
+        from recon.adapters.x64_msvc import ccache
+
+        env = self._env()
+        return ccache.run(self, name, list(args), Path(cwd), env, lambda: self._run(name, args, cwd, timeout, env), fresh)
+
+    def _env(self) -> dict[str, str]:
         keep = ("SYSTEMROOT", "SystemRoot", "TEMP", "TMP", "PATH", "HOME", "WINEPREFIX", "USER")
         env = {k: os.environ[k] for k in keep if k in os.environ}
         if sys.platform == "win32":
@@ -82,6 +89,10 @@ class Toolchain:
         if self.wrappers is None:
             # The wrappers set the toolset's and the SDK's headers themselves; the binaries run directly need them said.
             env["INCLUDE"] = os.pathsep.join(str(p) for p in self.include_dirs())
+        return env
+
+    def _run(self, name: str, args: list[str], cwd: Path, timeout: float, env: dict[str, str]) -> tuple[int, str]:
+        exe = str(self.binary(name) if self.wrappers is None else self.wrappers / name)
         try:
             p = subprocess.run([exe, *args], cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=timeout)
         except subprocess.TimeoutExpired:
