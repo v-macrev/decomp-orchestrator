@@ -13,6 +13,8 @@ matching needs something outside the engine's authority: the user decides), `INF
 """
 from __future__ import annotations
 
+from recon.core.synthesis import kinds as _kinds
+
 ORDER = ("Machine", "ABI", "Knowledge", "Source", "Search", "Unit", "Policy", "Infra")
 BYTE_MATCHED, RESUMABLE, NEEDS_DECISION, INFRA, OPEN = "BYTE_MATCHED", "RESUMABLE", "NEEDS_DECISION", "INFRA", "OPEN"
 
@@ -51,6 +53,8 @@ _add("Source", "ARRAY_FORM", "ADDRESS_FORM", "ADDRESS_VALUE", "ADDRESS_CONSTANT"
 _add("Search", "NOT_EQUIVALENT", "SEMANTIC_DISAGREEMENT", name="SEMANTIC_DISAGREEMENT")
 _add("Search", "DOES_NOT_COMPILE", "EXACT_UNIT_DOES_NOT_COMPILE", name="DOES_NOT_COMPILE")
 _add("Search", "NO_MATCH", "MISMATCH", name="MISMATCH")
+for _code, _name in _kinds.CODES.items():           # MISMATCH(kind): the kinds are P9's list (contract C2)
+    _add("Search", _code, name=_name)
 _add("Search", "NO_CANDIDATE", "GRAMMAR_EXHAUSTED", name="GRAMMAR_EXHAUSTED")
 _add("Search", "BUDGET_EXHAUSTED")
 _add("Unit", "UNIT_HEADER_DOES_NOT_COMPILE", "UNIT_HEADER_NOT_READABLE", "JOINT_UNIT_REGRESSION", "RECIPE_MISMATCH")

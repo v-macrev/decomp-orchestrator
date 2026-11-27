@@ -42,6 +42,15 @@ def test_prefixed_and_comparator_codes_are_classified():
     assert tx.family("NOT A CODE") == "UNCLASSIFIED"
 
 
+def test_every_mismatch_kind_is_a_search_code():
+    from recon.core.synthesis import kinds
+
+    for k in kinds.KINDS:
+        assert tx.family(kinds.code(k)) == "Search" and tx.name(kinds.code(k)) == f"MISMATCH({k})"
+    assert tx.state(False, [kinds.code(kinds.BLOCKS)]) == tx.OPEN
+    assert tx.blockers([kinds.code(kinds.STACK), "CALLEE_NOT_DECLARED"]) == ["CALLEE_NOT_DECLARED", kinds.code(kinds.STACK)]
+
+
 def test_blockers_come_in_pipeline_order_and_decide_the_state():
     assert tx.blockers(["NO_MATCH", "CALLEE_SIGNATURE_UNKNOWN", "UNSUPPORTED_INSTRUCTION", "NO_MATCH"]) == ["UNSUPPORTED_INSTRUCTION", "CALLEE_SIGNATURE_UNKNOWN", "NO_MATCH"]
     assert tx.state(True, ["NO_MATCH"]) == tx.BYTE_MATCHED
