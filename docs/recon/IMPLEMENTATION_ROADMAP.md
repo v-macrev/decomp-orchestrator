@@ -376,6 +376,11 @@ D-064..D-067:     performance increment (targeted campaigns, probes that yield, 
                   2,250 (62,573), worker time -40%. Unknown signatures by reason: CALLEE_SIGNATURE_UNKNOWN 58,111, then
                   INDIRECT_CALL 2,035, READS_A_LOCATION_NOBODY_SET 1,815, LOCAL_IN_MEMORY 1,766, NOT_A_FUNCTION_OF_THE_PACK
                   1,391 (first round-A run, before the component-key fix: the reasons are the inference's, unchanged by it)
+D-062, D-063,     078c312, campaign 24 min with 3 workers: development BYTE_MATCHED 99 (89), held-out 10 (9), every one passed
+D-068:            by upstream's comparator; none of the earlier 98 lost. Of the 11 new, 8 had LAYOUT_CONFLICT and 3
+                  CALLEE_NOT_DECLARED first. LAYOUT_CONTRADICTION 30 -> 1, CALLEE_NOT_DECLARED 134 -> 125, MISMATCH 46 -> 63
+                  (compiled and compared: the frontier), CLASS_NOT_DECLARED 212 -> 217 and MEMBER_NOT_DECLARED 245 -> 251 (what
+                  the moved functions stop at next)
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 
