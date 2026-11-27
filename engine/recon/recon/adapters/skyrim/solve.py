@@ -32,7 +32,7 @@ from recon.adapters.skyrim.manifest import frontier_key, inputs
 from recon.adapters.skyrim.pack import Pack
 from recon.adapters.skyrim.packfacts import SCN_MEM_EXECUTE
 from recon.adapters.skyrim.verify import PASS, Verifier
-from recon.adapters.x64_msvc import coff
+from recon.adapters.x64_msvc import ccache, coff
 from recon.adapters.x64_msvc import declarations as D
 from recon.adapters.x64_msvc import unwind as uw
 from recon.adapters.x64_msvc.headers import import_signatures
@@ -251,15 +251,29 @@ class Context:
         self.public = public_symbols(worktree, image.build_id)
         self._named = self.symbols.addresses() | {rva for rva, _n in self.public.values()}
         self.recipe_digest = hashlib.sha256(recipe_bytes).hexdigest()
-        self.verifier = Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes)
+        self.verifier = _FreshVerifier(Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes), self)
         self.header_rel, self.header_text = header_rel, header_text
-        tag = hashlib.sha256(f"{header_rel}\0{time.monotonic_ns()}".encode()).hexdigest()[:10]
+        # The temporary files of a unit have one name per data directory and unit, so that what the compiler is given, and
+        # so what it writes, is a function of the inputs alone and a compile can be answered from the cache (D12-004).
+        # Every process of one data directory shares them: each use writes them, compiles and reads under the unit's lock.
+        tag = hashlib.sha256(f"{Path(data).resolve()}\0{header_rel}".encode()).hexdigest()[:10]
         self.temp_header = worktree / Path(header_rel).parent / f".recon-{tag}.h"
         self.temp_source = self.temp_header.with_suffix(".cpp")
         self.work = data / "work" / tag
-        self.work.mkdir(parents=True, exist_ok=True)
-        self.temp_header.write_text(header_text, encoding="utf-8", newline="\n")
+        self.lock_path = data / "work" / f"{tag}.lock"
         self.facts: D.ClassFacts | None = None
+        #: what each object this context compiled was made of, and whether the cache answered it
+        self._made: dict[str, tuple[str, str, bool]] = {}
+        self.cache_mismatch = 0
+
+    def locked(self):
+        return ccache.held(self.lock_path)
+
+    def class_facts(self, cls: str) -> D.ClassFacts:
+        """The class as the unit's header declares it, read through the compiler next to that header."""
+        with self.locked():
+            self.temp_header.write_text(self.header_text, encoding="utf-8", newline="\n")
+            return D.class_facts(self.tool, self.flags, self.worktree, str(self.temp_header.relative_to(self.worktree)), cls, self.work)
 
     def unnamed(self, at: int) -> bool:
         """Whether the function at address `at` is one the project has not named: a function of the image that no record
@@ -279,25 +293,52 @@ class Context:
         except self.pack.image.up.pecoff.Reject:
             return False
 
-    def compile(self, header: str, source: str) -> tuple[coff.Object, bytes] | list[str]:
-        """The object of `source` compiled with `header` as the unit's header, or the compiler's error codes."""
-        self.temp_header.write_text(header, encoding="utf-8", newline="\n")
-        self.temp_source.write_text(source, encoding="utf-8", newline="\n")
-        obj = self.work / "candidate.obj"
-        obj.unlink(missing_ok=True)
-        try:
-            code, out = self.tool.run("cl", [*self.flags, "/c", f"/Fo{obj}", str(self.temp_source.relative_to(self.worktree))], self.worktree)
-        except CompilerFailed:
-            return ["COMPILER_FAILED"]
-        if code != 0 or not obj.is_file():
-            return sorted({d.code for d in diagnostics(out)}) or ["DOES_NOT_COMPILE"]
-        blob = obj.read_bytes()
+    def compile(self, header: str, source: str, fresh: bool = False) -> tuple[coff.Object, bytes] | list[str]:
+        """The object of `source` compiled with `header` as the unit's header, or the compiler's error codes. `fresh`: run
+        the compiler even when the cache holds the answer."""
+        with self.locked():
+            self.temp_header.write_text(header, encoding="utf-8", newline="\n")
+            self.temp_source.write_text(source, encoding="utf-8", newline="\n")
+            self.work.mkdir(parents=True, exist_ok=True)
+            obj = self.work / "candidate.obj"
+            obj.unlink(missing_ok=True)
+            try:
+                code, out = self.tool.run("cl", [*self.flags, "/c", f"/Fo{obj}", str(self.temp_source.relative_to(self.worktree))], self.worktree,
+                                          fresh=fresh)
+            except CompilerFailed:
+                return ["COMPILER_FAILED"]
+            how = ccache.last()
+            if code != 0 or not obj.is_file():
+                return sorted({d.code for d in diagnostics(out)}) or ["DOES_NOT_COMPILE"]
+            blob = obj.read_bytes()
+        self._made[hashlib.sha256(blob).hexdigest()] = (header, source, how == "hit")
         return coff.Object(blob), blob
 
     def close(self) -> None:
-        for p in (self.temp_header, self.temp_source):
-            p.unlink(missing_ok=True)
-        shutil.rmtree(self.work, ignore_errors=True)
+        with self.locked():
+            for p in (self.temp_header, self.temp_source):
+                p.unlink(missing_ok=True)
+            shutil.rmtree(self.work, ignore_errors=True)
+
+
+class _FreshVerifier:
+    """The comparator judges only an object the compiler has just written (C5: the exact unit is compiled and compared
+    last): an object the cache answered is compiled again before it is judged, and the new one is what is judged. A new
+    object that differs from the cached one but for the time stamp would be a defect of the cache, which may already have
+    ordered the search differently: it is raised, never judged past."""
+
+    def __init__(self, verifier: Verifier, ctx: "Context") -> None:
+        self.verifier, self.ctx = verifier, ctx
+
+    def verify(self, rva: int, size: int, symbol: str, source: bytes, obj: bytes, symbols: dict, path: str = "unit.cpp") -> dict:
+        made = self.ctx._made.get(hashlib.sha256(obj).hexdigest())
+        if made is not None and made[2]:
+            got = self.ctx.compile(made[0], made[1], fresh=True)
+            if isinstance(got, list) or ccache.stampless(got[1]) != ccache.stampless(obj):
+                self.ctx.cache_mismatch += 1
+                raise ccache.CacheMismatch("the compiler no longer writes the object the compile cache answered")
+            obj = got[1]
+        return self.verifier.verify(rva, size, symbol, source, obj, symbols, path)
 
 
 def recorded_symbols(worktree: Path) -> SymbolMap:
@@ -388,7 +429,7 @@ def solve(req: dict, progress: Callable[[str, dict[str, int]], None]) -> tuple[l
         facts: D.ClassFacts | None = None
         if len(classes) == 1:
             try:
-                facts = D.class_facts(ctx.tool, ctx.flags, worktree, str(ctx.temp_header.relative_to(worktree)), next(iter(classes)), ctx.work)
+                facts = ctx.class_facts(next(iter(classes)))
             except NotReconstructed as e:
                 return [Outcome(int(f["rva"], 16), "blocked", e.code) for f in fns], header_rel, text
             if facts.virtual_bases:
