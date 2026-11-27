@@ -142,7 +142,8 @@ flock /home/victo/skyrim_decomp/.local/orchestrator/recon/ws/locks/dev-heavy.loc
 
 Check for an authoritative lease (`analysis.lease` in `phase7/`, D-065) before choosing a worker count. Never run
 anything against `phase7/knowledge.db` except P7's own runs. Each stream works on its own snapshot of the store:
-`sqlite3 phase7/knowledge.db ".backup ws/pN/knowledge.db"`, taken after P7 has confirmed the C0 store (and again after
+`python3 -c "import sqlite3,sys; sqlite3.connect(sys.argv[1]).backup(sqlite3.connect(sys.argv[2]))" phase7/knowledge.db
+ws/pN/knowledge.db` (the `sqlite3` command-line tool is not installed), taken after P7 has confirmed the C0 store (and again after
 any later checkpoint whose analysis namespace moved). Raising WSL's memory limit would allow one more worker. That
 changes a system setting, so only the user decides it.
 
