@@ -57,19 +57,31 @@ def left_behind(fn: Fn, conv: Convention, d: dict) -> Callable[[Arg], bool]:
     return lambda v: isinstance(v, int) and v in left
 
 
+def used_width(fn: Fn, users: dict[int, list[Op | None]], v: int) -> int:
+    """How many low bits of `v` its uses read: a truncation reads its width, anything else (a merge included) the whole."""
+    w = 0
+    for o in users.get(v, ()):
+        w = max(w, fn.width(o.defs[0]) if o is not None and o.kind == "trunc" else fn.width(v))
+    return w or fn.width(v)
+
+
 def call_evidence(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
     """Per direct call (tails left out, as in `sites.call_sites`), by the callee's address: `set`, the argument locations
     the caller puts a value of its own in, with the width it wrote (0 for a constant); `left`, those that hold nothing it
-    ever had; `reads`, the result locations whose value it uses after the call, with the width. A location it merely
+    ever had; `reads`, the result locations whose value it uses after the call, with the width its uses read. A location it merely
     passes on from its own entry is neither set nor left."""
     d = {v: o for v, (_b, o) in fn.defining().items()}
     own = caller_set(fn, conv, d)
     gone = left_behind(fn, conv, d)
     uses: dict[int, int] = {}          # a value that only reaches a return may merely have been left there: not a use
+    users: dict[int, list[Op | None]] = {}    # None: a merge or a terminator
     for b in fn.blocks:
-        for a in [a for o in b.ops for a in o.args] + [a for p in b.phis for _k, a in p.args] + (list(b.term.args) if b.term.kind != "return" else []):
-            if isinstance(a, int):
-                uses[a] = uses.get(a, 0) + 1
+        for user, xs in [(o, o.args) for o in b.ops] + [(None, [a for _k, a in p.args]) for p in b.phis] + \
+                ([(None, b.term.args)] if b.term.kind != "return" else []):
+            for a in xs:
+                if isinstance(a, int):
+                    uses[a] = uses.get(a, 0) + 1
+                    users.setdefault(a, []).append(user)
     out: dict[str, list[dict]] = {}
     for b in fn.blocks:
         for o in b.ops:
@@ -83,7 +95,7 @@ def call_evidence(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
                     put.append([n, written_width(fn, d, v)])
                 elif gone(v):
                     left.append(n)
-            reads = [[n, fn.width(v)] for n, v in zip(o.attr("defs") or (), o.defs)  # type: ignore[call-overload]
+            reads = [[n, used_width(fn, users, v)] for n, v in zip(o.attr("defs") or (), o.defs)  # type: ignore[call-overload]
                      if n in (conv.result_int, conv.result_float) and uses.get(v, 0)]
             out.setdefault(str(o.args[0].value), []).append({"set": sorted(put), "reads": sorted(reads), "left": sorted(left)})
     return out

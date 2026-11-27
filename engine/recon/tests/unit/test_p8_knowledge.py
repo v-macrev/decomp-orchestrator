@@ -18,11 +18,13 @@ from recon.core.inference import evidence as ev  # noqa: E402
 from recon.core.inference import callsites as cs  # noqa: E402
 from recon.core.inference.explain import explain, through_tail  # noqa: E402
 from recon.core.inference.signature import NotReconstructed, Signature, Slot  # noqa: E402
+from recon.core import knowledge as kn  # noqa: E402
 from recon.core.inference.whole import Program  # noqa: E402
 from recon.core.ir import passes, validate  # noqa: E402
 
 
-def program(*fns: Asm, declared=None) -> Program:
+def program(*fns: Asm, declared=None, store=None, universe: bool = False) -> Program:
+    """Functions at their own RVAs; an address none of them is at stands for a function whose normal form is refused."""
     code = {f.rva: f for f in fns}
 
     def normal(at: int):
@@ -38,9 +40,10 @@ def program(*fns: Asm, declared=None) -> Program:
 
     def key(at: int):
         f = code.get(at - BASE)
-        return None if f is None else f"{f.rva:x}:" + hashlib.sha256(f.assemble()[0]).hexdigest()[:16]
+        return f"{at - BASE:x}:refused" if f is None else f"{f.rva:x}:" + hashlib.sha256(f.assemble()[0]).hexdigest()[:16]
 
-    return Program(normal, SOURCE, CALLING, BASE, lambda at, n: None, lambda a, w: None, declared or (lambda at: None), key=key)
+    return Program(normal, SOURCE, CALLING, BASE, lambda at, n: None, lambda a, w: None, declared or (lambda at: None), store=store,
+                   key=key, universe=(lambda: [BASE + r for r in code]) if universe else None)
 
 
 def calls(rva: int, to: int) -> Asm:
