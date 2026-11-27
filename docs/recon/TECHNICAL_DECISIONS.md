@@ -516,3 +516,10 @@ a nop after the call, guarding nothing but termination. The member form is now d
 form says so (`Fn.noexcept`, read from the handler's data since D-028). The other difference of 80 of them was two address
 loads (`lea` of an object, D-058), which the earlier count had classed with reads. Rebuilding cleanup objects as stand-in
 classes, approved with D-058, waits: only 2 of the 132 have a cleanup state, and none of the 80 needs one.
+
+## D-060 · 2026-11-27 · The comparator's map carries the project's public entries for what the object references
+The engine gave its comparator the names the function's own code references. A `noexcept` member (D-059) also references the
+frame handler from its exception data, and 81 of the 84 development and held-out functions the D-059 engine left at
+`unresolved-symbol` failed on that one name, which the project's public symbol map places. The engine's map now also carries
+the public map's entry for every name the candidate object references and its code does not, as upstream's comparator reads
+the repository map. Re-solved with this change, 79 of the 84 byte-match.

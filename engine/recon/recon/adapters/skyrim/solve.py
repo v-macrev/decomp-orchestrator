@@ -151,6 +151,11 @@ class UnitWorkshop:
             got = (self.rva, self.size) if r.symbol == fn.symbol else (at, self._extent(c, at)) if at is not None else self.ctx.symbols.lookup(r.symbol)
             if got is not None:
                 symbols[r.symbol] = got
+        # what the object's other sections reference (the frame handler its exception data names): as the project's
+        # public symbol map places it, which is the map upstream's comparator reads (D-060)
+        for s in coff.Object(obj).symbols.values():
+            if s.section == 0 and s.name not in symbols and s.name in self.ctx.public:
+                symbols[s.name] = self.ctx.public[s.name]
         report = self.ctx.verifier.verify(self.rva, self.size, fn.symbol, src.encode("utf-8"), obj, symbols)
         ok = report["result"] == "pass" and report["reason"] == PASS
         if ok:
@@ -243,7 +248,8 @@ class Context:
         self.pack, self.offered = pack_of(worktree, checkout, knowledge)
         image = self.pack.image
         self.symbols = recorded_symbols(worktree)
-        self._named = self.symbols.addresses() | public_addresses(worktree, image.build_id)
+        self.public = public_symbols(worktree, image.build_id)
+        self._named = self.symbols.addresses() | {rva for rva, _n in self.public.values()}
         self.recipe_digest = hashlib.sha256(recipe_bytes).hexdigest()
         self.verifier = Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes)
         self.header_rel, self.header_text = header_rel, header_text
@@ -305,13 +311,15 @@ def recorded_symbols(worktree: Path) -> SymbolMap:
     return out
 
 
-def public_addresses(worktree: Path, build_id: str | None) -> frozenset[int]:
-    """The addresses the project's public symbol map names (`reports/<build id>/symbol-map.json`); none without one."""
+def public_symbols(worktree: Path, build_id: str | None) -> dict[str, tuple[int, int | None]]:
+    """What the project's public symbol map places (`reports/<build id>/symbol-map.json`): decorated name -> (RVA, size or
+    None); nothing without one."""
     path = worktree / "reports" / str(build_id) / "symbol-map.json"
     if not build_id or not path.is_file():
-        return frozenset()
+        return {}
     d = json.loads(path.read_text(encoding="utf-8"))
-    return frozenset(int(v["rva"], 16) if isinstance(v["rva"], str) else int(v["rva"]) for v in d.get("symbols", {}).values())
+    rva = lambda v: int(v, 16) if isinstance(v, str) else int(v)  # noqa: E731
+    return {n: (rva(v["rva"]), v.get("size")) for n, v in d.get("symbols", {}).items()}
 
 
 def base_text(worktree: Path, rel: str) -> str | None:

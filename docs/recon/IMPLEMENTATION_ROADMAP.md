@@ -359,6 +359,12 @@ D-054 + D-055:    e1e2ad1, prewarm 85 min (normal forms reused; sites and signat
                   READS_A_LOCATION_NOBODY_SET 100 (356): with the sites read by the D-053 code, most of those now show their real
                   first blocker, CALLEE_SIGNATURE_UNKNOWN 706 (577); MISMATCH 124 (15): candidates that compile and are compared,
                   the search's frontier now. Largest worker 2,071 MiB; the least free commit 1.66 GB against the guard's 1.5
+D-056..D-060:     c86f548 + D-060, prewarm 57 min (every normal form, site and signature reloaded, nothing recomputed), campaign
+                  94 min with up to 4 workers: development BYTE_MATCHED 89 (4,285 bytes; was 16, 399 bytes), held-out
+                  BYTE_MATCHED 9 (425 bytes; was 1, 9 bytes), every one passed by upstream's comparator; MISMATCH 46 (124),
+                  GLOBAL_NOT_DECLARED 7 (52). The 80-function shape was noexcept members (D-059) loading two object addresses
+                  (D-058), and their frame handler needed the public map's entry (D-060). New firsts: LAYOUT_CONTRADICTION 30 (6),
+                  CALLEE_NOT_DECLARED 134 (113). Largest worker 2,269 MiB, no worker died; the least free commit 3.5 GB
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 
@@ -370,7 +376,7 @@ By family: Knowledge 1,585, ABI 413, Source 73, Machine 28, Search 24, Unit 16.
 **No function was judged on its budget.** The 16 functions suspended at level 0 were resumed at four times the budgets and
 each ended in a state of its own; none was left resumable, and none was counted as unreconstructable because a budget ran out.
 
-**Still open in Phase 7:** the constant scan and the ceiling estimate; the 124 compared mismatches; callees the project names
+**Still open in Phase 7:** the constant scan and the ceiling estimate; the 46 compared mismatches; callees the project names
 but the unit does not declare; arguments on the stack; thread-local storage; the memory a worker takes on the largest
 functions.
 

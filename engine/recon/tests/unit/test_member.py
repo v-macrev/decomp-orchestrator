@@ -309,3 +309,15 @@ def test_the_packet_carries_each_placeholder_prototype_once_after_the_unit_s_inc
     assert cpp["path"] == "unit/Box.cpp" and cpp["declarations"] == "int Function20();\nvoid Function40(int arg1);"
     plain = Outcome(0x10, "solved", "BYTE_MATCHED", definition=a.definition, declaration="int Get()", name="Box::Get")
     assert "declarations" not in edits([plain], "unit/Box.h", "unit/Box.cpp", text)[0]
+
+
+def test_the_public_symbol_map_is_read_by_name_with_its_addresses(tmp_path):
+    pytest.importorskip("iced_x86", reason="needs the private venv (engine/recon/scripts/setup-venv.sh)")
+    import json
+
+    from recon.adapters.skyrim.solve import public_symbols
+    (tmp_path / "reports/b1").mkdir(parents=True)
+    (tmp_path / "reports/b1/symbol-map.json").write_text(json.dumps(
+        {"schema": 1, "build_id": "b1", "symbols": {"__Handler": {"rva": 0x40, "size": 8}, "?Get@Box@@QEAAHXZ": {"rva": "0x80", "size": None}}}))
+    assert public_symbols(tmp_path, "b1") == {"__Handler": (0x40, 8), "?Get@Box@@QEAAHXZ": (0x80, None)}
+    assert public_symbols(tmp_path, "other") == {} and public_symbols(tmp_path, None) == {}
