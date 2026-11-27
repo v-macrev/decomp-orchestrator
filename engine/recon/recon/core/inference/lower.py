@@ -318,15 +318,31 @@ def parameters(fn: Fn, conv: Convention) -> tuple[Fn, tuple[Slot, ...]]:
     return substitute(fn, same, set()), tuple(slots)
 
 
-def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None) -> tuple[Fn, tuple[Slot, ...]]:
-    """(the function at source level, its parameters), or NotReconstructed."""
+def _with_parameters(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None) -> tuple[Fn, tuple[Slot, ...]]:
     fn = _tidy(expose(fn, conv, callee, result), abi)
     for _ in range(ROUND):
         before = fn.blocks
         fn = _tidy(_cleaned(narrow(fn)), abi)
         if fn.blocks == before:
             break
-    fn, slots = parameters(fn, conv)
+    return parameters(fn, conv)
+
+
+#: what `lower` refuses about a body after its parameters are known: what the source can say, not what the function takes
+BODY_ONLY = ("READS_A_LOCATION_NOBODY_SET", "LOCAL_IN_MEMORY", "VECTOR_VALUE")
+
+
+def interface(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None) -> tuple[Slot, ...]:
+    """The parameters `lower` gives the function, without asking whether its body can be written (D8-004): a local whose
+    address is taken, a vector value, or a read of a location nobody set is a matter of the body, and the parameters
+    are fixed before `lower` looks for them. What the function's callers need of it is these and its result.
+    NotReconstructed for what does decide the parameters (a callee without a signature, an argument on the stack...)."""
+    return _with_parameters(fn, conv, abi, callee, result)[1]
+
+
+def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None) -> tuple[Fn, tuple[Slot, ...]]:
+    """(the function at source level, its parameters), or NotReconstructed."""
+    fn, slots = _with_parameters(fn, conv, abi, callee, result)
     for _ in range(ROUND):
         before = fn.blocks
         fn = _tidy(_cleaned(narrow(fn)), abi)
@@ -342,4 +358,4 @@ def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None) 
     return fn, slots
 
 
-__all__ = ["expose", "lower", "narrow", "parameters"]
+__all__ = ["BODY_ONLY", "expose", "interface", "lower", "narrow", "parameters"]
