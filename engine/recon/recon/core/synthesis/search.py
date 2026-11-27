@@ -29,6 +29,7 @@ from typing import Protocol
 from recon.core import budget as bg
 from recon.core.inference.signature import NotReconstructed
 from recon.core.synthesis import kinds as K
+from recon.core.synthesis import plausible
 from recon.core.synthesis import rules as RL
 from recon.core.synthesis.candidates import Candidate, Choice, Generator, Program
 
@@ -183,6 +184,10 @@ def reconstruct(program: Program, at: int, shop: Workshop, budget: bg.Budget | N
                 continue
             if x is None:
                 n["equal_trees"] += 1
+                continue
+            why = plausible.check(x.body, x.unit.text)
+            if why is not None:
+                out.refused[why] = out.refused.get(why, 0) + 1
                 continue
             if not x.verdict.agree:
                 out.disagreed[x.verdict.why] = out.disagreed.get(x.verdict.why, 0) + 1
