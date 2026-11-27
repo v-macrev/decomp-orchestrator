@@ -163,12 +163,25 @@ def main(argv: list[str] | None = None) -> int:
     cg.add_argument("--levels", default="0-5", help="the budget levels to run, FIRST-LAST (each resumes from the one below)")
     cg.add_argument("--knowledge", help="the knowledge store (default: knowledge.db under --data)")
     cg.add_argument("--every", type=float, default=60.0, help="seconds between progress lines")
+    cg.add_argument("--from", dest="earlier", help="records of an earlier campaign to select from (its -final.jsonl)")
+    cg.add_argument("--blockers", default="", help="with --from: functions whose primary blocker is one of these codes or plan names")
+    cg.add_argument("--families", default="", help="with --from: functions whose primary blocker is of one of these families")
+    cg.add_argument("--states", default="", help="with --from: functions left in one of these states")
+    cg.add_argument("--corpus", help="a JSON list of RVAs that are always run (a regression corpus)")
+    cg.add_argument("--regression", action="store_true", help="with --from: also every function it matched; any it loses fails the run")
     pw = sub.add_parser("prewarm", help="the whole-program analysis, kept in the knowledge store: counts and times")
     common(pw, with_select=False)
     pw.add_argument("--knowledge", required=True, help="the knowledge store, under a .local directory")
     pw.add_argument("--jobs", type=int, default=1, help="at most this many workers; fewer while memory is short")
     pw.add_argument("--every", type=float, default=60.0)
     pw.add_argument("--phases", default="normal,signature", help="normal (normal forms and calls) and/or signature (callers, signatures)")
+    pf = sub.add_parser("profile", help="what the whole-program analysis costs, cold, warm and incremental, on a store of its own: counts and times")
+    common(pf, with_select=False)
+    pf.add_argument("--out", required=True, help="a directory under .local for the profile's own store")
+    pf.add_argument("--sample", type=int, default=64, help="functions spread evenly over the pack's (0: all)")
+    pf.add_argument("--workloads", default="cold,warm,incremental")
+    pf.add_argument("--against", help="a knowledge store the cold workload's facts are compared with (read-only)")
+    pf.add_argument("--callers", action="store_true", help="index every function's callers too (reads every normal form)")
     ce = sub.add_parser("ceiling", help="the early ceiling estimate over a stratified sample of startable development functions: counts")
     common(ce, with_select=False)
     ce.add_argument("--next", required=True, help="the JSON of `sr next --offline`")
@@ -184,7 +197,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
         return serve(sys.stdin, sys.stdout, sys.stderr)
     if args.cmd in ("inventory", "survey", "crosscheck", "rtti", "analyze", "measure-compare", "validate-lift", "coverage", "reconstruct", "reach",
-                    "measure-filter", "manifest", "campaign", "ceiling", "prewarm"):
+                    "measure-filter", "manifest", "campaign", "ceiling", "prewarm", "profile"):
         from recon.cli import commands
 
         return getattr(commands, "cmd_" + args.cmd.replace("-", "_"))(args)

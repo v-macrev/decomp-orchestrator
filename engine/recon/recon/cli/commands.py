@@ -269,14 +269,30 @@ def cmd_campaign(args) -> int:
         startable[int(c["rva"], 16) if isinstance(c["rva"], str) else int(c["rva"])] = c
     solve_set = frozenset(json.loads(Path(args.solve_set).read_text(encoding="utf-8"))) if args.solve_set else frozenset()
     population = [t for t in inv.unmatched() if t.rva in solve_set or (t.rva in startable and startable[t.rva].get("unit_exists") and t.size <= args.max_bytes)]
-    records = cp.run(population, startable, Path(args.worktree), Path(args.checkout), data, args.name, solve_set, args.jobs, str(knowledge), levels,
-                     log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every)
+    earlier = cp.read_records(Path(args.earlier)) if args.earlier else {}
+    words = lambda s: frozenset(w for w in s.split(",") if w)  # noqa: E731
+    sel = cp.Selection(words(args.blockers), words(args.families), words(args.states),
+                       frozenset(json.loads(Path(args.corpus).read_text(encoding="utf-8"))) if args.corpus else frozenset(), args.regression)
+    if not sel.empty() and not args.earlier and not sel.corpus:
+        print("a selection by blocker, family, state or regression reads an earlier campaign: --from", file=sys.stderr)
+        return 2
+    whole = len(population)
+    population = cp.select(population, earlier, sel)
+    from recon.core import workload
+
+    with workload.analysis(knowledge.parent, "campaign"):
+        records = cp.run(population, startable, Path(args.worktree), Path(args.checkout), data, args.name, solve_set, args.jobs, str(knowledge),
+                         levels, log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every)
     cp.write(records, data, args.name)
     report = {"population": len(population), "solve_set": len(solve_set), "recorded": len(records), "levels": [levels.start, levels.stop - 1],
               **cp.summary(records)}
+    if not sel.empty():
+        lost = cp.regressions(earlier, records)
+        report["targeted"] = {"of": whole, "blockers": sorted(sel.blockers), "families": sorted(sel.families), "states": sorted(sel.states),
+                              "corpus": len(sel.corpus), "regression": sel.regression, "regressions": len(lost)}
     (data / f"{args.name}-summary.json").write_text(json.dumps(report, indent=1, sort_keys=True), encoding="utf-8")
     print(json.dumps(report, indent=1, sort_keys=True))
-    return 0
+    return 1 if report.get("targeted", {}).get("regressions") else 0
 
 
 def cmd_prewarm(args) -> int:
@@ -286,8 +302,27 @@ def cmd_prewarm(args) -> int:
     if ".local" not in Path(args.knowledge).resolve().parts:
         print("the knowledge store is derived from the image: --knowledge must be under a .local directory", file=sys.stderr)
         return 2
-    report = pw.run(Path(args.worktree), Path(args.checkout), str(args.knowledge), args.jobs,
-                    log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every, phases=tuple(args.phases.split(",")))
+    from recon.core import workload
+
+    with workload.analysis(Path(args.knowledge).parent, "prewarm"):
+        report = pw.run(Path(args.worktree), Path(args.checkout), str(args.knowledge), args.jobs,
+                        log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every, phases=tuple(args.phases.split(",")))
+    print(json.dumps(report, indent=1, sort_keys=True))
+    return 0
+
+
+def cmd_profile(args) -> int:
+    """What the whole-program analysis costs (private store under --out): counts and times on stdout."""
+    from recon.adapters.skyrim import profile as pf
+
+    if ".local" not in Path(args.out).resolve().parts:
+        print("the profile's store is derived from the image: --out must be under a .local directory", file=sys.stderr)
+        return 2
+    report = pf.run(Path(args.worktree), Path(args.checkout), Path(args.out), args.sample, tuple(args.workloads.split(",")),
+                    Path(args.against) if args.against else None, args.callers)
+    if any(row["different"] for row in report.get("cold", {}).get("against", {}).values()):
+        print(json.dumps(report, indent=1, sort_keys=True))
+        return 1
     print(json.dumps(report, indent=1, sort_keys=True))
     return 0
 

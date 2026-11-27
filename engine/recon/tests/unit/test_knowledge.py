@@ -322,6 +322,24 @@ def test_memory_holds_a_bounded_number_of_normal_forms_and_the_store_holds_them_
     assert p.stats["normal_computed"] == 80
 
 
+def test_what_a_form_read_back_shows_of_its_calls_is_filed_so_no_later_program_reads_the_form_again():
+    """D-061: a store whose normal forms outlived their readings (filed under other code) gets the readings once."""
+    fns = chain(6)
+    store = kn.MemoryStore()
+    want = signatures(program(*fns, store=store), fns)
+    for kind, key in [k for k in store.facts if k[0] in ("callees", "sites", "sigkey")]:   # filed before D-067, too
+        store.drop(kind, key)
+    healing = program(*fns, store=store)
+    assert signatures(healing, fns) == want
+    assert healing.stats["readings_filed"] == 6 and healing.stats["normal_loaded"] == 6 and healing.stats["normal_computed"] == 0
+    assert store.count("callees") == 6 and store.count("sites") == 6 and store.count("sigkey") == 6
+    healed = program(*fns, store=store)
+    assert signatures(healed, fns) == want and healed.sites(BASE + RVA) == healing.sites(BASE + RVA)
+    # D-067: the signatures are read by the keys filed with them, so not even the callees are read
+    assert healed.stats["normal_loaded"] == 0 and healed.stats["readings_filed"] == 0 and healed.stats["edges_loaded"] == 0
+    assert healed.stats["sigkey_loaded"] == 6
+
+
 # ------------------------------------------------------------------------------------ invalidation
 
 def test_a_change_below_a_function_changes_its_key_and_a_change_elsewhere_does_not():
@@ -541,3 +559,50 @@ def test_each_kind_of_fact_has_the_namespace_of_the_code_it_depends_on():
     assert ns["callees"] == ns["sites"] == ns["callers"]
     assert len({ns["normal"], ns["sites"], ns["*"]}) == 3
     assert kn.namespaces("x", extra=("imports",))["sites"] == ns["sites"]  # what is declared of imports reaches no site
+
+
+def test_why_a_signature_is_unknown_is_kept_with_it_and_read_back_with_its_key(tmp_path):
+    """D-067: an inference that ends without a signature files the code it ended with; a later program reads the signature
+    by the key filed with it, without walking the callees, and learns why it is unknown."""
+    fns = chain(3)
+    refused = BASE + fns[-1].rva
+    plain = program(*fns)
+
+    def normal(at):
+        if at == refused:
+            raise NotReconstructed("SYNTHETIC_REFUSAL")
+        return plain._normal(at)
+
+    def build(store):
+        p = program(*fns, store=store)
+        p._normal = normal
+        return p
+
+    store = kn.SqliteStore(tmp_path / "k.db", "ns")
+    first = build(store)
+    assert first.signature(BASE + fns[0].rva) is None
+    assert first.why_unknown(refused) == "SYNTHETIC_REFUSAL"
+    later = build(kn.SqliteStore(tmp_path / "k.db", "ns"))
+    assert later.why_unknown(refused) == "SYNTHETIC_REFUSAL" and later.stats["attempts_loaded"] == 1
+    assert later.stats["sigkey_loaded"] == 1 and later.stats["edges_loaded"] == 0 and later.stats["signature_computed"] == 0
+
+
+def test_a_cycle_read_back_by_its_filed_key_is_read_back_whole_and_gets_no_second_key(tmp_path):
+    """D-067: reading one member of a cycle back by its filed key settles every member, so a later walk that reaches
+    another member finds it settled: no component is formed of part of a cycle, and no function has two keys."""
+    a, b = mutual(RVA, RVA + 0x100), mutual(RVA + 0x100, RVA)
+    r = Asm(RVA + 0x200)(T.sub_rsp(40))
+    r.branch(C.CALL_REL32_64, RVA + 0x100)
+    r(T.add_rsp(40))(T.ret())
+    fns = (a, b, r)
+    whole_walk = kn.SqliteStore(tmp_path / "one.db", "ns")
+    want = signatures(program(*fns, store=whole_walk), fns)
+    keys = whole_walk.keys("signature")
+
+    store = kn.SqliteStore(tmp_path / "two.db", "ns")
+    program(*fns, store=store).signature(BASE + a.rva)                # files the cycle {a, b}
+    later = program(*fns, store=kn.SqliteStore(tmp_path / "two.db", "ns"))
+    assert later.signature(BASE + a.rva) == want[0]                  # read back by its key: b with it
+    assert BASE + b.rva in later._sigs and later.stats["sigkey_loaded"] == 2
+    assert later.signature(BASE + r.rva) == want[2] and later.stats["edges_loaded"] <= 1
+    assert store.keys("signature") == keys and store.count("signature") == 3

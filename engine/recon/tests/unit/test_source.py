@@ -168,10 +168,12 @@ def test_a_pointer_to_its_own_kind_is_a_class_and_not_endless():
     assert "Class1* member0;" in x.unit.text
 
 
-def test_accesses_that_overlap_are_refused():
+def test_accesses_with_two_widths_at_one_offset_are_written_through_its_bytes():
+    """D-063: a pointee read at one offset with two widths is no contradiction; the inferred layout keeps one member and the
+    other access is written through the bytes at that offset."""
     a = Asm()(I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem(R.RCX, 8)))(I.create_reg_mem(C.ADD_R64_RM64, R.RAX, mem(R.RCX, 8)))(T.ret())
-    with pytest.raises(NotReconstructed, match="LAYOUT_CONFLICT|TYPES|CONFLICT"):
-        canonical(program(a))
+    x = canonical(program(a))
+    assert "reinterpret_cast<unsigned char*>" in x.unit.text and "+ 0x8" in x.unit.text
 
 
 def test_a_location_nobody_set_is_refused():

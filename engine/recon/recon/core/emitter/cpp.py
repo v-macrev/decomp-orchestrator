@@ -151,6 +151,12 @@ class Emitter:
                 return self._e(x.arg)
             return f"static_cast<{self.type_name(x.type)}>({self.e(x.arg)})", POSTFIX
         if isinstance(x, A.Field):
+            b = x.base.type
+            if isinstance(b, ty.Ptr) and isinstance(b.to, ty.Named) and not any(
+                    m.offset == x.offset and m.type == x.type for m in self.t.layout(b.to.number).members):
+                # an access the inferred layout has no member for: through the bytes at its offset (D-063)
+                return (f"*reinterpret_cast<{self.type_name(x.type)}*>(reinterpret_cast<unsigned char*>({self.e(x.base)}) + "
+                        f"0x{x.offset:X})"), UNARY
             return f"{self.e(x.base, POSTFIX)}->{self.member(x.offset)}", POSTFIX
         if isinstance(x, A.Index):
             if x.index is None:

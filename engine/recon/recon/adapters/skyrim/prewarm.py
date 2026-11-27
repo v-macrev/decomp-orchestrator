@@ -78,7 +78,7 @@ def run(worktree: Path, checkout: Path, knowledge: str, jobs: int = 1, log: Call
         report[phase] = {"s": round(time.monotonic() - state["t0"], 1), **sums, "workers_most": pool.stats.most,
                          "workers_died": pool.stats.died, "worker_largest_mib": pool.stats.largest >> 20, "errors": errors}
     store = pack.store
-    report["store"] = {k: store.count(k) for k in ("normal", "callees", "sites", "signature", "alternatives", "callers")}  # type: ignore[union-attr]
+    report["store"] = {k: store.count(k) for k in ("normal", "callees", "sites", "signature", "alternatives", "callers", "sigkey", "attempt")}  # type: ignore[union-attr]
     return report
 
 

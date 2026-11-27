@@ -267,3 +267,26 @@ def test_unwind_entries_add_the_functions_upstream_does_not_list_and_nothing_ins
                (0x3000, 0x3000, False)]      # empty
     out, added = with_unwind_entries(size, entries)
     assert added == 1 and out == {0x1000: 0x40, 0x1800: 0x80, 0x2000: 0x20}
+
+
+def test_a_targeted_campaign_runs_what_an_earlier_one_left_with_the_selected_blockers_and_guards_its_matches(tmp_path):
+    """D-064: by primary blocker (engine code or plan name), family, state, a corpus, and the earlier matches as a regression set."""
+    pytest.importorskip("iced_x86", reason="needs the private venv (engine/recon/scripts/setup-venv.sh)")
+    from recon.adapters.skyrim import campaign as cp
+    R = cp.Record
+    earlier = [R(0x10, 8, False, "candidate", blockers=["NO_MATCH"]), R(0x20, 8, False, "none", blockers=["LAYOUT_CONFLICT"]),
+               R(0x30, 8, False, "candidate", state=tx.BYTE_MATCHED), R(0x40, 8, False, "none", blockers=["INDIRECT_CALL"]),
+               R(0x50, 8, False, "candidate", blockers=["CALLEE_NOT_DECLARED"])]
+    path = tmp_path / "e.jsonl"
+    path.write_text("".join(json.dumps(cp.asdict(r)) + "\n" for r in earlier), encoding="utf-8")
+    got = cp.read_records(path)
+    pop = [Target(rva, 8, "inventory", None) for rva in (0x10, 0x20, 0x30, 0x40, 0x50, 0x60)]
+    pick = lambda **k: [t.rva for t in cp.select(pop, got, cp.Selection(**k))]  # noqa: E731
+    assert pick() == [0x10, 0x20, 0x30, 0x40, 0x50, 0x60]
+    assert pick(blockers=frozenset({"LAYOUT_CONTRADICTION"})) == [0x20]          # a plan name selects its engine codes
+    assert pick(blockers=frozenset({"NO_MATCH", "CALLEE_NOT_DECLARED"})) == [0x10, 0x50]
+    assert pick(families=frozenset({"Search"})) == [0x10]
+    assert pick(families=frozenset({"Knowledge"})) == [0x20, 0x40, 0x50]
+    assert pick(corpus=frozenset({0x60}), regression=True) == [0x30, 0x60]
+    now = [R(0x30, 8, False, "candidate", blockers=["NO_MATCH"]), R(0x10, 8, False, "candidate", state=tx.BYTE_MATCHED)]
+    assert cp.regressions(got, now) == [0x30]

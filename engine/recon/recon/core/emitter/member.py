@@ -91,6 +91,9 @@ class MemberEmitter(Emitter):
         self.d, self.k, self.this = d, cls, this
         self.unnamed = unnamed
         self.unnamed_data = unnamed_data
+        #: objects the body reaches in more than one way (two types, or a read and its address): declared as bytes, each
+        #: access through a cast, which the compiler makes the same relocated access of (D-062)
+        self.mixed: set[int] = set()
 
     def type_name(self, t: ty.CType) -> str:
         if isinstance(t, ty.Ptr):
@@ -126,9 +129,23 @@ class MemberEmitter(Emitter):
                 return f"{base}->{m.name}[{(off - m.offset) // size}]"
         raise NotReconstructed("MEMBER_NOT_DECLARED")
 
+    def _address(self, x: A.Num) -> bool:
+        t = x.type
+        return bool(x.value) and isinstance(t, (ty.Ptr, ty.Int)) and t.width == 64 and self.unnamed_data(x.value)
+
+    def _mixed(self, body: A.Body) -> set[int]:
+        ways: dict[int, set] = {}
+        for st in body.stmts:
+            for x in A.walk(st):
+                if isinstance(x, A.Global) and self.unnamed_data(x.address):
+                    ways.setdefault(x.address, set()).add(x.type)
+                elif isinstance(x, A.Num) and self._address(x):
+                    ways.setdefault(x.value, set()).add("address")
+        return {a for a, w in ways.items() if len(w) > 1}
+
     def num(self, x: A.Num) -> tuple[str, int]:
         t = x.type
-        if x.value and isinstance(t, (ty.Ptr, ty.Int)) and t.width == 64 and self.unnamed_data(x.value):
+        if self._address(x):
             # the address of an object of the image: written as the address of its placeholder, which the compiler
             # loads by a relocated address and not as a number (D-058)
             if x.value in self.globals and self.globals[x.value][1] is not None:
@@ -141,9 +158,12 @@ class MemberEmitter(Emitter):
         if isinstance(x, A.Global):
             if not self.unnamed_data(x.address):
                 raise NotReconstructed("GLOBAL_NOT_DECLARED")
+            t = self.type_name(x.type)                 # a class the unit does not declare is refused here
+            if x.address in self.mixed:
+                self.globals[x.address] = (bytes_placeholder(x.address - self.base), None)
+                return f"(*reinterpret_cast<{t}*>({self.globals[x.address][0]}))", PRIMARY
             if x.address in self.globals and self.globals[x.address][1] != x.type:
                 raise NotReconstructed("LAYOUT_CONFLICT")
-            self.type_name(x.type)                     # a class the unit does not declare is refused here
             self.globals[x.address] = (data_placeholder(x.address - self.base), x.type)
             return self.globals[x.address][0], PRIMARY
         if isinstance(x, A.Field):
@@ -163,6 +183,7 @@ class MemberEmitter(Emitter):
             if _classes(t) - {self.k}:
                 raise NotReconstructed("CLASS_NOT_DECLARED")
         self.name_locals(body)
+        self.mixed = self._mixed(body)
         lines: list[str] = []
         self.stmts(body.stmts[:-1] if body.stmts and body.stmts[-1] == A.Return(None) else body.stmts, 1, lines)
         params = body.params if form == "static" else body.params[1:]

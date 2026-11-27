@@ -365,6 +365,17 @@ D-056..D-060:     c86f548 + D-060, prewarm 57 min (every normal form, site and s
                   GLOBAL_NOT_DECLARED 7 (52). The 80-function shape was noexcept members (D-059) loading two object addresses
                   (D-058), and their frame handler needed the public map's entry (D-060). New firsts: LAYOUT_CONTRADICTION 30 (6),
                   CALLEE_NOT_DECLARED 134 (113). Largest worker 2,269 MiB, no worker died; the least free commit 3.5 GB
+D-064..D-067:     performance increment (targeted campaigns, probes that yield, `recon profile`, signature keys filed with
+                  their components, failed attempts kept with their reason). Prewarm of every signature, normal forms
+                  reused: 26 min with 3 workers (the D-061 engine: 95 min projected with 4); callee lists read 118,153 (558,374
+                  by chunk 205), signatures loaded 94,563 (498,859). Its facts against the D-060 engine's for the same inputs:
+                  114,746 signatures and 114,652 alternatives identical key by key, none on one side only. Profile of 32
+                  functions: cold 265 s -> 263 s, warm 20.2 s -> 5.4 s, incremental 48.6 s -> 35.7 s. Campaign of the D-060
+                  source writing on the new analysis: 23 min with 3 workers (94 min with 4); every one of the 2,249 functions
+                  in the same state, with the same blockers, solve outcome, comparator verdict and level; normal forms read
+                  2,250 (62,573), worker time -40%. Unknown signatures by reason: CALLEE_SIGNATURE_UNKNOWN 58,111, then
+                  INDIRECT_CALL 2,035, READS_A_LOCATION_NOBODY_SET 1,815, LOCAL_IN_MEMORY 1,766, NOT_A_FUNCTION_OF_THE_PACK
+                  1,391 (first round-A run, before the component-key fix: the reasons are the inference's, unchanged by it)
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 

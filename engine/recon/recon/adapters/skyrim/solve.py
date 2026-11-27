@@ -249,7 +249,7 @@ class Context:
         image = self.pack.image
         self.symbols = recorded_symbols(worktree)
         self.public = public_symbols(worktree, image.build_id)
-        self._named = self.symbols.addresses() | {rva for rva, _n in self.public.values()}
+        self._named = named_addresses(self.symbols, self.public)
         self.recipe_digest = hashlib.sha256(recipe_bytes).hexdigest()
         self.verifier = Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes)
         self.header_rel, self.header_text = header_rel, header_text
@@ -309,6 +309,16 @@ def recorded_symbols(worktree: Path) -> SymbolMap:
             rva = f["rva"]
             out.add(name, int(rva, 16) if isinstance(rva, str) else int(rva), f.get("size"), "recorded")
     return out
+
+
+def named_addresses(symbols: SymbolMap, public: dict[str, tuple[int, int | None]]) -> frozenset[int]:
+    """The RVAs the project names: by a record, or by an entry of its public map. A function it records only by its own
+    placeholder name (`Function<rva>`), with no public entry, is one it has not named: it is called by that placeholder
+    like any other (D-068)."""
+    from recon.core.emitter.member import placeholder
+
+    placeholder_only = {rva for rva, names in symbols.names_at().items() if all(n.lower() == placeholder(rva).lower() for n in names)}
+    return frozenset((symbols.addresses() - placeholder_only) | {rva for rva, _n in public.values()})
 
 
 def public_symbols(worktree: Path, build_id: str | None) -> dict[str, tuple[int, int | None]]:

@@ -70,6 +70,15 @@ class SymbolMap:
         """Every RVA some entry gives a name, by any rank."""
         return frozenset(r for by in self._names.values() for es in by.values() for r, _s in es)
 
+    def names_at(self) -> dict[int, frozenset[str]]:
+        """Every name some entry gives each RVA, by any rank."""
+        out: dict[int, set[str]] = {}
+        for name, by in self._names.items():
+            for es in by.values():
+                for r, _s in es:
+                    out.setdefault(r, set()).add(name)
+        return {r: frozenset(n) for r, n in out.items()}
+
     def __len__(self) -> int:
         return len(self._names)
 

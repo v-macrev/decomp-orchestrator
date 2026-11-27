@@ -271,6 +271,54 @@ def run(population: list[Target], startable: dict[int, dict], worktree: Path, ch
     return [latest[t.rva] for t in population if t.rva in latest]
 
 
+def read_records(path: Path) -> dict[int, Record]:
+    """Records of an earlier campaign (its final file or journal), the last of each function."""
+    out: dict[int, Record] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if line.strip():
+            r = Record.of(json.loads(line))
+            out[r.rva] = r
+    return out
+
+
+@dataclass(frozen=True)
+class Selection:
+    """Which functions of the population a targeted campaign runs (D-064): those an earlier campaign left with a primary
+    blocker among `blockers` (engine codes or their plan names) or in `families`, or in `states`; with `corpus`, also those
+    RVAs; with `regression`, also every function the earlier campaign matched. Empty: the whole population."""
+
+    blockers: frozenset[str] = frozenset()
+    families: frozenset[str] = frozenset()
+    states: frozenset[str] = frozenset()
+    corpus: frozenset[int] = frozenset()
+    regression: bool = False
+
+    def empty(self) -> bool:
+        return not (self.blockers or self.families or self.states or self.corpus or self.regression)
+
+    def takes(self, rva: int, r: Record | None) -> bool:
+        if rva in self.corpus:
+            return True
+        if r is None:
+            return False
+        if self.regression and r.state == tx.BYTE_MATCHED:
+            return True
+        b = r.blockers[0] if r.blockers else None
+        return (b is not None and (b in self.blockers or tx.name(b) in self.blockers or tx.family(b) in self.families)) or \
+            r.state in self.states
+
+
+def select(population: list[Target], earlier: dict[int, Record], sel: Selection) -> list[Target]:
+    """The population a targeted campaign runs; the whole one when nothing is selected."""
+    return list(population) if sel.empty() else [t for t in population if sel.takes(t.rva, earlier.get(t.rva))]
+
+
+def regressions(earlier: dict[int, Record], records: list[Record]) -> list[int]:
+    """Functions an earlier campaign matched that this one does not: a change must leave none."""
+    return sorted(r.rva for r in records if r.state != tx.BYTE_MATCHED and earlier.get(r.rva) is not None
+                  and earlier[r.rva].state == tx.BYTE_MATCHED)
+
+
 def summary(records: list[Record]) -> dict:
     """Counts only: states and primary blockers by function and by bytes, development and held-out apart."""
     def part(rs: list[Record]) -> dict:

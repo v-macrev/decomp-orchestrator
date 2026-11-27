@@ -86,6 +86,9 @@ class Layout:
 @dataclass
 class Pointee:
     members: dict[int, "Var"] = field(default_factory=dict)
+    #: what is accessed at an offset with another width than the member there, by (offset, width): a union's other member
+    #: or a part of a member; the layout leaves them out, a declared class names them (D-063)
+    other: dict[tuple[int, int], "Var"] = field(default_factory=dict)
     steps: set[int] = field(default_factory=set)
     link: "Pointee | None" = None
     number: int = 0
@@ -194,11 +197,23 @@ class Types:
         p.steps |= q.steps
         for off, v in sorted(q.members.items()):
             if off in p.members:
-                if self.find(p.members[off]).width != self.find(v).width:
-                    raise NotReconstructed("LAYOUT_CONFLICT")
-                self.unify(p.members[off], v)
+                self._place(p, off, v)
             else:
                 p.members[off] = v
+        for (off, _w), v in sorted(q.other.items()):
+            self._place(p, off, v)
+
+    def _place(self, p: Pointee, off: int, v: "Var") -> None:
+        """`v` accessed at `off` of `p`: the member there when the width is its own, else the other access of that width."""
+        w = self.find(v).width
+        if off not in p.members:
+            p.members[off] = v
+        elif self.find(p.members[off]).width == w:
+            self.unify(p.members[off], v)
+        elif (off, w) in p.other:
+            self.unify(p.other[(off, w)], v)
+        else:
+            p.other[(off, w)] = v
 
     def pointer(self, v: Var) -> Pointee:
         v = self.find(v)
@@ -213,9 +228,11 @@ class Types:
         p = self.target(p)
         if off in p.members:
             v = self.find(p.members[off])
-            if v.width != w:
-                raise NotReconstructed("LAYOUT_CONFLICT")
-            return v
+            if v.width == w:
+                return v
+            if (off, w) not in p.other:
+                p.other[(off, w)] = self.new(w)
+            return self.find(p.other[(off, w)])
         p.members[off] = self.new(w)
         return p.members[off]
 
@@ -543,8 +560,10 @@ class Types:
         end = 0
         for off in sorted(p.members):
             t = self.ctype(p.members[off])
-            if off < end or off < 0:
+            if off < 0:
                 raise NotReconstructed("LAYOUT_CONFLICT")
+            if off < end:
+                continue        # it lies across the one before: not a member of the layout, as an access of another width (D-063)
             size = t.width // 8
             if off % size:
                 raise NotReconstructed("MISALIGNED_MEMBER")

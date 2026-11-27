@@ -523,3 +523,81 @@ frame handler from its exception data, and 81 of the 84 development and held-out
 `unresolved-symbol` failed on that one name, which the project's public symbol map places. The engine's map now also carries
 the public map's entry for every name the candidate object references and its code does not, as upstream's comparator reads
 the repository map. Re-solved with this change, 79 of the 84 byte-match.
+
+## D-061 · 2026-11-27 · What a normal form shows of its calls is filed when the form is read back without it
+Since D-055 the callees and call sites are filed under their own code, and only an analysis that made a normal form wrote them;
+a form read back from the store had them read off in memory and dropped. No prewarm since had filed one, so every chunk's walk
+of the call graph decoded whole normal forms to learn what each function calls: a reload of every fact took 57 minutes and
+709,000 decodes, and the campaign paid the same per function. Such a form now has its callees and sites read off once and filed
+with it; a later program reads them and no form.
+
+## D-062 · 2026-11-27 · An object a function reaches in more than one way is declared as bytes and each access cast
+D-058 refused a function that read one object with two types, or read it and took its address (`LAYOUT_CONFLICT`): 24 of the
+31 development functions with that first blocker on the D-060 engine. Such an object is now declared as bytes
+(`extern "C" unsigned char Data_<rva>[];`) and each access written through a cast of its address
+(`*reinterpret_cast<T*>(Data_<rva>)`), which the compiler makes the same relocated access of. One declaration names one address.
+
+## D-063 · 2026-11-27 · A member accessed with two widths is two accesses, not a contradiction
+Type inference refused a pointee read at one offset with two widths, or with members that lie across each other
+(`LAYOUT_CONFLICT`): the other 7 development functions with that first blocker, before any source was written. C++ does this
+with a union or with part of a member. Inference now keeps one variable per offset and width; the inferred layout keeps the
+first and leaves out the others and any member across the one before. A member form names each access by the class's declared
+members (a union's members are declared at one offset); the generic unit writes an access its inferred layout has no member
+for through the bytes at its offset (`*reinterpret_cast<T*>(reinterpret_cast<unsigned char*>(p) + off)`).
+
+## D-064 · 2026-11-27 · A campaign may run a selection of an earlier one's functions; the full campaign stays the measure
+A change to how source is written (the emitter, the unit, the search) leaves the whole-program analysis as it is, and needs no
+full campaign to show what it moved: `campaign --from <earlier final.jsonl>` runs only the functions the earlier campaign left
+with a primary blocker among `--blockers` (engine codes or plan names) or of `--families`, or in `--states`, plus a `--corpus`
+of RVAs (a regression corpus kept privately), and with `--regression` every function it byte-matched. A run that loses any of
+those exits 1 and says how many. Nothing in a selected function's search, verification or comparator changes; the selection is
+of which functions run, never of what a run checks. The coverage reported is always a full campaign's: a targeted run is a
+development step, and an increment is recorded with the full campaign that measures it.
+
+## D-065 · 2026-11-27 · A diagnostic yields to the whole-program analysis
+The prewarm and the campaigns hold a lease (`analysis.lease`: process, what, since) in their store's directory while they run;
+a lease whose process has ended is no lease, and a second analysis that shares the store leaves the first lease as it is. A
+diagnostic (a probe, a measurement) that calls `workload.diagnostic(dir)` while a lease is held runs at the lowest priority on
+one processor, so that it cannot take more than that processor from the analysis. Nothing changes what is computed. A
+measurement of the analysis itself (D-066) is run when no lease is held, and says so.
+
+## D-066 · 2026-11-27 · The whole-program analysis is measured cold, warm and incremental, on a store of its own
+`recon profile` runs the prewarm's work over one deterministic sample of the pack's functions (spread evenly by address) three
+times, each in a fresh process: cold on an empty store, warm on what cold left, and incremental with the analysis namespace
+moved, as a change of the inference code moves it (normal forms and readings kept, every signature computed again). Each run
+reports wall and processor time, peak memory, the store's reads by kind (count, hits, seconds) and writes (count, new,
+seconds), the decoding of what is read, and the own time of each part of the analysis (normal forms, readings, the callers'
+index, the walk over components, fixpoints, signature inference, alternatives). With `--against` the cold run's facts are
+looked up in a knowledge store, read-only, under the same namespace, and any that differ fail the run: a sample recomputed
+from nothing must give the facts the full prewarm filed. The module is outside the analysis code's import closure, so
+measuring moves no namespace; it says whether an analysis held its lease while it ran (D-065).
+
+Measured on a sample of 32 functions (1,992 with what they call), D-061 engine against D-067 engine: cold 265 s and 263 s,
+86% of it making normal forms, which D-067 does not touch; warm 20.2 s and 5.4 s, the walk over components gone (14.6 s to 0);
+incremental 48.6 s and 35.7 s, the walk halved (26.0 s to 14.0 s), signature inference 13 to 14 s in both. Store reads and
+writes take under 4 s in every workload. The D-067 engine's cold facts, looked up in the full prewarm's store: every one
+there and equal (1,992 normal forms, readings, keys and signatures; 1,451 failed attempts).
+
+## D-067 · 2026-11-27 · A signature is filed with its key, and an unknown one with why
+The prewarm's counters showed what a reload costs: with a fresh program for each chunk of 256 functions, the 205 chunks done
+by the D-061 engine had computed 61,284 signatures and loaded 498,859, and read 558,374 callee lists. A signature is filed under
+a key that digests its component and its callees' keys, so reading one back meant walking every callee below it to compute
+that key again. Within a namespace the key is fixed by the facts, so it is now filed with the signature (`sigkey`, by the
+function's own key): the key of its component and the component's members. A program reads the whole component back at once,
+and a walk stops at any callee it finds filed. A component is never read back while one of its members is on the stack of a
+walk under way (another worker filed it meanwhile): that walk solves it as it found it. A store filed before gets the keys the
+first time a walk computes them. Keys are computed as before, so the facts of two namespaces of the same inputs compare key by
+key.
+
+The first form of this filed one function's key alone, and its validation against the D-060 engine's facts for the same
+inputs showed why that is wrong: no fact differed under a shared key, but 937 keys were new and 182 missing. Reading back one
+member of a cycle settled it alone; a later walk that reached another member then made a component of the rest, with a key
+of its own, computed again and filed by whichever worker came first. A component is read back whole since. An inference that ends without
+a signature now files the code it ended with (`attempt`); a program reads it back with the signature (`why_unknown`), so an
+unknown callee says why.
+
+## D-068 · 2026-11-27 · A function recorded only by its own placeholder is one the project has not named
+Of the 140 development functions the D-060 engine left at `CALLEE_NOT_DECLARED`, each refused exactly one callee; 24 of those
+are functions the project records by nothing but its placeholder name, 14 of them with no entry in the public map. Such a record
+names nothing: the member form calls the function by that placeholder, as D-054 calls any function the project has not named.
+One the public map names keeps its decorated name, which a placeholder declaration could not match.

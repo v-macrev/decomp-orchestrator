@@ -201,8 +201,9 @@ def test_the_address_of_an_object_the_project_has_not_named_is_its_byte_placehol
     assert u.prototypes == 'extern "C" unsigned char Data_5000[];\n' and u.data == (("Data_5000", 0x5000),)
     assert "5000" not in member_form(body, types, BASE, RVA, d).prototypes      # not an object of the image: a number
     both = A.Body((), I64, (A.Return(A.Binary("+", A.Num(BASE + 0x5000, I64), A.Cast(A.Global(BASE + 0x5000, ty.Int(32, True)), I64), I64)),))
-    with pytest.raises(NotReconstructed, match="LAYOUT_CONFLICT"):          # one object, two declarations
-        member_form(both, types, BASE, RVA, d, unnamed_data=lambda at: True)
+    m = member_form(both, types, BASE, RVA, d, unnamed_data=lambda at: True)     # one object, two ways: bytes and casts (D-062)
+    assert m.prototypes == 'extern "C" unsigned char Data_5000[];\n'
+    assert "return reinterpret_cast<long long>(Data_5000) + static_cast<long long>((*reinterpret_cast<int*>(Data_5000)));" in m.definition
 
 
 def test_a_function_no_exception_may_leave_is_declared_noexcept():
@@ -321,3 +322,32 @@ def test_the_public_symbol_map_is_read_by_name_with_its_addresses(tmp_path):
         {"schema": 1, "build_id": "b1", "symbols": {"__Handler": {"rva": 0x40, "size": 8}, "?Get@Box@@QEAAHXZ": {"rva": "0x80", "size": None}}}))
     assert public_symbols(tmp_path, "b1") == {"__Handler": (0x40, 8), "?Get@Box@@QEAAHXZ": (0x80, None)}
     assert public_symbols(tmp_path, "other") == {} and public_symbols(tmp_path, None) == {}
+
+
+def test_a_member_read_with_two_widths_is_two_declared_members_and_no_inferred_one():
+    """D-063: `p->member8` read as 64 and as 32 bits (a union, or part of a member) is not a contradiction; the declared
+    class names each access, and the inferred layout keeps only one of them."""
+    T, BASE, RVA, Asm, C, I, R, mem, adder, canonical, program, Declared, Member, member_form = _member_tests()
+    f = Asm(RVA)(T.load(R.RAX, mem(R.RCX, 8)))(I.create_reg_mem(C.MOV_R32_RM32, R.EDX, mem(R.RCX, 8)))(T.add_rr(R.RAX, R.RDX))(T.ret())
+    c = canonical(program(f))
+    U64, U32 = ty.Int(64, False), ty.Int(32, False)
+    d = Declared("Box", "Sum", (Member(8, "whole", U64), Member(8, "low", U32)))
+    text = member_form(c.body, c.types, BASE, RVA, d).definition
+    assert "this->whole" in text and "this->low" in text, text
+    (n,) = {t.to.number for t in [c.body.params[0].type] if isinstance(t, ty.Ptr) and isinstance(t.to, ty.Named)}
+    assert [m.offset for m in c.types.layout(n).members] == [8]
+
+def test_a_function_recorded_only_by_its_own_placeholder_is_not_named_unless_the_public_map_names_it():
+    """D-068: a record that gives a function nothing but its placeholder name names nothing; a public entry still does."""
+    pytest.importorskip("iced_x86", reason="needs the private venv (engine/recon/scripts/setup-venv.sh)")
+    from recon.adapters.skyrim.solve import named_addresses
+    from recon.adapters.x64_msvc.symbols import SymbolMap
+
+    s = SymbolMap()
+    s.add("Function1a0", 0x1A0, 16, "recorded")     # its own placeholder: not named
+    s.add("FUNCTION2B0", 0x2B0, 16, "recorded")     # the same, spelt in capitals
+    s.add("Function3c0", 0x3C0, 16, "recorded")     # its placeholder, and the public map names it
+    s.add("Function999", 0x4D0, 16, "recorded")     # another address's placeholder: a name like any other
+    s.add("Box::Get", 0x5E0, 16, "recorded")
+    named = named_addresses(s, {"?Function3c0@@YAHXZ": (0x3C0, 16)})
+    assert named == {0x3C0, 0x4D0, 0x5E0}

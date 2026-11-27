@@ -40,7 +40,8 @@ FN_CACHE = 4096
 #: what a program counts: *computed* is work done, *loaded* is work reused, `redundant` is work another worker had done first
 STATS = ("normal_computed", "normal_loaded", "normal_refused", "normal_evicted", "edges_loaded", "signature_computed",
          "signature_loaded", "signature_none", "scc_solved", "scc_cyclic", "scc_largest", "fixpoint_rounds", "fixpoint_resumed",
-         "declared", "nested_solve", "alternatives_computed", "alternatives_loaded", "callers_unindexed", "lease_waits", "redundant", "ir_nodes_analysed")
+         "declared", "nested_solve", "alternatives_computed", "alternatives_loaded", "callers_unindexed", "lease_waits", "redundant", "ir_nodes_analysed",
+         "readings_filed", "sigkey_loaded", "attempts_loaded")
 
 
 class Program:
@@ -76,6 +77,9 @@ class Program:
         self._edges: dict[int, tuple[int, ...]] = {}
         self._sites: dict[int, dict[str, list[dict]]] = {}
         self._sigs: dict[int, Signature | None] = {}
+        self._why: dict[int, str] = {}      # why a signature is None: the code its inference ended with
+        self._unfiled: set[int] = set()     # functions whose component this program found no filed key for
+        self._walks: list[set[int]] = []    # the functions on the stack of each walk under way
         self._sigkey: dict[int, str] = {}
         self._alts: dict[int, tuple[Signature, ...]] = {}
         self._callers: dict[int, tuple[int, ...]] | None = None
@@ -168,7 +172,8 @@ class Program:
     def edges(self, at: int) -> tuple[int, ...]:
         """The functions `at` calls directly, none when it has no normal form."""
         if at not in self._edges:
-            got = self._get("callees", self._key(at))
+            k = self._key(at)
+            got = self._get("callees", k)
             if got is not MISSING:
                 self.stats["edges_loaded"] += 1
                 self._edges[at] = tuple(got)
@@ -177,26 +182,42 @@ class Program:
                     self.normal(at)
                 except NotReconstructed:
                     pass
-                if at not in self._edges:   # read back from the store (another process analysed it): read them off the form
-                    f = self._fns.get(at)
-                    self._edges[at] = direct_callees(f) if isinstance(f, Fn) else ()
+                if at not in self._edges:   # the normal form was read back without what is read off it
+                    self._read_off(at, k)
         return self._edges[at]
 
     def sites(self, at: int) -> dict[str, list[dict]]:
         """What `at` shows of the calls it makes (see `call_sites`). Not kept in memory when a store holds them."""
-        if at not in self._sites:
-            got = self._get("sites", self._key(at))
-            if got is not MISSING:
-                return got
-            else:
-                try:
-                    self.normal(at)
-                except NotReconstructed:
-                    pass
-                if at not in self._sites:   # read back from the store without its sites: read them off the form
-                    f = self._fns.get(at)
-                    self._sites[at] = call_sites(f, self.conv) if isinstance(f, Fn) else {}
-        return self._sites[at]
+        if at in self._sites:
+            return self._sites[at]
+        k = self._key(at)
+        got = self._get("sites", k)
+        if got is not MISSING:
+            return got
+        try:
+            self.normal(at)
+        except NotReconstructed:
+            pass
+        if at in self._sites:
+            return self._sites[at]
+        return self._read_off(at, k)
+
+    def _read_off(self, at: int, k: str | None) -> dict[str, list[dict]]:
+        """What a normal form read back from the store shows of its calls, read off it and filed with it: a store that
+        holds the form but not these (they are filed under the code that reads them, D-055) gets them once, and no later
+        program reads the whole form again to learn what it calls (D-061)."""
+        f = self._fns.get(at)
+        edges = direct_callees(f) if isinstance(f, Fn) else ()
+        sites = call_sites(f, self.conv) if isinstance(f, Fn) else {}
+        self._edges[at] = edges
+        if self._store is not None and k is not None:
+            self.stats["readings_filed"] += 1
+            with self._store.transaction():
+                self._put("callees", k, list(edges))
+                self._put("sites", k, sites)
+        else:
+            self._sites[at] = sites
+        return sites
 
     def callee(self, target: Arg) -> Signature | None:
         return self.signature(target.value) if isinstance(target, Const) else None
@@ -246,11 +267,50 @@ class Program:
             if d is not None:
                 self.stats["declared"] += 1
                 self._sigs[at] = d[1]
-            else:
+            elif not self._filed(at):
                 # inside an inference every callee is solved already; one that is not is a callee the walk did not see
                 self.stats["nested_solve"] += self._inferring > 0
                 self._solve(at)
         return self._sigs[at]
+
+    def _filed(self, at: int) -> bool:
+        """Read back the signatures of the component of `at` by the key filed with them (D-067). A component's key is fixed
+        by the namespace's facts, so a program that finds it need not walk the callees again to compute it. The component
+        is read back whole, every member together, as the walk would solve it; never while one of its members is on the
+        stack of a walk under way (another worker filed it meanwhile), which then solves it as it found it."""
+        if self._store is None or at in self._unfiled:
+            return False
+        got = self._get("sigkey", self._key(at))
+        if not isinstance(got, dict):
+            self._unfiled.add(at)
+            return False
+        whole, members = got["whole"], [int(m) for m in got["members"]]
+        if any(m in walk for walk in self._walks for m in members):
+            return False
+        sigs = [self._get("signature", _digest(whole, m)) for m in members]
+        if MISSING in sigs:
+            self._unfiled.add(at)
+            return False
+        for m, sig in zip(members, sigs):
+            if m in self._sigs or m in self._assumed:
+                continue
+            self.stats["signature_loaded"] += 1
+            self.stats["sigkey_loaded"] += 1
+            self._sigkey[m], self._sigs[m] = _digest(whole, m), sig
+            if sig is None:
+                self._recall(m)
+        return True
+
+    def _recall(self, at: int) -> None:
+        why = self._get("attempt", self._sigkey[at])
+        if why is not MISSING:
+            self.stats["attempts_loaded"] += 1
+            self._why[at] = why
+
+    def why_unknown(self, at: int) -> str | None:
+        """Why the signature at `at` is None: the code its inference ended with, kept with it; None when the signature is
+        known or declared, or the reason was not kept."""
+        return self._why.get(at) if self.signature(at) is None else None
 
     def _settled(self, at: int) -> bool:
         return at in self._sigs or at in self._assumed or self._declared(at) is not None
@@ -263,35 +323,42 @@ class Program:
         on: set[int] = set()
         work: list[tuple[int, list[int]]] = []
 
+        def ready(c: int) -> bool:          # known, or filed: the walk does not go below it
+            return self._settled(c) or self._filed(c)
+
         def enter(v: int) -> None:
             index[v] = low[v] = len(index)
             stack.append(v)
             on.add(v)
-            work.append((v, [c for c in reversed(self.edges(v)) if not self._settled(c)]))
+            work.append((v, [c for c in reversed(self.edges(v)) if c in index or not ready(c)]))
 
-        enter(root)
-        while work:
-            v, todo = work[-1]
-            if todo:
-                c = todo.pop()
-                if c not in index:
-                    if not self._settled(c):
-                        enter(c)
-                elif c in on:
-                    low[v] = min(low[v], index[c])
-                continue
-            work.pop()
-            if work:
-                low[work[-1][0]] = min(low[work[-1][0]], low[v])
-            if low[v] == index[v]:
-                members = []
-                while True:
-                    w = stack.pop()
-                    on.discard(w)
-                    members.append(w)
-                    if w == v:
-                        break
-                self._component(sorted(members))
+        self._walks.append(on)
+        try:
+            enter(root)
+            while work:
+                v, todo = work[-1]
+                if todo:
+                    c = todo.pop()
+                    if c not in index:
+                        if not ready(c):
+                            enter(c)
+                    elif c in on:
+                        low[v] = min(low[v], index[c])
+                    continue
+                work.pop()
+                if work:
+                    low[work[-1][0]] = min(low[work[-1][0]], low[v])
+                if low[v] == index[v]:
+                    members = []
+                    while True:
+                        w = stack.pop()
+                        on.discard(w)
+                        members.append(w)
+                        if w == v:
+                            break
+                    self._component(sorted(members))
+        finally:
+            self._walks.remove(on)
 
     def _dependency(self, c: int) -> object:
         """What a caller's signature takes from callee `c`."""
@@ -315,6 +382,10 @@ class Program:
             if MISSING not in got:
                 self.stats["signature_loaded"] += len(members)
                 self._sigs.update(zip(members, got))
+                for m, g in zip(members, got):
+                    if g is None:
+                        self._recall(m)
+                self._file_keys(members, whole)    # a store filed before D-067 gets the keys once
                 return
             out = self._fixpoint(members, whole) if cyclic else {members[0]: self._infer_or_none(members[0])}
             self.stats["scc_solved"] += 1
@@ -324,12 +395,27 @@ class Program:
                 self.stats["signature_computed"] += 1
                 self.stats["signature_none"] += out[m] is None
                 self._sigs[m] = out[m]
+                if out[m] is None:
+                    self._why.setdefault(m, "CYCLE_UNSETTLED" if cyclic else "SIGNATURE_UNKNOWN")
+                    code = f"none_{self._why[m]}"
+                    self.stats[code] = self.stats.get(code, 0) + 1
             if whole is not None:
                 with self._store.transaction():   # type: ignore[union-attr]
                     for m in members:
                         self._put("signature", self._sigkey[m], out[m])
+                        self._put("sigkey", self._key(m), {"whole": whole, "members": members})
+                        if out[m] is None:
+                            self._put("attempt", self._sigkey[m], self._why[m])
                     if cyclic:
                         self._store.drop("fixpoint", whole)   # type: ignore[union-attr]
+
+    def _file_keys(self, members: list[int], whole: str) -> None:
+        """File the component's key with each member, unless the first member has it already."""
+        if self._get("sigkey", self._key(members[0])) is not MISSING:
+            return
+        with self._store.transaction():   # type: ignore[union-attr]
+            for m in members:
+                self._put("sigkey", self._key(m), {"whole": whole, "members": members})
 
     def _fixpoint(self, members: list[int], whole: str | None) -> dict[int, Signature | None]:
         """The members of a cycle, each inferred from what is assumed of all of them, until nothing changes. Every finished
@@ -366,9 +452,12 @@ class Program:
 
     def _infer_or_none(self, at: int) -> Signature | None:
         try:
-            return self._infer(at)
-        except NotReconstructed:
+            s = self._infer(at)
+        except NotReconstructed as e:
+            self._why[at] = e.code
             return None
+        self._why.pop(at, None)
+        return s
 
     def _resolver(self, fn: Fn) -> tuple[Callable[[Arg], Signature | None], dict]:
         """How `fn`'s calls are read: a direct callee by its signature; a call through a value read from a slot that holds
