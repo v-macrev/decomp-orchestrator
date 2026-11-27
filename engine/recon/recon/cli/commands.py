@@ -263,13 +263,21 @@ def cmd_campaign(args) -> int:
         return 2
     first, _dash, last = args.levels.partition("-")
     levels = range(int(first), int(last or first) + 1)
+    lane = _lane(args, (data / f"{args.name}.jsonl").is_file(), data, knowledge)
+    if lane is None:
+        return 2
+    with lane as plan:
+        return _campaign(args, cp, data, knowledge, levels, plan.workers)
+
+
+def _campaign(args, cp, data: Path, knowledge: Path, levels: range, jobs: int) -> int:
     inv = load_inventory(args.worktree)
     startable = {}
     for c in json.loads(Path(args.next).read_text(encoding="utf-8"))["candidates"]:
         startable[int(c["rva"], 16) if isinstance(c["rva"], str) else int(c["rva"])] = c
     solve_set = frozenset(json.loads(Path(args.solve_set).read_text(encoding="utf-8"))) if args.solve_set else frozenset()
     population = [t for t in inv.unmatched() if t.rva in solve_set or (t.rva in startable and startable[t.rva].get("unit_exists") and t.size <= args.max_bytes)]
-    records = cp.run(population, startable, Path(args.worktree), Path(args.checkout), data, args.name, solve_set, args.jobs, str(knowledge), levels,
+    records = cp.run(population, startable, Path(args.worktree), Path(args.checkout), data, args.name, solve_set, jobs, str(knowledge), levels,
                      log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every)
     cp.write(records, data, args.name)
     report = {"population": len(population), "solve_set": len(solve_set), "recorded": len(records), "levels": [levels.start, levels.stop - 1],
@@ -279,6 +287,20 @@ def cmd_campaign(args) -> int:
     return 0
 
 
+def _lane(args, resumed: bool, *paths: Path):
+    """The compute lane a heavy command runs in (C8, `core/lanes.py`): entered for the run, or None (refused, said on stderr).
+    Only a run that writes the authoritative store may name the authoritative lane."""
+    from recon.core import lanes
+
+    root = lanes.root_of(args.checkout)
+    lane = lanes.auto(root, *paths) if args.lane == "auto" else args.lane
+    if lane == lanes.AUTHORITATIVE and lanes.auto(root, *paths) != lanes.AUTHORITATIVE:
+        print("the authoritative lane is for runs on the authoritative store only (WORKSTREAMS.md section 5)", file=sys.stderr)
+        return None
+    return lanes.enter(lane, root, args.jobs, what=f"{args.cmd} {getattr(args, name, )}".strip(), resumed=resumed,
+                       log=lambda s: print(s, file=sys.stderr, flush=True))
+
+
 def cmd_prewarm(args) -> int:
     """The whole-program analysis into the knowledge store (private): counts and times on stdout, progress on stderr."""
     from recon.adapters.skyrim import prewarm as pw
@@ -286,8 +308,12 @@ def cmd_prewarm(args) -> int:
     if ".local" not in Path(args.knowledge).resolve().parts:
         print("the knowledge store is derived from the image: --knowledge must be under a .local directory", file=sys.stderr)
         return 2
-    report = pw.run(Path(args.worktree), Path(args.checkout), str(args.knowledge), args.jobs,
-                    log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every, phases=tuple(args.phases.split(",")))
+    lane = _lane(args, False, Path(args.knowledge))
+    if lane is None:
+        return 2
+    with lane as plan:
+        report = pw.run(Path(args.worktree), Path(args.checkout), str(args.knowledge), plan.workers,
+                        log=lambda s: print(s, file=sys.stderr, flush=True), every_s=args.every, phases=tuple(args.phases.split(",")))
     print(json.dumps(report, indent=1, sort_keys=True))
     return 0
 

@@ -163,12 +163,16 @@ def main(argv: list[str] | None = None) -> int:
     cg.add_argument("--levels", default="0-5", help="the budget levels to run, FIRST-LAST (each resumes from the one below)")
     cg.add_argument("--knowledge", help="the knowledge store (default: knowledge.db under --data)")
     cg.add_argument("--every", type=float, default=60.0, help="seconds between progress lines")
+    cg.add_argument("--lane", choices=("auto", "authoritative", "heavy"), default="auto",
+                    help="compute lane (WORKSTREAMS.md section 5); auto: authoritative on the phase7 store, development-heavy otherwise")
     pw = sub.add_parser("prewarm", help="the whole-program analysis, kept in the knowledge store: counts and times")
     common(pw, with_select=False)
     pw.add_argument("--knowledge", required=True, help="the knowledge store, under a .local directory")
     pw.add_argument("--jobs", type=int, default=1, help="at most this many workers; fewer while memory is short")
     pw.add_argument("--every", type=float, default=60.0)
     pw.add_argument("--phases", default="normal,signature", help="normal (normal forms and calls) and/or signature (callers, signatures)")
+    pw.add_argument("--lane", choices=("auto", "authoritative", "heavy"), default="auto",
+                    help="compute lane (WORKSTREAMS.md section 5); auto: authoritative on the phase7 store, development-heavy otherwise")
     ce = sub.add_parser("ceiling", help="the early ceiling estimate over a stratified sample of startable development functions: counts")
     common(ce, with_select=False)
     ce.add_argument("--next", required=True, help="the JSON of `sr next --offline`")
