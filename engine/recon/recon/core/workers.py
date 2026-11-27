@@ -22,6 +22,8 @@ from multiprocessing.connection import Connection, wait
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
+from recon.core import lanes
+
 GIB = 1 << 30
 
 
@@ -105,6 +107,15 @@ class Pool:
         self.total = m[1] if m else 0
         self.reserve = reserve if reserve is not None else (max(2 * GIB, self.total // 4) if m else 0)
         self.share, self.step_s, self.log, self.long_s = share, step_s, log, long_s
+        # the compute lane this process runs in (`core/lanes.py`): it lowers the limit and the cap, never raises them
+        self.lane = lanes.current()
+        self.cap: int | None = None
+        if self.lane is not None:
+            plan, _root = self.lane
+            self.most = min(self.most, plan.workers)
+            self.cap = plan.cap
+            if reserve is None and plan.reserve is not None:
+                self.reserve = max(self.reserve, plan.reserve)
         self.allowed = 1
         self.ctx = mp.get_context("spawn")
         self.workers: list[_Worker] = []
@@ -137,6 +148,10 @@ class Pool:
         if now - self._last < self.step_s:
             return
         self._last = now
+        most = self._most()
+        if most < self.allowed:                        # an authoritative lease that appeared lowers a development run
+            self.allowed = most
+            self.log(f"workers: the {self.lane[0].lane if self.lane else ''} lane allows {most} now; at most {self.allowed}")
         m = meminfo()
         if m is None:
             return
@@ -145,10 +160,14 @@ class Pool:
         if avail < self.reserve and self.allowed > 1:
             self.allowed -= 1
             self.log(f"workers: memory available {avail // (1 << 20)} MiB is below the reserve; at most {self.allowed}")
-        elif pending > len(self.workers) and self.allowed < self.most and avail - self.reserve > 1.5 * per and len(self.workers) == self.allowed:
+        elif pending > len(self.workers) and self.allowed < most and avail - self.reserve > 1.5 * per and len(self.workers) == self.allowed:
             self.allowed += 1
             self.stats.grew.append((round(now, 1), self.allowed))
             self.log(f"workers: memory available {avail // (1 << 20)} MiB, a worker takes up to {per // (1 << 20)} MiB; at most {self.allowed}")
+
+    def _most(self) -> int:
+        """The workers allowed now: the request, lowered by the lane (which follows the authoritative lease)."""
+        return self.most if self.lane is None else min(self.most, lanes.limit(*self.lane))
 
     def _note_long(self) -> None:
         """A task that has run `long_s`, then twice as long, and so on, is reported with the worker's stack (on POSIX the
@@ -213,7 +232,7 @@ class Pool:
                     task, w.task = w.task, None
                     w.rss, w.peak = rss, peak
                     self.stats.largest = max(self.stats.largest, peak)
-                    if self.total and rss > self.share * self.total:
+                    if self.total and rss > self.share * self.total or self.cap is not None and rss > self.cap:
                         w.retiring = True
                     done(task, kind, value, {"ms": int(1000 * (time.monotonic() - w.since)), "rss": rss, "peak": peak,
                                               "workers": len(self.workers)})
