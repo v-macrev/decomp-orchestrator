@@ -14,6 +14,8 @@ from recon.adapters.x64_msvc import program as pg  # noqa: E402
 from recon.adapters.x64_msvc.abi import CALLING, SOURCE  # noqa: E402
 from recon.core.inference import lower as lw  # noqa: E402
 from recon.core.inference import signature as sg  # noqa: E402
+from recon.core.inference import evidence as ev  # noqa: E402
+from recon.core.inference import sites as sg_sites  # noqa: E402
 from recon.core.inference.explain import explain, through_tail  # noqa: E402
 from recon.core.inference.signature import NotReconstructed, Signature, Slot  # noqa: E402
 from recon.core.inference.whole import Program  # noqa: E402
@@ -117,3 +119,49 @@ def test_the_interface_is_refused_for_what_does_decide_the_parameters():
     fn = p.normal(BASE + RVA)
     with pytest.raises(NotReconstructed, match="CALLEE_SIGNATURE_UNKNOWN"):
         lw.interface(fn, p.conv, p.abi, p.callee, None)
+
+
+# ------------------------------------------------------------------------------------ signatures from call sites
+
+def site(set_=(), reads=(), left=()):
+    return {"set": sorted([list(x) for x in set_]), "reads": sorted([list(x) for x in reads]), "left": sorted(left)}
+
+
+def test_call_sites_agreeing_give_a_constrained_signature_with_their_widest_widths():
+    s, status = ev.from_sites([site([("rcx", 64), ("rdx", 32)], [("rax", 32)]), site([("rcx", 0), ("rdx", 8)])], SOURCE)
+    assert status == ev.CONSTRAINED
+    assert s.params == (Slot("i", 64), Slot("i", 32)) and s.result == Slot("i", 32)
+    assert ("sites", "2") in s.evidence and ("status", "constrained") in s.evidence
+
+
+def test_a_position_before_one_that_is_set_is_passed_and_a_constant_fits_any_width():
+    s, _ = ev.from_sites([site([("r8", 0)])], SOURCE)
+    assert s.params == (Slot("i", 64), Slot("i", 64), Slot("i", 64)) and s.result is None
+    s, _ = ev.from_sites([site([("xmm1", 32)], [("xmm0", 128)])], SOURCE)
+    assert s.params == (Slot("i", 64), Slot("f", 32)) and s.result == Slot("f", 64)
+
+
+def test_call_sites_that_disagree_contradict_and_give_no_signature():
+    passes_two = site([("rcx", 64), ("rdx", 64)])
+    assert ev.from_sites([passes_two, site([("rcx", 64)], left=["rdx", "xmm1"])], SOURCE) == (None, ev.CONTRADICTED)
+    assert ev.from_sites([site([("rcx", 64)]), site([("xmm0", 64)])], SOURCE) == (None, ev.CONTRADICTED)
+    assert ev.from_sites([site(reads=[("rax", 64)]), site(reads=[("xmm0", 64)])], SOURCE) == (None, ev.CONTRADICTED)
+    # a caller that leaves a position no other caller sets says nothing against it
+    s, status = ev.from_sites([site([("rcx", 64)]), site([("rcx", 64)], left=["rdx", "xmm1"])], SOURCE)
+    assert status == ev.CONSTRAINED and len(s.params) == 1
+    assert ev.from_sites([], SOURCE) == (None, "")
+
+
+def test_a_call_site_says_which_argument_locations_an_earlier_call_left():
+    callee = Asm(0x6000)(T.ret())
+    g = Asm(0x3000)(T.sub_rsp(40))                     # g(): a(5, 7); b(3) with what a left in rdx
+    g(I.create_reg_i32(C.MOV_R32_IMM32, R.ECX, 5))(I.create_reg_i32(C.MOV_R32_IMM32, R.EDX, 7))
+    g.branch(C.CALL_REL32_64, 0x5000)
+    g(I.create_reg_i32(C.MOV_R32_IMM32, R.ECX, 3)).branch(C.CALL_REL32_64, 0x6000)
+    g(T.add_rsp(40))(T.ret())
+    sites = sg_sites.call_sites(program(callee, g).normal(BASE + 0x3000), SOURCE)
+    first, second = sites[str(BASE + 0x5000)][0], sites[str(BASE + 0x6000)][0]
+    assert first["set"] == [["rcx", 0], ["rdx", 0]] and first["left"] == []    # entry values, passed on: neither
+    assert second["set"] == [["rcx", 0]] and "rdx" in second["left"] and "r8" in second["left"]
+    s, status = ev.from_sites([second], SOURCE)
+    assert status == ev.CONSTRAINED and s.params == (Slot("i", 64),)
