@@ -14,8 +14,10 @@ from typing import Callable, Iterable, Iterator
 
 from recon.core import budget
 from recon.core.analysis.dataflow import Abi
+from recon.core.inference import evidence as ev
 from recon.core.inference import lower as lw
 from recon.core.inference import signature as sg
+from recon.core.inference.callsites import call_evidence
 from recon.core.inference.signature import INT, Convention, NotReconstructed, Signature, Slot
 from recon.core.inference.sites import call_sites, direct_callees, indirect_signatures
 from recon.core.ir.model import Arg, Const, Fn, Op
@@ -41,7 +43,8 @@ FN_CACHE = 4096
 STATS = ("normal_computed", "normal_loaded", "normal_refused", "normal_evicted", "edges_loaded", "signature_computed",
          "signature_loaded", "signature_none", "scc_solved", "scc_cyclic", "scc_largest", "fixpoint_rounds", "fixpoint_resumed",
          "declared", "nested_solve", "alternatives_computed", "alternatives_loaded", "callers_unindexed", "lease_waits", "redundant", "ir_nodes_analysed",
-         "readings_filed", "sigkey_loaded", "attempts_loaded")
+         "readings_filed", "sigkey_loaded", "attempts_loaded", "signature_from_sites", "signature_contradicted", "evidence_computed",
+         "evidence_loaded")
 
 
 class Program:
@@ -56,7 +59,9 @@ class Program:
 
     Callers' evidence runs the other way (`alternatives`): what callers set before a call and read after it gives readings
     of a callee's signature its own code leaves open. They are kept as alternatives for the search to try, never chosen in
-    place of what the callee's own code says, so the bottom-up analysis stays a function of the callees alone."""
+    place of what the callee's own code says. Only a function its own code gives no signature at all is read from its call
+    sites (D8-002, `_fall_back`), and that reading is kept under a key of its callers' keys, so it changes exactly when one
+    of them does."""
 
     def __init__(self, normal: Callable[[int], Fn], conv: Convention, abi: Abi, base: int, image: Callable[[int, int], "bytes | None"],
                  constant: Callable[[int, int], "int | None"], declared: Callable[[int], "tuple[str, Signature] | None"] = lambda at: None,
@@ -83,6 +88,7 @@ class Program:
         self._sigkey: dict[int, str] = {}
         self._alts: dict[int, tuple[Signature, ...]] = {}
         self._callers: dict[int, tuple[int, ...]] | None = None
+        self._ukey: object = MISSING        # the key of the index of callers, once computed
         self._assumed: dict[int, Signature | None] = {}     # members of the cycle being solved
         self._inferring = 0
         self._start = Signature((), Slot(INT, 64))
@@ -231,8 +237,10 @@ class Program:
     def _universe_key(self) -> str | None:
         if self._universe is None:
             return None
-        keys = [(a, self._key(a)) for a in sorted(self._universe())]
-        return None if any(k is None for _a, k in keys) else _digest("callers", tuple(keys))
+        if self._ukey is MISSING:
+            keys = [(a, self._key(a)) for a in sorted(self._universe())]
+            self._ukey = None if any(k is None for _a, k in keys) else _digest("callers", tuple(keys))
+        return self._ukey
 
     def index_callers(self) -> int:
         """The callers of every function of the universe: every function's normal form is read (or analysed) once. Kept,
@@ -280,7 +288,7 @@ class Program:
         stack of a walk under way (another worker filed it meanwhile), which then solves it as it found it."""
         if self._store is None or at in self._unfiled:
             return False
-        got = self._get("sigkey", self._key(at))
+        got = self._get("sigkey", self._filing(at))
         if not isinstance(got, dict):
             self._unfiled.add(at)
             return False
@@ -299,6 +307,7 @@ class Program:
             self._sigkey[m], self._sigs[m] = _digest(whole, m), sig
             if sig is None:
                 self._recall(m)
+                self._fall_back(m)
         return True
 
     def _recall(self, at: int) -> None:
@@ -386,6 +395,9 @@ class Program:
                     if g is None:
                         self._recall(m)
                 self._file_keys(members, whole)    # a store filed before D-067 gets the keys once
+                for m, g in zip(members, got):
+                    if g is None:
+                        self._fall_back(m)
                 return
             out = self._fixpoint(members, whole) if cyclic else {members[0]: self._infer_or_none(members[0])}
             self.stats["scc_solved"] += 1
@@ -393,29 +405,97 @@ class Program:
             self.stats["scc_largest"] = max(self.stats["scc_largest"], len(members))
             for m in members:
                 self.stats["signature_computed"] += 1
-                self.stats["signature_none"] += out[m] is None
                 self._sigs[m] = out[m]
                 if out[m] is None:
                     self._why.setdefault(m, "CYCLE_UNSETTLED" if cyclic else "SIGNATURE_UNKNOWN")
-                    code = f"none_{self._why[m]}"
-                    self.stats[code] = self.stats.get(code, 0) + 1
             if whole is not None:
                 with self._store.transaction():   # type: ignore[union-attr]
                     for m in members:
                         self._put("signature", self._sigkey[m], out[m])
-                        self._put("sigkey", self._key(m), {"whole": whole, "members": members})
+                        self._put("sigkey", self._filing(m), {"whole": whole, "members": members})
                         if out[m] is None:
                             self._put("attempt", self._sigkey[m], self._why[m])
                     if cyclic:
                         self._store.drop("fixpoint", whole)   # type: ignore[union-attr]
+            for m in members:
+                if out[m] is None:
+                    self._fall_back(m)
+                self.stats["signature_none"] += self._sigs[m] is None
+                if self._sigs[m] is None:
+                    code = f"none_{self._why[m]}"
+                    self.stats[code] = self.stats.get(code, 0) + 1
 
     def _file_keys(self, members: list[int], whole: str) -> None:
         """File the component's key with each member, unless the first member has it already."""
-        if self._get("sigkey", self._key(members[0])) is not MISSING:
+        if self._get("sigkey", self._filing(members[0])) is not MISSING:
             return
         with self._store.transaction():   # type: ignore[union-attr]
             for m in members:
-                self._put("sigkey", self._key(m), {"whole": whole, "members": members})
+                self._put("sigkey", self._filing(m), {"whole": whole, "members": members})
+
+    # -- signatures read from call sites (D8-002) ---------------------------------------------------
+    def _filing(self, at: int) -> str | None:
+        """The key a component's key is filed under for `at` (D-067). A signature read from call sites depends on the index
+        of callers, and so does every signature above it, through the keys of its callees; the namespace's facts fix the
+        key only together with that index, so a program with an index files and reads under it."""
+        k = self._key(at)
+        if k is None or self.callers(at) is None:
+            return k
+        return _digest("sigkey", k, self._universe_key())
+
+    def _callers_key(self, at: int) -> tuple | None:
+        """The callers of `at` with their keys, or None when they are not indexed or one of them is not to be kept."""
+        cs = self.callers(at)
+        if cs is None:
+            return None
+        keys = tuple((c, self._key(c)) for c in cs)
+        return None if any(k is None for _c, k in keys) else keys
+
+    def _evidence(self, at: int) -> dict:
+        """What the calls `at` makes show of their callees (`call_evidence`), computed once and kept with the analysis."""
+        k = self._key(at)
+        got = self._get("evidence", k)
+        if got is not MISSING:
+            self.stats["evidence_loaded"] += 1
+            return got
+        try:
+            out = call_evidence(self.normal(at), self.conv)
+        except NotReconstructed:
+            out = {}
+        self.stats["evidence_computed"] += 1
+        self._put("evidence", k, out)
+        return out
+
+    def _from_callers(self, at: int) -> Signature | None:
+        """The signature the direct callers of `at` agree on at their call sites; None when there are none, they say
+        nothing, or they disagree (`evidence.from_sites`)."""
+        cs = self.callers(at)
+        if not cs:
+            return None
+        sites = [s for c in cs for s in self._evidence(c).get(str(at), [])]
+        sig, status = ev.from_sites(sites, self.conv)
+        self.stats["signature_contradicted"] += status == ev.CONTRADICTED
+        return sig
+
+    def _fall_back(self, at: int) -> None:
+        """When `at`'s own code gives no signature, read one from its call sites. Kept under its own key, the own reading's
+        key with the callers' keys, so it changes exactly when a caller does; and the functions above take that key as
+        their callee's. A signature its own code gives never depends on its callers."""
+        if self._declared(at) is not None or self.callers(at) is None:
+            return
+        callers = self._callers_key(at)
+        key = _digest(self._sigkey[at], "callers", callers) if at in self._sigkey and callers is not None else None
+        got = self._get("signature", key)
+        if got is MISSING:
+            got = self._from_callers(at)
+            self._put("signature", key, got)
+        else:
+            self.stats["signature_loaded"] += 1
+        if got is not None:
+            self.stats["signature_from_sites"] += 1
+            self._sigs[at] = got
+            if key is not None:
+                self._sigkey[at] = key
 
     def _fixpoint(self, members: list[int], whole: str | None) -> dict[int, Signature | None]:
         """The members of a cycle, each inferred from what is assumed of all of them, until nothing changes. Every finished
@@ -496,7 +576,7 @@ class Program:
             if k >= len(results):
                 raise NotReconstructed("RESULT_READING_ABSENT")
             result, why = results[k]
-            _low, slots = lw.lower(fn, self.conv, self.abi, resolve, result)
+            slots = lw.interface(fn, self.conv, self.abi, resolve, result)     # the body is not asked for (D8-004)
         finally:
             self._inferring -= 1
         return Signature(slots, result, (("result", why.value),) + ((("indirect-calls", "SITE"),) if through else ()))
