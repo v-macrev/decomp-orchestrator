@@ -168,7 +168,8 @@ def run(a) -> int:
     sizes = {int(k): v for k, v in pop["sizes"].items()}
     rvas = sorted(set(pop["corpus"]) | set(pop["sample"]))
     startable = _startable(Path(a.next))
-    data = Path(a.data)
+    data = Path(a.data).resolve()              # the compiler runs in the upstream worktree: a relative path would name
+    a.store = str(Path(a.store).resolve())     # a directory there (C1083 on every class-facts probe)
     data.mkdir(parents=True, exist_ok=True)
     journal = data / "p12.jsonl"
     latest = _latest(journal)
