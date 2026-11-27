@@ -601,3 +601,16 @@ Of the 140 development functions the D-060 engine left at `CALLEE_NOT_DECLARED`,
 are functions the project records by nothing but its placeholder name, 14 of them with no entry in the public map. Such a record
 names nothing: the member form calls the function by that placeholder, as D-054 calls any function the project has not named.
 One the public map names keeps its decorated name, which a placeholder declaration could not match.
+
+## D-069 · 2026-11-27 · A result a call site shows is one the caller really uses
+Of the 702 development functions the D-068 engine left at `CALLEE_SIGNATURE_UNKNOWN`, the unknown callees led down to 228
+functions whose own inference ended at `READS_A_LOCATION_NOBODY_SET`, under 564 of the 702. In 182 of them the location was
+the integer result of a call through a value whose site was read as returning a floating value: the floating result location
+was "used" only by merges (every location's value meets the others' at one, used or not) and by later calls that list every
+argument location with whatever it holds, while the integer result was really used. A call site's result, through a value
+(`indirect_signatures`) and as callers' evidence for a direct callee (`call_sites`), now counts only a real use
+(`really_used`): an operation that computes with the value or calls through it, a branch on it, an argument the caller puts
+there of its own, or a merge whose value is really used. A merge of what calls left in one result location with nothing the
+caller set is left there too (`caller_set`), as a result left where the call put it already was. Measured: unknown signatures
+ended by their own reading at `READS_A_LOCATION_NOBODY_SET` 1,815 -> 1,072; development functions at `CALLEE_SIGNATURE_UNKNOWN`
+702 -> 664 (held-out 26 -> 24); the byte-matched functions the same 99 + 10.

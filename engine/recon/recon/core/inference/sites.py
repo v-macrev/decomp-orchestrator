@@ -71,6 +71,18 @@ def caller_set(fn: Fn, conv: Convention, d: dict) -> Callable[[Arg, str], bool]:
             if u not in own:
                 own.add(u)
                 work.append(u)
+    # a merge of what calls left in one result location with nothing the caller set is left there too (D-069)
+    merges = {v: [a for _k, a in o.args] for v, o in d.items() if o is not None and not isinstance(o, Op)}
+    changed = True
+    while changed:
+        changed = False
+        for v, args in merges.items():
+            if v in placed:
+                continue
+            locs = {placed[a] for a in args if isinstance(a, int) and a in placed}
+            if len(locs) == 1 and all(isinstance(a, int) and (a in placed or a not in own or a == v) for a in args):
+                placed[v] = locs.pop()
+                changed = True
     return lambda v, at: isinstance(v, Const) or (isinstance(v, int) and v in own and placed.get(v) != at)
 
 
@@ -78,15 +90,11 @@ def call_sites(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
     """What a caller's normal form shows of each call it makes (tails are left out: what they pass is the caller's own).
 
     Per call: `set`, the argument locations the caller puts a value of its own in, with the value's width; `reads`, the
-    result locations whose value it uses after the call, with the width. A location it merely passes on from its own entry is
+    result locations whose value it really uses after the call (`really_used`), with the width. A location it merely passes on from its own entry is
     not set: it may be an argument of the caller that the callee ignores."""
     d = {v: o for v, (_b, o) in fn.defining().items()}
     own = caller_set(fn, conv, d)
-    uses: dict[int, int] = {}          # a value that only reaches a return may merely have been left there: not a use
-    for b in fn.blocks:
-        for a in [a for o in b.ops for a in o.args] + [a for p in b.phis for _k, a in p.args] + (list(b.term.args) if b.term.kind != "return" else []):
-            if isinstance(a, int):
-                uses[a] = uses.get(a, 0) + 1
+    used = really_used(fn, own)
     out: dict[str, list[dict]] = {}
     for b in fn.blocks:
         for o in b.ops:
@@ -99,7 +107,7 @@ def call_sites(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
                 elif own(v, n):
                     put.append([n, computed_width(fn, d, v)])
             reads = [[n, fn.width(v)] for n, v in zip(o.attr("defs") or (), o.defs)  # type: ignore[call-overload]
-                     if n in (conv.result_int, conv.result_float) and uses.get(v, 0)]
+                     if n in (conv.result_int, conv.result_float) and v in used]
             out.setdefault(str(o.args[0].value), []).append({"set": sorted(put), "reads": sorted(reads)})
     return out
 
@@ -110,6 +118,39 @@ def _int_slot(w: int) -> Slot:
 
 def _float_slot(w: int) -> Slot:
     return Slot(sg.FLOAT, 32 if w == 32 else 64)
+
+
+def really_used(fn: Fn, own: Callable[[Arg, str], bool]) -> set[int]:
+    """The values something really uses (D-069): an operation that computes with it or calls through it, a branch on it,
+    an argument the caller puts there of its own (`caller_set`), or a merge whose value is really used (the least fixed
+    point). Not a merge nothing really uses: every location's value meets the others' at a merge, used or not. Not an
+    argument location a later call lists with whatever it holds. Not a return: a value that only reaches one may merely
+    have been left there."""
+    out: set[int] = set()
+    merged_from: dict[int, list[int]] = {}
+    for b in fn.blocks:
+        for o in (*b.ops, b.term):
+            if o.kind == "return":
+                continue
+            names = o.attr("args") or () if o.kind in ("call", "tail") else ()
+            for k, a in enumerate(o.args):
+                if not isinstance(a, int):
+                    continue
+                if o.kind in ("call", "tail") and k > 0:
+                    if k - 1 < len(names) and own(a, names[k - 1]):  # type: ignore[arg-type]
+                        out.add(a)
+                else:
+                    out.add(a)
+        for p in b.phis:
+            merged_from[p.id] = [a for _k, a in p.args if isinstance(a, int)]
+    work = [v for v in out if v in merged_from]
+    while work:
+        for a in merged_from[work.pop()]:
+            if a not in out:
+                out.add(a)
+                if a in merged_from:
+                    work.append(a)
+    return out
 
 
 def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
@@ -123,11 +164,7 @@ def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
     rather than being read as taking nothing and returning nothing (D-051)."""
     d = {v: o for v, (_b, o) in fn.defining().items()}
     own = caller_set(fn, conv, d)
-    uses: dict[int, int] = {}          # a value that only reaches a return may merely have been left there: not a use
-    for b in fn.blocks:
-        for a in [a for o in b.ops for a in o.args] + [a for p in b.phis for _k, a in p.args] + (list(b.term.args) if b.term.kind != "return" else []):
-            if isinstance(a, int):
-                uses[a] = uses.get(a, 0) + 1
+    used = really_used(fn, own)
 
     def width(v: Arg) -> int:
         return computed_width(fn, d, v)
@@ -149,12 +186,12 @@ def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
                     slots.append(Slot(INT, 64))      # passed on from the caller's own entry
             result = None
             back = dict(zip(o.attr("defs") or (), o.defs))  # type: ignore[call-overload]
-            if conv.result_float in back and uses.get(back[conv.result_float], 0):
+            if conv.result_float in back and back[conv.result_float] in used:
                 result = _float_slot(fn.width(back[conv.result_float]))
-            elif conv.result_int in back and uses.get(back[conv.result_int], 0):
+            elif conv.result_int in back and back[conv.result_int] in used:
                 result = _int_slot(fn.width(back[conv.result_int]))
             out[o.args[0]] = Signature(tuple(slots), result, (("indirect", "SITE"),))
     return out
 
 
-__all__ = ["call_sites", "caller_set", "computed_width", "direct_callees", "indirect_signatures"]
+__all__ = ["call_sites", "caller_set", "computed_width", "direct_callees", "indirect_signatures", "really_used"]

@@ -381,6 +381,10 @@ D-068:            by upstream's comparator; none of the earlier 98 lost. Of the 
                   CALLEE_NOT_DECLARED first. LAYOUT_CONTRADICTION 30 -> 1, CALLEE_NOT_DECLARED 134 -> 125, MISMATCH 46 -> 63
                   (compiled and compared: the frontier), CLASS_NOT_DECLARED 212 -> 217 and MEMBER_NOT_DECLARED 245 -> 251 (what
                   the moved functions stop at next)
+D-069:            campaign 27 min with 3 workers: CALLEE_SIGNATURE_UNKNOWN 702 -> 664 (held-out 26 -> 24); BYTE_MATCHED 99 + 10,
+                  the same functions, none lost or won. The freed functions stop next at CONSTRUCT_UNSUPPORTED 63 -> 74,
+                  LOCAL_IN_MEMORY 32 -> 43, READS_A_LOCATION_NOBODY_SET 100 -> 110. Unknown signatures by reason of their own:
+                  READS_A_LOCATION_NOBODY_SET 1,815 -> 1,072
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 

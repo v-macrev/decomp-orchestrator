@@ -606,3 +606,28 @@ def test_a_cycle_read_back_by_its_filed_key_is_read_back_whole_and_gets_no_secon
     assert BASE + b.rva in later._sigs and later.stats["sigkey_loaded"] == 2
     assert later.signature(BASE + r.rva) == want[2] and later.stats["edges_loaded"] <= 1
     assert store.keys("signature") == keys and store.count("signature") == 3
+
+
+def test_a_call_through_a_value_returns_what_the_caller_really_uses_after_it():
+    """D-069: g(): x = (*slot)(); h(x). The first call's floating result location is listed at the second call with
+    whatever it holds, which the caller never set; only the integer result is used, moved into h's first argument."""
+    g = Asm(0x3000)(T.sub_rsp(40))(I.create_mem(C.CALL_RM64, mem(R.RIP, BASE + 0x9000)))
+    g(I.create_reg_reg(C.MOV_R32_RM32, R.ECX, R.EAX))
+    g.branch(C.CALL_REL32_64, 0x6000)
+    g(T.add_rsp(40))(T.ret())
+    (sig,) = cd.indirect_signatures(program(g).normal(BASE + 0x3000), SOURCE).values()
+    assert sig.result is not None and sig.result.kind == INT
+
+
+def test_a_call_through_a_value_whose_results_only_reach_merges_returns_nothing():
+    """D-069: what a call leaves that only meets other paths at a merge, and is used by nothing after, is no result."""
+    g = Asm(0x3000)(T.sub_rsp(40))
+    g(I.create_reg_reg(C.TEST_RM64_R64, R.RCX, R.RCX))
+    g.branch(C.JE_REL32_64, "skip")
+    g(I.create_mem(C.CALL_RM64, mem(R.RIP, BASE + 0x9000)))
+    g.label("skip")
+    g.branch(C.CALL_REL32_64, 0x6000)
+    g(T.add_rsp(40))(T.ret())
+    (sig,) = cd.indirect_signatures(program(g).normal(BASE + 0x3000), SOURCE).values()
+    assert sig.result is None
+
