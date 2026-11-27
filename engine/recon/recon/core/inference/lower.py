@@ -11,6 +11,7 @@ from dataclasses import replace
 
 from recon.core.analysis import graph
 from recon.core.inference.signature import FLOAT, INT, CalleeOf, Convention, NotReconstructed, Signature, Slot
+from recon.core.ir import memory as mem
 from recon.core.ir import passes
 from recon.core.ir.build import drop_dead, simplify_phis, substitute
 from recon.core.ir.model import FRAME, Arg, Block, Const, Fn, Op, Phi, Term
@@ -318,8 +319,58 @@ def parameters(fn: Fn, conv: Convention) -> tuple[Fn, tuple[Slot, ...]]:
     return substitute(fn, same, set()), tuple(slots)
 
 
-def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None) -> tuple[Fn, tuple[Slot, ...]]:
-    """(the function at source level, its parameters), or NotReconstructed."""
+def _environment(fn: Fn, conv: Convention, abi) -> set[int]:
+    """Entry values of locations that are no argument, no result, not given back and not changed by calls: the machine's
+    environment (the thread block's base, the direction flag), read and never set by any function."""
+    given = {n for pair in conv.slots for n in pair}
+    other = given | abi.arguments | abi.clobbered | abi.preserved | abi.results | {abi.stack}
+    return {v for n, v in fn.params if n not in other}
+
+
+def _frame_for_signature(fn: Fn, abi) -> None:
+    """What a frame left in memory may still say about the parameters (D-070): a read at or above the first stack argument
+    is an argument there (STACK_ARGUMENTS), and the address of the home space leaving the function's own reads and writes is
+    how a variable argument list is walked (VARIADIC). Locals in memory, and home space read and written at fixed places,
+    change no parameter."""
+    first = abi.word + abi.home
+    d = {v: o for v, (_b, o) in fn.defining().items()}
+    params = {v: n for n, v in fn.params}
+    home: set[int] = set()
+    for _b, o in fn.ops():
+        if o.kind == FRAME:
+            off = int(o.attr("off"))  # type: ignore[call-overload]
+            if off >= first:
+                raise NotReconstructed("STACK_ARGUMENTS")
+            if off >= abi.word:
+                home.add(o.defs[0])
+        elif o.kind in ("load", "store") and o.args:
+            at = mem.resolve(o.args[0], d.get, params)
+            if at is not None and at[0] == "frame" and at[1] >= first:
+                raise NotReconstructed("STACK_ARGUMENTS")
+    work = list(home)
+    while work:      # values computed from a home-space address by a fixed offset are home-space addresses too
+        v = work.pop()
+        for b in fn.blocks:
+            for x in (*b.phis, *b.ops, b.term):
+                args = [a for _k, a in x.args] if isinstance(x, Phi) else list(x.args)
+                if v not in args:
+                    continue
+                if isinstance(x, Op) and x.kind in ("load", "store") and x.args[0] == v and v not in args[1:]:
+                    continue
+                if isinstance(x, Op) and (x.kind == "add" and any(isinstance(a, Const) for a in x.args) or x.kind == "sub" and isinstance(x.args[1], Const) and x.args[0] == v):
+                    if x.defs[0] not in home:
+                        home.add(x.defs[0])
+                        work.append(x.defs[0])
+                    continue
+                raise NotReconstructed("VARIADIC")
+
+
+def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None,
+          signature_only: bool = False) -> tuple[Fn, tuple[Slot, ...]]:
+    """(the function at source level, its parameters), or NotReconstructed. With `signature_only`, only the parameters are
+    wanted (D-070): what the source would still have to spell (a local in memory, a read of the machine's environment, a
+    value wider than a register inside the body) does not stop them, while anything that leaves them unsure does."""
+    env = _environment(fn, conv, abi) if signature_only else set()
     fn = _tidy(expose(fn, conv, callee, result), abi)
     for _ in range(ROUND):
         before = fn.blocks
@@ -332,8 +383,11 @@ def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None) 
         fn = _tidy(_cleaned(narrow(fn)), abi)
         if fn.blocks == before:
             break
-    if any(o.kind == "undef" for _b, o in fn.ops()):
+    if any(o.kind == "undef" and not (o.defs[0] in env) for _b, o in fn.ops()):
         raise NotReconstructed("READS_A_LOCATION_NOBODY_SET")
+    if signature_only:
+        _frame_for_signature(fn, abi)
+        return fn, slots
     if any(o.kind == FRAME for _b, o in fn.ops()):
         raise NotReconstructed("LOCAL_IN_MEMORY")
     reach = set(graph.reverse_postorder(fn.succ, 0))

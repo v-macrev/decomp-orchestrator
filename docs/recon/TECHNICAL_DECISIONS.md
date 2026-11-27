@@ -614,3 +614,17 @@ there of its own, or a merge whose value is really used. A merge of what calls l
 caller set is left there too (`caller_set`), as a result left where the call put it already was. Measured: unknown signatures
 ended by their own reading at `READS_A_LOCATION_NOBODY_SET` 1,815 -> 1,072; development functions at `CALLEE_SIGNATURE_UNKNOWN`
 702 -> 664 (held-out 26 -> 24); the byte-matched functions the same 99 + 10.
+
+## D-070 · 2026-11-27 · A signature needs the parameters, not the source
+A function's signature was inferred by lowering it as the source would be written, and refused with everything the source
+cannot yet spell: a local left in memory (`LOCAL_IN_MEMORY`), a read of the thread block's base or the direction flag
+(`READS_A_LOCATION_NOBODY_SET`), a value wider than a register inside the body (`VECTOR_VALUE`). Under the D-068 engine's 702
+development functions at `CALLEE_SIGNATURE_UNKNOWN`, `LOCAL_IN_MEMORY` was the root under 540 and the only one under 59. None of
+these says anything about the parameters. Signature inference now lowers with `signature_only`: those three no longer stop it,
+and what does leave the parameters unsure still does — a read at or above the first stack argument (`STACK_ARGUMENTS`), the
+home space's address leaving the function's own reads and writes at fixed places, as `va_start` hands it on (`VARIADIC`), a
+location read after a call that the convention lets the call change, and an entry value of a location given back. The
+environment is told by the convention alone: entry values of locations that are no argument, result, given-back, changed or
+stack location. Source lowering is unchanged and still refuses all of them. Measured: unknown signatures 89,842 ->
+84,690 (`LOCAL_IN_MEMORY` 3,363 and `VECTOR_VALUE` 784 -> 0; now refused as `STACK_ARGUMENTS` 1,217, `VARIADIC` 1,587);
+development functions at `CALLEE_SIGNATURE_UNKNOWN` 664 -> 625 (held-out 24 -> 18); byte-matched 100 + 10, one won, none lost.

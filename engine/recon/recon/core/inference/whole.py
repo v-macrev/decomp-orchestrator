@@ -496,7 +496,7 @@ class Program:
             if k >= len(results):
                 raise NotReconstructed("RESULT_READING_ABSENT")
             result, why = results[k]
-            _low, slots = lw.lower(fn, self.conv, self.abi, resolve, result)
+            _low, slots = lw.lower(fn, self.conv, self.abi, resolve, result, signature_only=True)
         finally:
             self._inferring -= 1
         return Signature(slots, result, (("result", why.value),) + ((("indirect-calls", "SITE"),) if through else ()))

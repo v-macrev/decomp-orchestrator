@@ -631,3 +631,55 @@ def test_a_call_through_a_value_whose_results_only_reach_merges_returns_nothing(
     (sig,) = cd.indirect_signatures(program(g).normal(BASE + 0x3000), SOURCE).values()
     assert sig.result is None
 
+
+# ---------------------------------------------------------------- what a signature needs of the body (D-070)
+
+def _taker(rva: int = 0x6000) -> Asm:
+    """t(p): *p = 1"""
+    return Asm(rva)(I.create_mem_i32(C.MOV_RM32_IMM32, mem(R.RCX), 1))(T.ret())
+
+
+def test_a_local_kept_in_memory_does_not_hide_the_parameters():
+    """f(a): x = a; t(&x); return x. The local stays in memory, which the source would still have to spell; the parameters
+    and the result do not depend on that."""
+    f = Asm(0x3000)(T.sub_rsp(40))(I.create_mem_reg(C.MOV_RM32_R32, mem(R.RSP, 0x20), R.ECX))(T.lea(R.RCX, mem(R.RSP, 0x20)))
+    f.branch(C.CALL_REL32_64, 0x6000)
+    f(I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem(R.RSP, 0x20)))(T.add_rsp(40))(T.ret())
+    p = program(f, _taker())
+    s = p.signature(BASE + 0x3000)
+    assert s is not None and [x.kind for x in s.params] == [INT] and s.result is not None
+
+
+def test_a_read_of_the_thread_block_does_not_hide_the_parameters():
+    """f(): return *(int *)(thread block + 0x58)."""
+    gs = T.ix.MemoryOperand(R.NONE, R.NONE, 1, 0x58, 4, False, R.GS)
+    f = Asm(0x3000)(I.create_reg_mem(C.MOV_R64_RM64, R.RAX, gs))(I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem(R.RAX)))(T.ret())
+    s = program(f).signature(BASE + 0x3000)
+    assert s is not None and s.params == () and s.result is not None
+
+
+def test_a_read_above_the_home_space_is_a_stack_argument_and_leaves_the_signature_unknown():
+    """f(a, b, c, d, e): return e. The fifth argument is on the stack, which the signature cannot say."""
+    f = Asm(0x3000)(I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem(R.RSP, 0x28)))(T.ret())
+    p = program(f)
+    assert p.signature(BASE + 0x3000) is None
+    assert p.why_unknown(BASE + 0x3000) == "STACK_ARGUMENTS"
+
+
+def test_the_address_of_the_home_space_passed_on_is_a_variable_argument_list_and_leaves_the_signature_unknown():
+    """f(fmt, ...): the arguments in registers are spilled to the home space and its address handed on, as va_start does."""
+    v = Asm(0x6000)(I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem(R.RDX)))(I.create_mem_reg(C.MOV_RM32_R32, mem(R.RCX), R.EAX))(T.ret())
+    f = Asm(0x3000)(T.store(mem(R.RSP, 0x10), R.RDX))(T.store(mem(R.RSP, 0x18), R.R8))(T.store(mem(R.RSP, 0x20), R.R9))
+    f(T.sub_rsp(40))(T.lea(R.RDX, mem(R.RSP, 0x38)))
+    f.branch(C.CALL_REL32_64, 0x6000)
+    f(T.add_rsp(40))(T.ret())
+    p = program(f, v)
+    assert p.signature(BASE + 0x3000) is None
+    assert p.why_unknown(BASE + 0x3000) == "VARIADIC"
+
+
+def test_a_value_wider_than_a_register_inside_the_body_does_not_hide_the_parameters():
+    """f(d, s): copies 16 bytes through a vector register; neither parameter nor the (absent) result is that wide."""
+    f = Asm(0x3000)(I.create_reg_mem(C.MOVUPS_XMM_XMMM128, R.XMM0, mem(R.RDX)))(I.create_mem_reg(C.MOVUPS_XMMM128_XMM, mem(R.RCX), R.XMM0))(T.ret())
+    s = program(f).signature(BASE + 0x3000)
+    assert s is not None and [x.kind for x in s.params] == [INT, INT] and s.result is None
