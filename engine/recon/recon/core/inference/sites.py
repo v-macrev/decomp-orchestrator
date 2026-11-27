@@ -26,13 +26,10 @@ def direct_callees(fn: Fn) -> tuple[int, ...]:
 
 
 def computed_width(fn: Fn, d: dict, v: Arg) -> int:
-    """The width a value was computed in (a 32-bit write zero-extends to the whole register; a narrower write, or a scalar
-    floating write, keeps the rest of the register, which is then the high part of a pair)."""
+    """The width a value was computed in (a 32-bit write zero-extends to the whole register)."""
     o = d.get(v) if isinstance(v, int) else None
     if isinstance(o, Op) and o.kind == "zext":
         return computed_width(fn, d, o.args[0])
-    if isinstance(o, Op) and o.kind == "cat":
-        return computed_width(fn, d, o.args[1])
     return v.width if isinstance(v, Const) else fn.width(v)
 
 
@@ -80,15 +77,11 @@ def caller_set(fn: Fn, conv: Convention, d: dict) -> Callable[[Arg, str], bool]:
 def call_sites(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
     """What a caller's normal form shows of each call it makes (tails are left out: what they pass is the caller's own).
 
-    Per call: `set`, the argument locations the caller puts a value of its own in, with the value's width (0 for a
-    constant, which has the width its parameter gives it); `reads`, the result locations whose value it uses after the
-    call, with the width; `left`, the argument locations that hold nothing the caller ever had: what an earlier call left
-    there, or nothing at all (D8-002). A caller cannot mean such a location as an argument. A location it merely passes on
-    from its own entry is neither set nor left: it may be an argument of the caller that the callee ignores, or one it
-    passes on."""
+    Per call: `set`, the argument locations the caller puts a value of its own in, with the value's width; `reads`, the
+    result locations whose value it uses after the call, with the width. A location it merely passes on from its own entry is
+    not set: it may be an argument of the caller that the callee ignores."""
     d = {v: o for v, (_b, o) in fn.defining().items()}
     own = caller_set(fn, conv, d)
-    gone = left_behind(fn, conv, d)
     uses: dict[int, int] = {}          # a value that only reaches a return may merely have been left there: not a use
     for b in fn.blocks:
         for a in [a for o in b.ops for a in o.args] + [a for p in b.phis for _k, a in p.args] + (list(b.term.args) if b.term.kind != "return" else []):
@@ -99,46 +92,16 @@ def call_sites(fn: Fn, conv: Convention) -> dict[str, list[dict]]:
         for o in b.ops:
             if o.kind != "call" or not o.args or not isinstance(o.args[0], Const):
                 continue
-            put, left = [], []
+            put = []
             for n, v in zip(o.attr("args") or (), o.args[1:]):  # type: ignore[call-overload]
                 if isinstance(v, Const):
-                    put.append([n, 0])
+                    put.append([n, 64])
                 elif own(v, n):
                     put.append([n, computed_width(fn, d, v)])
-                elif gone(v, n):
-                    left.append(n)
             reads = [[n, fn.width(v)] for n, v in zip(o.attr("defs") or (), o.defs)  # type: ignore[call-overload]
                      if n in (conv.result_int, conv.result_float) and uses.get(v, 0)]
-            out.setdefault(str(o.args[0].value), []).append({"set": sorted(put), "reads": sorted(reads), "left": sorted(left)})
+            out.setdefault(str(o.args[0].value), []).append({"set": sorted(put), "reads": sorted(reads)})
     return out
-
-
-def left_behind(fn: Fn, conv: Convention, d: dict) -> Callable[[Arg, str], bool]:
-    """Whether a value in an argument location at a call site holds nothing the caller ever had: undefined, or what an
-    earlier call left in a location other than its result (the convention lets a callee leave anything there). A merge
-    is left behind when every one of its values is (the greatest fixed point over merges of merges)."""
-    results = (conv.result_int, conv.result_float)
-    left: set[int] = set()
-    for b in fn.blocks:
-        for o in (*b.ops, b.term):
-            if o.kind == "call":
-                for n, v in zip(o.attr("defs") or (), o.defs):  # type: ignore[call-overload]
-                    if n not in results:
-                        left.add(v)
-    for v, o in d.items():
-        if isinstance(o, Op) and o.kind == "undef":
-            left.add(v)
-    merges = {v: [a for _k, a in o.args] for v, o in d.items() if o is not None and not isinstance(o, Op)}
-    gone = {v for v in merges if all(isinstance(a, int) for a in merges[v])}
-    changed = True
-    while changed:
-        changed = False
-        for v in sorted(gone):
-            if not all(a in left or a in gone for a in merges[v]):
-                gone.discard(v)
-                changed = True
-    left |= gone
-    return lambda v, at: isinstance(v, int) and v in left
 
 
 def _int_slot(w: int) -> Slot:

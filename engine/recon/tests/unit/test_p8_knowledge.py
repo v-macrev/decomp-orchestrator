@@ -15,7 +15,7 @@ from recon.adapters.x64_msvc.abi import CALLING, SOURCE  # noqa: E402
 from recon.core.inference import lower as lw  # noqa: E402
 from recon.core.inference import signature as sg  # noqa: E402
 from recon.core.inference import evidence as ev  # noqa: E402
-from recon.core.inference import sites as sg_sites  # noqa: E402
+from recon.core.inference import callsites as cs  # noqa: E402
 from recon.core.inference.explain import explain, through_tail  # noqa: E402
 from recon.core.inference.signature import NotReconstructed, Signature, Slot  # noqa: E402
 from recon.core.inference.whole import Program  # noqa: E402
@@ -159,7 +159,7 @@ def test_a_call_site_says_which_argument_locations_an_earlier_call_left():
     g.branch(C.CALL_REL32_64, 0x5000)
     g(I.create_reg_i32(C.MOV_R32_IMM32, R.ECX, 3)).branch(C.CALL_REL32_64, 0x6000)
     g(T.add_rsp(40))(T.ret())
-    sites = sg_sites.call_sites(program(callee, g).normal(BASE + 0x3000), SOURCE)
+    sites = cs.call_evidence(program(callee, g).normal(BASE + 0x3000), SOURCE)
     first, second = sites[str(BASE + 0x5000)][0], sites[str(BASE + 0x6000)][0]
     assert first["set"] == [["rcx", 0], ["rdx", 0]] and first["left"] == []    # entry values, passed on: neither
     assert second["set"] == [["rcx", 0]] and "rdx" in second["left"] and "r8" in second["left"]

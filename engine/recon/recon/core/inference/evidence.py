@@ -6,7 +6,7 @@ piece of evidence agrees and together they fix it), `inferred` (the function's o
 evidence leaves a choice open), `contradicted` (two pieces of evidence disagree). A contradicted fact is no fact: what
 needs it is blocked, and neither side is chosen.
 
-A call site (`sites.call_sites`) says which argument locations the caller set with a value of its own, which held
+A call (`callsites.call_evidence`) says which argument locations the caller set with a value of its own, which held
 nothing the caller ever had (`left`: what an earlier call left there, or nothing), and which results it used afterwards.
 Read together over every call of one function:
 
