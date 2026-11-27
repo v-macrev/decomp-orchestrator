@@ -10,6 +10,7 @@ import pytest
 from recon.core.synthesis import kinds as K
 from recon.core.synthesis import rules as R
 from recon.core.synthesis.candidates import Choice
+from recon.adapters.x64_msvc import confirmed
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "cpp" / "p9_rules.cpp"
 
@@ -22,7 +23,7 @@ def test_every_rule_is_complete_and_unique():
     assert len({r.id for r in R.RULES}) == len(R.RULES)
     have = cases_in_fixture()
     for r in R.RULES:
-        assert r.recipes and r.preconditions and r.transformation and r.meaning and r.codegen and r.limits, r.id
+        assert r.preconditions and r.transformation and r.meaning and r.codegen and r.limits, r.id
         assert r.effect and all(k in K.KINDS for k in (*r.effect, *r.related)), r.id
         assert len(r.positive) >= 2, f"{r.id}: a rule needs a second synthetic case"
         assert r.negative, r.id
@@ -46,7 +47,7 @@ def test_the_digest_moves_with_any_rule():
     assert d == R.digest()
     old = R.RULES
     try:
-        R.RULES = (replace(old[0], recipes=("other",)), *old[1:])
+        R.RULES = (replace(old[0], preconditions="other"), *old[1:])
         assert R.digest() != d
     finally:
         R.RULES = old
@@ -106,7 +107,7 @@ def compiled(toolchain, tmp_path_factory):
 def test_each_rule_is_confirmed_under_its_recipe(rule, compiled):
     recipe, pairs = compiled
     r = R.BY_ID[rule]
-    assert recipe in r.recipes, f"{rule} is not claimed for {recipe}"
+    assert rule in confirmed.CONFIRMED.get(recipe, ()), f"{rule} is not claimed for {recipe}"
     for c in r.positive:
         p = pairs[c]
         assert not p.equal, f"{rule}: {c} compiles identically"
@@ -121,3 +122,13 @@ def test_experiments_report_counts_only(compiled):
     _recipe, pairs = compiled
     text = json.dumps({c: [p.equal, p.mismatch.kind if p.mismatch else None] for c, p in pairs.items()})
     assert "0x" not in text
+
+
+def test_a_rule_not_confirmed_under_the_recipe_is_never_directed_but_stays_reachable():
+    head, tail = R.tiers(K.POLARITY, frozenset({"P9-R005"}))
+    assert [r.id for r in head] == ["P9-R005"]
+    assert {r.id for r in tail} == {r.id for r in R.RULES} - {"P9-R005"}
+    head, tail = R.tiers(K.POLARITY, None)
+    assert {r.family for r in head} == set(R.directed(K.POLARITY)) and head[0].family == "exit-arrangement"
+    assert confirmed.confirmed("reconstruction/recipes/msvc-19.16.27054-o2.json") == frozenset(r.id for r in R.RULES)
+    assert confirmed.confirmed("reconstruction/recipes/o2-os.json") == frozenset() and confirmed.confirmed(None) == frozenset()

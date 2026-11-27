@@ -1,11 +1,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 """The compiler knowledge base: rules that change how a candidate is written without changing what it does.
 
-Each rule names a transformation the generator can make (a change of `candidates.Choice`), the recipes it was confirmed
-under, its preconditions, why it keeps the meaning, what it does to the code, and its positive and negative synthetic
-experiments (pairs of functions in `tests/fixtures/cpp/p9_rules.cpp`: `<Case>Before` and `<Case>After`). A rule is
-confirmed under a recipe only when every positive pair compiles differently there, with its primary `MISMATCH` kind
-among the rule's `effect`, and every negative pair compiles identically (`tests/unit/test_p9_rules.py` compiles them).
+Each rule names a transformation the generator can make (a change of `candidates.Choice`), its preconditions, why
+it keeps the meaning, what it does to the code, and its positive and negative synthetic experiments (pairs of functions
+in `tests/fixtures/cpp/p9_rules.cpp`: `<Case>Before` and `<Case>After`). The recipes a rule is confirmed under are
+the compiler adapter's record (`adapters/x64_msvc/confirmed.py`; core names no compiler): a rule is confirmed under a
+recipe only when every positive pair compiles differently there, with its primary `MISMATCH` kind among the rule's
+`effect`, and every negative pair compiles identically (`tests/unit/test_p9_rules.py` compiles them). Under a recipe
+where a rule is not confirmed, the search never chooses it by a kind; it stays among the other families (`tiers`).
 Rules are learned from those original experiments and from upstream's matching cookbook (`cookbook` gives the rule
 numbers there), never from a target.
 
@@ -13,7 +15,7 @@ numbers there), never from a target.
 that kind, then those the cookbook relates to it. The search expands only those families from the nearest candidates,
 and every other family only after them (core/synthesis/search.py).
 
-The base is versioned: any change of a rule's id, transformation, preconditions or recipes moves `RULES_VERSION`, and its
+The base is versioned: any change of a rule's id, transformation or preconditions moves `RULES_VERSION`, and its
 digest is part of what a result rests on.
 """
 from __future__ import annotations
@@ -26,8 +28,6 @@ from typing import Iterator, Protocol
 from recon.core.synthesis import kinds as K
 
 RULES_VERSION = 1
-#: the recipe every rule below was confirmed under (`reconstruction/recipes/<name>.json` upstream)
-O2 = "msvc-19.16.27054-o2"
 #: rules applied on one path from the canonical form, at most
 MAX_TRAIL = 6
 #: open signs and mirrored comparisons a rule takes one at a time, at most (as the first-stage generator did)
@@ -48,7 +48,6 @@ class Rule:
     id: str
     name: str                    # the change's name in `Choice.changes()`, up to its first ':'
     family: str
-    recipes: tuple[str, ...]
     preconditions: str
     transformation: str
     meaning: str                 # why the meaning is kept
@@ -62,12 +61,12 @@ class Rule:
     related: tuple[str, ...] = ()
 
     def data(self) -> dict:
-        return {k: getattr(self, k) for k in ("id", "name", "family", "recipes", "preconditions", "transformation", "meaning", "codegen",
+        return {k: getattr(self, k) for k in ("id", "name", "family", "preconditions", "transformation", "meaning", "codegen",
                                               "effect", "positive", "negative", "limits", "cookbook", "related")}
 
 
 RULES: tuple[Rule, ...] = (
-    Rule("P9-R001", "shared-return", "exit-arrangement", (O2,),
+    Rule("P9-R001", "shared-return", "exit-arrangement",
          "The function returns from more than one place, and a return only hands on a value known on that path.",
          "Write one result local, assigned on every path, and one return at the end (Style.split_returns = False).",
          "Every path assigns the local exactly the value it returned before, and nothing runs between the assignment and the return.",
@@ -75,7 +74,7 @@ RULES: tuple[Rule, ...] = (
          (K.POLARITY,), ("Exit", "Exit2"), ("ExitNeg",),
          "A path that leaves through a different epilogue (a tail call) keeps its own return in the cookbook's experience.",
          (34,), (K.BLOCKS, K.REGISTERS, K.SELECTION, K.SIZE_ONLY, K.UNWIND)),
-    Rule("P9-R002", "select-as-if", "select-form", (O2,),
+    Rule("P9-R002", "select-as-if", "select-form",
          "A value is chosen by a condition (a ?: of the canonical form).",
          "Write the choice as an if statement assigning a local in each arm (Style.select = 'if').",
          "Both forms evaluate the condition once and exactly one arm; the local takes the arm's value.",
@@ -83,7 +82,7 @@ RULES: tuple[Rule, ...] = (
          (K.REGISTERS,), ("Select", "Select2"), ("SelectNeg",),
          "Arms with calls or loads that may fault compile to branches either way.",
          (34, 43), (K.SELECTION, K.BLOCKS, K.POLARITY)),
-    Rule("P9-R003", "guarded-do-while", "loop-form", (O2,),
+    Rule("P9-R003", "guarded-do-while", "loop-form",
          "A loop whose canonical form is a while loop the compiler rotated (a guard and a do-while).",
          "Keep the guard and the do-while as the code has them (unrotate = False).",
          "The guard is the loop's own condition before the first iteration; the body runs in the same order the same number of times.",
@@ -91,7 +90,7 @@ RULES: tuple[Rule, ...] = (
          (K.BLOCKS,), ("Loop", "Loop2"), ("LoopNeg",),
          "A simple loop with one condition compiles identically in both forms (the compiler rotates it either way).",
          (3, 20), (K.SIZE_ONLY, K.SELECTION)),
-    Rule("P9-R004", "arms-exchanged", "branch-arrangement", (O2,),
+    Rule("P9-R004", "arms-exchanged", "branch-arrangement",
          "A two-way branch with both arms present.",
          "Negate the condition and exchange the arms (Style.invert = True).",
          "The negated condition selects the other arm on exactly the inputs that selected it before.",
@@ -100,7 +99,7 @@ RULES: tuple[Rule, ...] = (
          (K.POLARITY, K.BLOCKS, K.CALL), ("Arms3", "Arms2", "Arms"), ("ArmsNeg",),
          "A branch the compiler turns into a conditional move compiles identically.",
          (2, 34), (K.SIZE_ONLY,)),
-    Rule("P9-R005", "mirror", "comparison-form", (O2,),
+    Rule("P9-R005", "mirror", "comparison-form",
          "The function compares values for order.",
          "Write every comparison from the other side, a < b as b > a (Style.mirror = (-1,)).",
          "Exchanging the operands and the relation gives the same truth value for every input.",
@@ -108,7 +107,7 @@ RULES: tuple[Rule, ...] = (
          (K.POLARITY,), ("Mirror", "Mirror2"), ("MirrorNeg",),
          "Comparisons the compiler folds into arithmetic are not changed.",
          (42,), (K.REGISTERS, K.SELECTION)),
-    Rule("P9-R006", "mirror-one", "comparison-form", (O2,),
+    Rule("P9-R006", "mirror-one", "comparison-form",
          "The function has more than one comparison of order.",
          "Write one comparison, by position, from the other side (Style.mirror = (k,)).",
          "As P9-R005, for one comparison.",
@@ -116,7 +115,7 @@ RULES: tuple[Rule, ...] = (
          (K.POLARITY,), ("Mirror", "Mirror2"), ("MirrorNeg",),
          f"The first {MAX_ONE_BY_ONE} comparisons only.",
          (42,), (K.REGISTERS, K.SELECTION)),
-    Rule("P9-R007", "read-again", "value-reuse", (O2,),
+    Rule("P9-R007", "read-again", "value-reuse",
          "A value read from memory is used again after a call or a store that may change that memory.",
          "Read it again where it is used instead of keeping it (read_again = True).",
          "The execution check runs both forms on the same inputs; the form is kept only where both agree.",
@@ -124,7 +123,7 @@ RULES: tuple[Rule, ...] = (
          (K.UNWIND, K.EXTENSION), ("Read", "Read2"), ("ReadNeg", "ReadNeg2"),
          "Without a call or an aliasing store between the reads the compiler reads once either way.",
          (1, 61), (K.REGISTERS, K.SELECTION, K.STACK, K.BLOCKS)),
-    Rule("P9-R008", "sign", "types-and-promotions", (O2,),
+    Rule("P9-R008", "sign", "types-and-promotions",
          "An integer variable whose sign no operation decides.",
          "Declare it with the other signedness (flips = (k,)).",
          "No operation the function does on the variable depends on its sign, so both declarations compute the same.",
@@ -132,7 +131,7 @@ RULES: tuple[Rule, ...] = (
          (K.EXTENSION,), ("Sign", "Sign2"), ("SignNeg",),
          f"The first {MAX_ONE_BY_ONE} open signs one at a time.",
          (6, 38, 68), (K.CONSTANT, K.SELECTION)),
-    Rule("P9-R009", "sign-all", "types-and-promotions", (O2,),
+    Rule("P9-R009", "sign-all", "types-and-promotions",
          "More than one integer variable whose sign no operation decides.",
          "Declare all of them with the other signedness (flips = all).",
          "As P9-R008, for each.",
@@ -140,7 +139,7 @@ RULES: tuple[Rule, ...] = (
          (K.EXTENSION,), ("Sign", "Sign2"), ("SignNeg",),
          "All at once or one at a time; other subsets come only by combining one-at-a-time rules.",
          (6, 38, 68), (K.CONSTANT, K.SELECTION)),
-    Rule("P9-R010", "no-arithmetic-undo", "arithmetic-form", (O2,),
+    Rule("P9-R010", "no-arithmetic-undo", "arithmetic-form",
          "The normal form has arithmetic the canonical form reads as a division, remainder or multiplication.",
          "Keep the arithmetic as the code computes it (undo = False).",
          "The reading was proved equal; the arithmetic is the computation the code does.",
@@ -148,7 +147,7 @@ RULES: tuple[Rule, ...] = (
          (K.SELECTION, K.CONSTANT, K.REGISTERS), ("Undo", "Undo2", "Undo3"), ("UndoNeg",),
          "Only readings the idiom prover accepted.",
          (), (K.EXTENSION,)),
-    Rule("P9-R011", "result", "result-reading", (O2,),
+    Rule("P9-R011", "result", "result-reading",
          "The result has more than one reading (a truth value or an integer, a width).",
          "Read the result another way (result = k).",
          "Callers see the same bits in the result register for the part the reading covers; the execution check compares them.",
@@ -156,7 +155,7 @@ RULES: tuple[Rule, ...] = (
          (K.EXTENSION,), ("Result", "Result2"), ("ResultNeg",),
          "Readings the evidence offers only.",
          (66, 46), (K.CONSTANT, K.CALL)),
-    Rule("P9-R012", "callee", "callee-reading", (O2,),
+    Rule("P9-R012", "callee", "callee-reading",
          "A callee whose signature its callers or its own code leave open.",
          "Read the callee's signature another way (callees = ((place, reading),)).",
          "The arguments the callee reads are passed the same; the execution check compares the calls.",
@@ -251,5 +250,25 @@ def expand(c, families: tuple[str, ...], ctx: Context) -> Iterator[tuple[object,
                 yield from apply(r, c, ctx)
 
 
-__all__ = ["BY_ID", "FAMILIES", "FAMILY_ORDER", "MAX_TRAIL", "O2", "RULES", "RULES_VERSION", "Rule", "apply", "digest", "directed", "expand",
+def tiers(kind: str | None, confirmed: frozenset[str] | None = None) -> tuple[tuple[Rule, ...], tuple[Rule, ...]]:
+    """The rules a candidate of `kind` is expanded with first, and the rest, each in family then id order.
+
+    First: the rules of the families `directed(kind)` names that are confirmed under the unit's recipe (`confirmed`, rule
+    ids; None when the recipe is not known, and then every rule counts as confirmed). Rest: every other rule, so a rule
+    stays reachable where it is not confirmed, but no kind chooses it there."""
+    ok = (lambda r: True) if confirmed is None else (lambda r: r.id in confirmed)  # noqa: E731
+    order = {f: k for k, f in enumerate((*directed(kind), *rest(kind)))}
+    ranked = sorted(RULES, key=lambda r: (order[r.family], r.id))
+    first = set(directed(kind))
+    head = tuple(r for r in ranked if r.family in first and ok(r))
+    return head, tuple(r for r in ranked if r not in head)
+
+
+def expand_rules(c, rules: tuple[Rule, ...], ctx: Context) -> Iterator[tuple[object, str]]:
+    """Every single application of `rules` to `c`, in the given order."""
+    for r in rules:
+        yield from apply(r, c, ctx)
+
+
+__all__ = ["BY_ID", "FAMILIES", "FAMILY_ORDER", "MAX_TRAIL", "RULES", "RULES_VERSION", "Rule", "apply", "digest", "directed", "expand", "expand_rules", "tiers",
            "rest"]

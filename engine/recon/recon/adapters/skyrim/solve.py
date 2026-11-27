@@ -39,6 +39,7 @@ from recon.adapters.x64_msvc.headers import import_signatures
 from recon.adapters.x64_msvc.imports import iat_range, import_slots
 from recon.adapters.x64_msvc.batch import distance
 from recon.adapters.x64_msvc.mismatch import mismatch_kind
+from recon.adapters.x64_msvc.confirmed import confirmed
 from recon.adapters.x64_msvc.cl import CompilerFailed, Toolchain, ToolchainUnavailable, diagnostics, discover
 from recon.adapters.x64_msvc.symbols import SymbolMap
 from recon.adapters.x64_msvc.validate import load_validated
@@ -79,6 +80,8 @@ class UnitWorkshop:
         self.size = ctx.pack.size[rva]
         self.target = ctx.pack.image.read(rva, self.size)
         self.declared = Declared(cls, method, ctx.facts.members)
+        #: the rules of the knowledge base confirmed under the unit's recipe (the search directs only those by a kind)
+        self.confirmed = confirmed(ctx.recipe_rel)
         self.forms: dict[str, MemberUnit | str] = {}
         self.built: dict[str, tuple[coff.Function, bytes, str] | None] = {}
         self.compiles = 0
@@ -243,6 +246,7 @@ class Context:
     def __init__(self, worktree: Path, checkout: Path, data: Path, header_rel: str, header_text: str, recipe_rel: str,
                  knowledge: str | None = None) -> None:
         self.worktree, self.data = worktree, data
+        self.recipe_rel = recipe_rel
         recipe_bytes = (worktree / recipe_rel).read_bytes()
         recipe = json.loads(recipe_bytes)
         self.flags = [f for f in recipe["flags"] if f != "/c"]

@@ -54,6 +54,8 @@ class Judged:
 
 
 class Workshop(Protocol):
+    """May also have `confirmed`: the ids of the rules confirmed under the unit's recipe (rules.tiers)."""
+
     def judge(self, candidates: list[Candidate]) -> list[Judged]: ...
 
     def verify(self, candidate: Candidate) -> tuple[bool, str]:
@@ -145,6 +147,8 @@ def reconstruct(program: Program, at: int, shop: Workshop, budget: bg.Budget | N
 
     `program` should be made for this search: what it has analysed is spent from the budget once, when it is analysed."""
     b = budget or bg.Budget.of(None)
+    #: the rules confirmed under the unit's recipe, as the workshop knows it (None: unknown, every rule counts as confirmed)
+    confirmed: frozenset[str] | None = getattr(shop, "confirmed", None)
     if frontier is not None and frontier.at != at:
         raise ValueError("the frontier is of another function")
     past = frontier or Frontier(at)
@@ -258,10 +262,10 @@ def reconstruct(program: Program, at: int, shop: Workshop, budget: bg.Budget | N
                 return out
             while heap:
                 tier, dist, _l, _d, _s, choice, steps, kind = heapq.heappop(heap)
-                families = RL.directed(kind) if tier == 0 else RL.rest(kind)
-                if tier == 0 and RL.rest(kind):
-                    heapq.heappush(heap, (1, dist, _l, _d, _s, choice, steps, kind))     # the other families, after every directed one
-                children = [(c, (*steps, step)) for c, step in RL.expand(choice, families, ctx)]
+                head, tail = RL.tiers(kind, confirmed)
+                if tier == 0 and tail:
+                    heapq.heappush(heap, (1, dist, _l, _d, _s, choice, steps, kind))     # the other rules, after every directed one
+                children = [(c, (*steps, step)) for c, step in RL.expand_rules(choice, head if tier == 0 else tail, ctx)]
                 if not children:
                     continue
                 n["expanded"] += 1
