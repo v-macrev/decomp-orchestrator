@@ -697,3 +697,33 @@ Measured: normal forms all made again (60 min with 3 workers), signatures 28 min
 (held-out 16 -> 13), byte-matched 100 + 10 -> 106 + 10, none lost, `MISMATCH` 55 -> 44. The freed functions stop next at
 `STACK_ARGUMENT` 23 -> 48 (a call with stack arguments, which source writing refuses), `READS_A_LOCATION_NOBODY_SET`
 119 -> 154, `LOCAL_IN_MEMORY` 83 -> 103, `CONSTRUCT_UNSUPPORTED` 89 -> 105 and `INDIRECT_CALL` 383 -> 396.
+
+## D-074 · 2026-11-28 · Thread-local variables
+Of the 154 development functions at `READS_A_LOCATION_NOBODY_SET`, 45 read the thread block (`gs`), always the same way:
+the array of the threads' storage blocks at `gs:[0x58]`, the module's entry in it by `_tls_index`, and a variable at an
+offset in that block, the offset held in a register (`mov r32, imm32`) and added by base-plus-index addressing. That is
+how the compiler reaches a `thread_local` variable, its offset a section-relative relocation; folding the offset into a
+displacement, as source written with `__readgsqword` would, gives other bytes. 34 of the 45 reach one variable. The rest of
+the 154 are mostly callee signatures in disguise: in 112 of them the canonical choice stops at `CALLEE_SIGNATURE_UNKNOWN`,
+and `READS_A_LOCATION_NOBODY_SET` appears only when a callee is read as its callers show it.
+
+- **The reach is the variable.** On the source-writing side only (the search, not the facts), a reach of the module's
+  block that is used only by adding a constant, or as an address to read or write, is read as the address of the
+  variable's initial value in the image's thread-local template: thread block location, array place and index slot from
+  the platform (`threads.py`) and the image's thread-local directory, the template's range from the same directory. A
+  block kept, handed on or indexed is left as it is. The comparison by execution runs on the form read so.
+- **The source names it.** A place in the template is an object of its own, declared `extern thread_local T
+  ThreadData<rva>;`, which the compiler reaches the same way. Its address taken as a number is not written yet
+  (`ADDRESS_VALUE`), nor two types of it (`LAYOUT_CONFLICT`).
+- **The comparator places it by offset.** The symbol map gives such a variable as a `thread-local` entry with its offset
+  in the template, which upstream's comparator checks each SECREL against; `_tls_index` it takes from the image's
+  directory itself.
+- **The ranking reads the reference too.** The distance that ranks compiled candidates counts a SECREL field right when it
+  holds the variable's offset, and resolves `_tls_index` to the slot the directory names; it had counted every SECREL
+  wrong and left the index unnamed, so no candidate reached the comparator.
+
+Measured (no knowledge recomputed: the facts are untouched; campaign 50 min, 3 workers): development
+`READS_A_LOCATION_NOBODY_SET` 154 -> 131, byte-matched 106 + 10 -> 107 + 10, none lost — the first function verified with a
+thread-local variable, by upstream's comparator. The 23 freed stop next at `CALLEE_SIGNATURE_UNKNOWN` 8, `LOCAL_IN_MEMORY`
+6, `NO_MATCH` 4 (compiled, every reference right, other bytes differ) and one each of the declaration codes. Of the 131
+left, 22 still read the thread block in a way not read yet, and most of the rest are unknown callee signatures in disguise.

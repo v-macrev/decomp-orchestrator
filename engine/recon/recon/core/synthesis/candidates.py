@@ -28,6 +28,7 @@ from recon.core.ir.model import Arg, Const, Fn, Op
 from recon.core.knowledge import MISSING, wait_for
 from recon.core.structuring import ast as A
 from recon.core.structuring import evaluate as ev
+from recon.core.synthesis.thread import thread_locals
 from recon.core.structuring.build import Builder
 from recon.core.structuring.regions import Style, comparisons, structure
 from recon.core.structuring.rotate import unrotate
@@ -124,7 +125,9 @@ class Generator:
     def __init__(self, program: Program, at: int) -> None:
         self.p = program
         self.at = at
-        self.fn = program.normal(at)
+        # the reaches of thread-local variables read as the variables (D-074): `thread`, where the program's image keeps them
+        self.thread = getattr(program, "thread", None)
+        self.fn = thread_locals(program.normal(at), self.thread)
         self.results = sg.results(self.fn, program.conv, program.callee)
         self._undone: Fn | None = None
         self._lowered: dict[tuple, tuple[Fn, Signature, dict[int, Signature]]] = {}
@@ -200,7 +203,7 @@ class Generator:
             return None
         seen.add(body.digest())
         rva = self.at - self.p.base
-        unit = Emitter(t, self.p.base, rva, names=self.p.name).unit(body, rva)
+        unit = Emitter(t, self.p.base, rva, names=self.p.name, thread_local=self.thread.holds if self.thread else lambda at: False).unit(body, rva)
         verdict = ev.compare(body, self.fn, self.p.conv, sig, self._called(callees, self.read_as(c)), size_of(t), self.p.image)
         return Candidate(c, unit, body, body.digest(), verdict, sig, body.assumptions, self.fn.assumptions, f.history, t)
 

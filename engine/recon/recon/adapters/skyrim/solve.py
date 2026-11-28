@@ -40,6 +40,7 @@ from recon.adapters.x64_msvc.imports import iat_range, import_slots
 from recon.adapters.x64_msvc.batch import distance
 from recon.adapters.x64_msvc.cl import CompilerFailed, Toolchain, ToolchainUnavailable, diagnostics, discover
 from recon.adapters.x64_msvc.symbols import SymbolMap
+from recon.adapters.x64_msvc.threads import TLS_INDEX
 from recon.adapters.x64_msvc.validate import load_validated
 from recon.core import budget as bg
 from recon.core import knowledge as kn
@@ -86,7 +87,7 @@ class UnitWorkshop:
         if c.digest not in self.forms:
             try:
                 self.forms[c.digest] = member_form(c.body, c.types, self.ctx.pack.image.image_base, self.rva, self.declared,
-                                                   self.ctx.unnamed, self.ctx.unnamed_data)
+                                                   self.ctx.unnamed, self.ctx.unnamed_data, self.ctx.thread_local)
             except NotReconstructed as e:
                 self.forms[c.digest] = e.code
         return self.forms[c.digest]
@@ -124,7 +125,12 @@ class UnitWorkshop:
         def r(rel: coff.Reloc) -> int | None:
             if rel.symbol == own:
                 return self.rva
+            t, base = self.ctx.thread, self.ctx.pack.image.image_base
+            if t is not None and coff.plain(rel.symbol) == TLS_INDEX:
+                return t.index - base
             at = self._callee(c, rel.symbol)
+            if t is not None and at is not None and rel.kind == coff.SECREL and t.holds(base + at):
+                return base + at - t.start           # a thread-local variable: its offset in the template (D-074)
             return at if at is not None else self.ctx.symbols.resolve(rel.symbol)
         return r
 
@@ -146,8 +152,13 @@ class UnitWorkshop:
             return False, "EXACT_UNIT_DOES_NOT_COMPILE"
         fn, obj, src = b
         symbols: dict[str, tuple[int, int | None]] = {}
+        thread: dict[str, int] = {}                 # a thread-local variable -> its offset in the template (D-074)
+        base = self.ctx.pack.image.image_base
         for r in fn.relocs:
             at = self._callee(c, r.symbol)
+            if at is not None and r.symbol != fn.symbol and self.ctx.thread is not None and self.ctx.thread_local(base + at):
+                thread[r.symbol] = base + at - self.ctx.thread.start
+                continue
             got = (self.rva, self.size) if r.symbol == fn.symbol else (at, self._extent(c, at)) if at is not None else self.ctx.symbols.lookup(r.symbol)
             if got is not None:
                 symbols[r.symbol] = got
@@ -156,7 +167,7 @@ class UnitWorkshop:
         for s in coff.Object(obj).symbols.values():
             if s.section == 0 and s.name not in symbols and s.name in self.ctx.public:
                 symbols[s.name] = self.ctx.public[s.name]
-        report = self.ctx.verifier.verify(self.rva, self.size, fn.symbol, src.encode("utf-8"), obj, symbols)
+        report = self.ctx.verifier.verify(self.rva, self.size, fn.symbol, src.encode("utf-8"), obj, symbols, thread=thread)
         ok = report["result"] == "pass" and report["reason"] == PASS
         if ok:
             self.chosen = self.form(c)  # type: ignore[assignment]
@@ -252,6 +263,7 @@ class Context:
         self._named = named_addresses(self.symbols, self.public)
         self.recipe_digest = hashlib.sha256(recipe_bytes).hexdigest()
         self.verifier = Verifier(worktree, image.build_id, image.pe.blob, recipe_bytes)
+        self.thread = self.pack.thread_locals()
         self.header_rel, self.header_text = header_rel, header_text
         tag = hashlib.sha256(f"{header_rel}\0{time.monotonic_ns()}".encode()).hexdigest()[:10]
         self.temp_header = worktree / Path(header_rel).parent / f".recon-{tag}.h"
@@ -278,6 +290,10 @@ class Context:
             return not self.pack.image.pe.section_for(rva).flags & SCN_MEM_EXECUTE
         except self.pack.image.up.pecoff.Reject:
             return False
+
+    def thread_local(self, at: int) -> bool:
+        """Whether address `at` is a thread-local variable's place in the image's template (D-074)."""
+        return self.thread is not None and self.thread.holds(at)
 
     def compile(self, header: str, source: str) -> tuple[coff.Object, bytes] | list[str]:
         """The object of `source` compiled with `header` as the unit's header, or the compiler's error codes."""

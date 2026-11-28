@@ -67,13 +67,15 @@ def float_text(bits: int, w: int) -> str:
 
 class Emitter:
     def __init__(self, types: ty.Types, image_base: int, rva: int, name: str | None = None, prefix: str = "",
-                 names: "Callable[[int], str | None]" = lambda at: None) -> None:
-        """`names(address)`: the name a declaration gives a callee, or None for the name made from its address."""
+                 names: "Callable[[int], str | None]" = lambda at: None, thread_local: "Callable[[int], bool]" = lambda at: False) -> None:
+        """`names(address)`: the name a declaration gives a callee, or None for the name made from its address;
+        `thread_local(address)`: whether the object there is a thread-local variable (D-074), declared so."""
         self.t = types
         self.base = image_base
         self.name = name or f"Function{rva:X}"
         self.prefix = prefix
         self.names = names
+        self.thread_local = thread_local
         self.callees: dict[int, str] = {}
         self.globals: dict[int, tuple[str, ty.CType | None]] = {}      # None: an object only its address is taken of
         self.locals: dict[int, str] = {}
@@ -311,7 +313,7 @@ class Emitter:
             decls.append(f"{type_name(r)} {name}({', '.join(type_name(p) + f' arg{k + 1}' for k, p in enumerate(ps))});")
         for at, (name, t) in sorted(self.globals.items()):
             roots.append(t)
-            decls.append(f"extern {type_name(t)} {name};")
+            decls.append(f"extern {'thread_local ' if self.thread_local(at) else ''}{type_name(t)} {name};")
         for s in body.stmts:
             for x in A.walk(s):
                 if isinstance(x, A.EXPRS):

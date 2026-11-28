@@ -76,6 +76,12 @@ def data_placeholder(rva: int) -> str:
     return f"Data{rva:x}"
 
 
+def thread_placeholder(rva: int) -> str:
+    """The project's placeholder name of the thread-local variable whose initial value lies at `rva` in the image's template
+    (its units declare `extern thread_local T ThreadData<rva>;`, D-074)."""
+    return f"ThreadData{rva:x}"
+
+
 def bytes_placeholder(rva: int) -> str:
     """The project's placeholder name of an object at `rva` whose type it does not know, declared as bytes
     (`extern "C" unsigned char Data_<rva>[];`): a body that only takes its address says nothing of its type."""
@@ -84,10 +90,12 @@ def bytes_placeholder(rva: int) -> str:
 
 class MemberEmitter(Emitter):
     def __init__(self, types: ty.Types, image_base: int, rva: int, d: Declared, cls: int | None, this: int | None,
-                 unnamed: Callable[[int], bool] = lambda at: False, unnamed_data: Callable[[int], bool] = lambda at: False) -> None:
+                 unnamed: Callable[[int], bool] = lambda at: False, unnamed_data: Callable[[int], bool] = lambda at: False,
+                 thread_local: Callable[[int], bool] = lambda at: False) -> None:
         """`unnamed(address)`: whether the project has not named the function there, so that it is called by placeholder;
-        `unnamed_data(address)`: the same of an object, so that it is read and written by placeholder."""
-        super().__init__(types, image_base, rva, name=f"{d.cls}::{d.method}")
+        `unnamed_data(address)`: the same of an object, so that it is read and written by placeholder; `thread_local(address)`:
+        whether it is a thread-local variable's place in the template, read and written by its own placeholder (D-074)."""
+        super().__init__(types, image_base, rva, name=f"{d.cls}::{d.method}", thread_local=thread_local)
         self.d, self.k, self.this = d, cls, this
         self.unnamed = unnamed
         self.unnamed_data = unnamed_data
@@ -145,6 +153,8 @@ class MemberEmitter(Emitter):
 
     def num(self, x: A.Num) -> tuple[str, int]:
         t = x.type
+        if x.value and self.thread_local(x.value):
+            raise NotReconstructed("ADDRESS_VALUE")      # a thread-local variable's address as a number: not written yet
         if self._address(x):
             # the address of an object of the image: written as the address of its placeholder, which the compiler
             # loads by a relocated address and not as a number (D-058)
@@ -155,6 +165,12 @@ class MemberEmitter(Emitter):
         return super().num(x)
 
     def _e(self, x: A.Expr) -> tuple[str, int]:
+        if isinstance(x, A.Global) and self.thread_local(x.address):
+            if x.address in self.mixed or x.address in self.globals and self.globals[x.address][1] != x.type:
+                raise NotReconstructed("LAYOUT_CONFLICT")
+            self.type_name(x.type)                     # a class the unit does not declare is refused here
+            self.globals[x.address] = (thread_placeholder(x.address - self.base), x.type)
+            return self.globals[x.address][0], PRIMARY
         if isinstance(x, A.Global):
             if not self.unnamed_data(x.address):
                 raise NotReconstructed("GLOBAL_NOT_DECLARED")
@@ -200,15 +216,18 @@ class MemberEmitter(Emitter):
             r = "void" if s.result is None else self.type_name(self.t.ctype(self.t.slot(at, -1, s.result)))
             protos.append(f"{r} {name}({', '.join(f'{a} arg{k + 1}' for k, a in enumerate(args))});")
         for at, (name, t) in sorted(self.globals.items()):
-            protos.append(f'extern "C" unsigned char {name}[];' if t is None else f"extern {self.type_name(t)} {name};")
+            protos.append(f'extern "C" unsigned char {name}[];' if t is None else
+                          f"extern {'thread_local ' if self.thread_local(at) else ''}{self.type_name(t)} {name};")
         return MemberUnit(definition, f"{'static ' if form == 'static' else ''}{rt} {self.d.method}({ps}){nx}", form, len(lines),
                           "".join(x + "\n" for x in protos), tuple((n, a - self.base) for a, n in sorted(self.callees.items())),
                           tuple((n, a - self.base) for a, (n, _t) in sorted(self.globals.items())))
 
 
 def member_form(body: A.Body, types: ty.Types, image_base: int, rva: int, d: Declared,
-                unnamed: Callable[[int], bool] = lambda at: False, unnamed_data: Callable[[int], bool] = lambda at: False) -> MemberUnit:
-    """The body as `d.cls::d.method`, or NotReconstructed with the reason. `unnamed`, `unnamed_data`: as `MemberEmitter`'s."""
+                unnamed: Callable[[int], bool] = lambda at: False, unnamed_data: Callable[[int], bool] = lambda at: False,
+                thread_local: Callable[[int], bool] = lambda at: False) -> MemberUnit:
+    """The body as `d.cls::d.method`, or NotReconstructed with the reason. `unnamed`, `unnamed_data`, `thread_local`: as
+    `MemberEmitter`'s."""
     p0 = body.params[0] if body.params else None
     used = p0 is not None and any(isinstance(x, A.Local) and x.id == p0.id for s in body.stmts for x in A.walk(s))
     if not used:
@@ -217,8 +236,8 @@ def member_form(body: A.Body, types: ty.Types, image_base: int, rva: int, d: Dec
         form, cls, this = "this", p0.type.to.number, p0.id
     else:
         form, cls, this = "static", None, None
-    return MemberEmitter(types, image_base, rva, d, cls, this, unnamed, unnamed_data).member_unit(body, rva, form)
+    return MemberEmitter(types, image_base, rva, d, cls, this, unnamed, unnamed_data, thread_local).member_unit(body, rva, form)
 
 
 __all__ = ["FORMS", "Declared", "Member", "MemberEmitter", "MemberUnit", "bytes_placeholder", "data_placeholder", "member_form",
-           "placeholder"]
+           "placeholder", "thread_placeholder"]

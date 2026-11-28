@@ -19,6 +19,8 @@ from recon.adapters.skyrim.comparator import ComparatorUnavailable
 
 SOURCES = ("tools/compare.py", "tools/compare_internal.py", "tools/compare_runtime.py", "tools/pecoff.py")
 PASS = "all-checks-passed"
+#: the kind of a symbol-map entry that places a thread-local variable by its offset in the TLS template
+THREAD_LOCAL = "thread-local"
 
 
 def sha256(b: bytes) -> str:
@@ -65,14 +67,18 @@ class Verifier:
             raise ComparatorUnavailable("an upstream module resolved outside the pinned worktree")
         return m
 
-    def verify(self, rva: int, size: int, symbol: str, source: bytes, obj: bytes, symbols: dict[str, tuple[int, int | None]], path: str = "unit.cpp") -> dict:
-        """The comparator's report. `symbols`: decorated name -> (RVA, size or None)."""
+    def verify(self, rva: int, size: int, symbol: str, source: bytes, obj: bytes, symbols: dict[str, tuple[int, int | None]], path: str = "unit.cpp",
+               thread: dict[str, int] | None = None) -> dict:
+        """The comparator's report. `symbols`: decorated name -> (RVA, size or None); `thread`: decorated name of a
+        thread-local variable -> its offset in the image's template (D-074), which the comparator checks a SECREL against."""
         revision = sha256(source)
         task = {"task_id": f"recon-{rva:x}", "build_id": self.build_id, "target_image_sha256": sha256(self.image), "rva": rva, "size": size, "symbol": symbol,
                 "source_revision": revision, "source_path": path, "recipe_sha256": sha256(self.recipe)}
         manifest = {"status": "pinned", "build_id": self.build_id, "image_sha256": sha256(self.image)}
         record = {"source_revision": revision, "source_path": path, "recipe_sha256": sha256(self.recipe), "object_sha256": sha256(obj)}
-        smap = json.dumps({"schema": 1, "build_id": self.build_id, "symbols": {n: {"rva": r, "size": s} for n, (r, s) in sorted(symbols.items())}}).encode()
+        entries: dict[str, dict] = {n: {"rva": r, "size": s} for n, (r, s) in sorted(symbols.items())}
+        entries |= {n: {"kind": THREAD_LOCAL, "tls_offset": off, "size": None} for n, off in sorted((thread or {}).items())}
+        smap = json.dumps({"schema": 1, "build_id": self.build_id, "symbols": dict(sorted(entries.items()))}).encode()
         report = self._engine().compare(task, manifest, self.recipe, record, obj, self.image, smap, diagnostics=None)
         if report["reason"] not in reason_codes(str(self.worktree)):
             raise UnknownReason(str(report["reason"]))

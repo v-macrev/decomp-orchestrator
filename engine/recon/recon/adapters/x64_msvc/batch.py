@@ -134,7 +134,8 @@ def _rows(code: bytes, holes: dict[int, str]) -> list[tuple]:
 
 
 def distance(f: coff.Function, target: bytes, rva: int, resolve) -> Distance:
-    """`resolve(reloc)`: the RVA a reference of the candidate means by the evidence, or None when no evidence names it.
+    """`resolve(reloc)`: the RVA a reference of the candidate means by the evidence, or None when no evidence names it; for a
+    section-relative reference (a thread-local variable's, D-074), the offset it means in its section.
 
     A named reference counts as wrong when the target's field leads elsewhere. An unnamed one is masked like a named one
     and counted apart: whether it is right is the comparator's question, so a candidate that differs only there has
@@ -154,6 +155,9 @@ def distance(f: coff.Function, target: bytes, rva: int, resolve) -> Distance:
             disp = int.from_bytes(target[r.offset:r.offset + 4], "little", signed=True)
             add = int.from_bytes(f.code[r.offset:r.offset + 4], "little", signed=True)
             wrong += rva + r.offset + 4 + coff.REL32[r.kind] + disp - add != meant
+        elif r.kind == coff.SECREL and r.offset + 4 <= len(target):
+            field = int.from_bytes(target[r.offset:r.offset + 4], "little")
+            wrong += field != meant + int.from_bytes(f.code[r.offset:r.offset + 4], "little")
         else:
             wrong += 1
     if len(f.code) == len(target):

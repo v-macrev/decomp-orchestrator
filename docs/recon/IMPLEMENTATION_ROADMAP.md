@@ -399,6 +399,9 @@ D-073:            full prewarm (normal forms 60 min, 3 workers), then signatures
                   80,807 -> 76,036; development CALLEE_SIGNATURE_UNKNOWN 574 -> 494 (held-out 16 -> 13), BYTE_MATCHED
                   100 + 10 -> 106 + 10, none lost, MISMATCH 55 -> 44. Next at STACK_ARGUMENT 23 -> 48, READS_A_LOCATION_NOBODY_SET
                   119 -> 154, LOCAL_IN_MEMORY 83 -> 103, CONSTRUCT_UNSUPPORTED 89 -> 105
+D-074:            campaign only (the facts untouched), 3 workers: READS_A_LOCATION_NOBODY_SET 154 -> 131, BYTE_MATCHED
+                  106 + 10 -> 107 + 10, none lost, the first with a thread-local variable. Next at CALLEE_SIGNATURE_UNKNOWN 8,
+                  LOCAL_IN_MEMORY 6, NO_MATCH 4
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 

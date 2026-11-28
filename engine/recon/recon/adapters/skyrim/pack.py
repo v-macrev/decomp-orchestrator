@@ -15,13 +15,31 @@ from recon.adapters.x64_msvc import coff
 from recon.adapters.x64_msvc.batch import Compiler, distance
 from recon.adapters.x64_msvc.cl import Toolchain
 from recon.adapters.x64_msvc.symbols import scoped
+from recon.adapters.x64_msvc.threads import thread_locals
 from recon.core import budget as bg
+from recon.core.inference.whole import Program
 from recon.core.synthesis import search
 from recon.core.synthesis.candidates import Candidate
+from recon.core.synthesis.thread import ThreadLocals
 
 
 class Pack(PackFacts):
     """A pack: its image's facts (`PackFacts`), the candidates of whose functions are compiled and verified here."""
+
+    def thread_locals(self) -> ThreadLocals | None:
+        """Where the image keeps its thread-local variables, from its thread-local directory (D-074); None without one."""
+        try:
+            template = self.image.pe.tls_template()
+        except self.image.up.pecoff.Reject:      # an image with no (or no valid) directory
+            template = None
+        return thread_locals(template, self.image.image_base)
+
+    def program(self) -> Program:
+        """The facts' program, with where the image keeps its thread-local variables for the source it writes (`thread`):
+        none of the facts depends on it."""
+        p = super().program()
+        p.thread = self.thread_locals()  # type: ignore[attr-defined]
+        return p
 
 
 class Workshop:
