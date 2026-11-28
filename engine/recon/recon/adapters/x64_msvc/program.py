@@ -6,7 +6,9 @@ function beyond the class of the instruction form that is missing.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
+from typing import Callable
 
 from recon.adapters.x64_msvc import eh
 from recon.adapters.x64_msvc import switch as sw
@@ -123,14 +125,27 @@ def analyse(code: bytes, rva: int, image_base: int, validated: frozenset[str] | 
     return a
 
 
-def to_ir(a: Analysis, image_base: int, unwind_entries: list[UnwindEntry] | None = None, read: uw.Reader | None = None) -> Fn | Refusal:
-    """The IR of an analysed function, straight from its instructions (no transformation applied). `read`: the image, for exception data."""
+def to_ir(a: Analysis, image_base: int, unwind_entries: list[UnwindEntry] | None = None, read: uw.Reader | None = None,
+          handler_name: Callable[[int], str | None] | None = None) -> Fn | Refusal:
+    """The IR of an analysed function, straight from its instructions (no transformation applied). `read`: the image, for
+    exception data; `handler_name`: the name of the function an RVA imports through its thunk, when it is one."""
     try:
         exceptions = None
         if any(info.handler is not None for _b, _e, info in unwind_entries or []):
             if read is None:
                 raise ib.BuildRefusal("exception-edges-not-represented")
-            exceptions = eh.unwinding(read, unwind_entries or [], a.rva, [i.end for i in a.insns if isinstance(i.terminator, CallTo)])
+            ends = [i.end for i in a.insns if isinstance(i.terminator, CallTo)]
+            own = [(b, i) for b, _e, i in unwind_entries or [] if i.handler is not None]
+            if (len(own) == 1 and own[0][0] == a.rva and handler_name is not None and own[0][1].handler is not None
+                    and handler_name(own[0][1].handler) == eh.C_SPECIFIC_HANDLER):
+                spans = sorted((i.rva, i.end) for i in a.insns)
+
+                def inside(r: int) -> bool:
+                    k = bisect_right(spans, (r, 1 << 64)) - 1
+                    return k >= 0 and spans[k][0] <= r < spans[k][1]
+                exceptions = eh.seh_unwinding(read, own[0][1], inside, ends)
+            else:
+                exceptions = eh.unwinding(read, unwind_entries or [], a.rva, ends)
         if a.frame is None:
             raise ib.BuildRefusal(a.frame_refusal or "no-frame")
         if a.unwind_conflicts:

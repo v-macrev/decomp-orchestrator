@@ -1038,3 +1038,80 @@ def test_a_frame_that_contradicts_the_unwind_data_is_refused():
     an = L.analysed(a)
     assert isinstance(pg.to_ir(an, BASE), Fn)
     assert pg.to_ir(dataclasses.replace(an, unwind_conflicts=("leaf-with-a-frame",)), BASE).detail == "frame-contradicts-unwind-data"
+
+
+# ---------------------------------------------------------------- structured exceptions and fragments (D-072)
+
+SEH = UnwindInfo(1, 2, 0, 1, None, 0x9000, IMAGE_AT, None, (UnwindCode(4, 0x48),))
+
+
+def seh_image(*scopes):
+    """A reader over a made-up scope table: (begin, end, handler, jump target) RVAs, innermost first."""
+    blob = struct.pack("<I", len(scopes)) + b"".join(struct.pack("<IIII", *s) for s in scopes)
+
+    def read(rva, n):
+        if not 0 <= rva - IMAGE_AT <= len(blob) - n:
+            raise ValueError("outside")
+        return blob[rva - IMAGE_AT : rva - IMAGE_AT + n]
+    return read
+
+
+def inside(r):
+    return L.RVA <= r < L.RVA + 64
+
+
+def test_a_termination_scope_runs_its_handler_for_the_calls_it_covers():
+    u = eh.seh_unwinding(seh_image((L.RVA + 8, L.RVA + 30, 0x9900, 0)), SEH, inside, [L.RVA + 7, L.RVA + 20, L.RVA + 30])
+    assert u == build.Unwinding(((-1, 0x9900),), ((L.RVA + 7, -1), (L.RVA + 20, 0), (L.RVA + 30, -1)), None)
+
+
+def test_nested_termination_scopes_run_the_inner_handler_then_the_outer():
+    inner, outer = (L.RVA + 10, L.RVA + 20, 0x9900, 0), (L.RVA + 4, L.RVA + 40, 0x9a00, 0)
+    u = eh.seh_unwinding(seh_image(inner, outer), SEH, inside, [L.RVA + 15, L.RVA + 30])
+    assert u.states == ((-1, 0x9a00), (0, 0x9900)) and dict(u.at) == {L.RVA + 15: 1, L.RVA + 30: 0}
+
+
+@pytest.mark.parametrize("scopes,why", [
+    (((L.RVA + 8, L.RVA + 30, 0x9900, L.RVA + 40),), "catch-blocks-not-represented"),          # __except: comes back into the function
+    (((L.RVA + 4, L.RVA + 40, 0x9a00, 0), (L.RVA + 10, L.RVA + 20, 0x9900, 0)), eh.NOT_UNDERSTOOD),  # outer before inner
+    (((L.RVA + 4, L.RVA + 20, 0x9a00, 0), (L.RVA + 10, L.RVA + 30, 0x9900, 0)), eh.NOT_UNDERSTOOD),  # overlapping
+    (((L.RVA + 8, L.RVA + 30, L.RVA + 40, 0),), eh.NOT_UNDERSTOOD),                          # a handler inside the function
+    (((L.RVA + 8, L.RVA + 90, 0x9900, 0),), eh.NOT_UNDERSTOOD),                              # a scope beyond its code
+    ((), eh.NOT_UNDERSTOOD)])
+def test_scope_tables_that_are_not_understood_are_refused(scopes, why):
+    with pytest.raises(eh.EhError) as e:
+        eh.seh_unwinding(seh_image(*scopes), SEH, inside, [])
+    assert e.value.reason == why
+
+
+def test_the_structured_handler_is_read_only_when_the_handler_imports_it():
+    a = Asm()
+    a(A.sub_rsp(0x48))(A.add_rsp(0x48))(A.ret())
+    read = seh_image((L.RVA + 4, L.RVA + 8, 0x9900, 0))
+    named = lambda at: eh.C_SPECIFIC_HANDLER if at == 0x9000 else None  # noqa: E731
+    fn = pg.to_ir(L.analysed(a), BASE, [(L.RVA, L.RVA + 64, SEH)], read, named)
+    assert isinstance(fn, Fn) and fn.unwind == ((-1, 0x9900),)
+    assert pg.to_ir(L.analysed(a), BASE, [(L.RVA, L.RVA + 64, SEH)], read).detail == eh.NOT_UNDERSTOOD
+
+
+def test_a_function_is_read_through_the_parts_its_unwind_data_chains_to_it_that_follow_on():
+    """f(a): a ? 1 : 0, its .pdata split where the frame is set up: the a != 0 part follows the listed range as a chained entry."""
+    from recon.adapters.skyrim.normal import with_fragments
+    main = Asm(L.RVA)(A.sub_rsp(40))(I.create_reg_reg(C.TEST_RM32_R32, R.ECX, R.ECX))
+    main.branch(C.JNE_REL32_64, "part")
+    main(I.create_reg_reg(C.XOR_R32_RM32, R.EAX, R.EAX))(A.add_rsp(40))(A.ret())
+    main.label("part")(I.create_reg_i32(C.MOV_R32_IMM32, R.EAX, 1))(A.add_rsp(40))(A.ret())
+    code, labels = main.assemble()
+    n = labels["part"] - L.RVA
+
+    class Image:
+        def __init__(self, parts):
+            self.parts = parts
+
+        def fragments(self, rva, size):
+            return self.parts
+    assert pg.analyse(code[:n], L.RVA, BASE, None, []).frame_refusal == "stack-not-balanced-at-exit"
+    m = with_fragments(Image([(L.RVA + n, L.RVA + len(code), 0)]), L.RVA, n)
+    assert m == len(code) and pg.analyse(code[:m], L.RVA, BASE, None, []).frame_refusal is None
+    assert with_fragments(Image([(L.RVA + n + 16, L.RVA + n + 32, 0)]), L.RVA, n) == n     # a part apart is left out
+    assert with_fragments(Image([]), L.RVA, n) == n

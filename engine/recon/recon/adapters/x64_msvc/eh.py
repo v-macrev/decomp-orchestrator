@@ -88,3 +88,44 @@ def unwinding(read: Reader, entries: list[tuple[int, int, UnwindInfo]], rva: int
     sets = [c.offset for c in steps if c.sets_frame]
     depth = sum(c.alloc for c in steps if not sets or c.offset <= sets[0])
     return Unwinding(f.states, tuple(sorted((r, f.state_at(r)) for r in ends)), f.unwind_help - depth, bool(f.flags & NOEXCEPT))
+
+
+#: the runtime's handler for structured exceptions, which walks a scope table (D-072)
+C_SPECIFIC_HANDLER = "__C_specific_handler"
+MAX_SCOPES = 64
+
+
+def seh_unwinding(read: Reader, info: UnwindInfo, inside, ends: list[int]) -> Unwinding:
+    """The unwinding of a function whose handler is the runtime's structured-exception handler, from its scope table: per
+    scope (begin, end, handler, jump target), innermost first. Only termination scopes (`__finally`, no jump target) are
+    represented: an `__except` scope comes back into the function. A scope covers code of the function and hands an exception
+    to a handler outside it; scopes are nested or apart, an inner one before any that contains it. The state of a call is the
+    innermost scope its return address is in; leaving it, the runtime runs that scope's handler and the next containing one's.
+    `inside`: whether an RVA is code of the function."""
+    if info.handler_data is None:
+        raise EhError(NOT_UNDERSTOOD)
+    try:
+        (n,) = struct.unpack("<I", read(info.handler_data, 4))
+        if not 1 <= n <= MAX_SCOPES:
+            raise EhError(NOT_UNDERSTOOD)
+        raw = read(info.handler_data + 4, 16 * n)
+    except (ValueError, struct.error):
+        raise EhError(NOT_UNDERSTOOD) from None
+    scopes = [struct.unpack_from("<IIII", raw, 16 * k) for k in range(n)]
+    for b, e, h, j in scopes:
+        if not (b < e and inside(b) and inside(e - 1)) or h <= 1 or inside(h):
+            raise EhError(NOT_UNDERSTOOD)
+        if j:
+            raise EhError("catch-blocks-not-represented")
+    parent = []
+    for k, (b, e, _h, _j) in enumerate(scopes):
+        for i, (b2, e2, _h2, _j2) in enumerate(scopes):
+            if i != k and b < e2 and b2 < e and not (b2 <= b and e <= e2 and i > k or b <= b2 and e2 <= e and i < k):
+                raise EhError(NOT_UNDERSTOOD)        # overlapping, or an outer scope listed before an inner one
+        parent.append(next((i for i in range(k + 1, n) if scopes[i][0] <= b and e <= scopes[i][1]), -1))
+    state = lambda k: -1 if k < 0 else n - 1 - k  # noqa: E731  (a containing scope gets a lower state)
+    states = tuple((state(parent[k]), scopes[k][2]) for k in reversed(range(n)))
+
+    def at(r: int) -> int:
+        return state(next((k for k, (b, e, _h, _j) in enumerate(scopes) if b <= r < e), -1))
+    return Unwinding(states, tuple(sorted((r, at(r)) for r in ends)), None, False)

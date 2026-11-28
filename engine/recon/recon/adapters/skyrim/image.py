@@ -34,6 +34,8 @@ class PinnedImage:
         self.image_base: int = self.pe.image_base
         self._pdata: list[tuple[int, int, int]] | None = None
         self._segments: list[Segment] | None = None
+        self._chains: dict[int, list[tuple[int, int, int]]] | None = None
+        self._imports: dict[int, str] | None = None
 
     # -- address mapping ------------------------------------------------------------------------
     def read(self, rva: int, size: int) -> bytes:
@@ -97,6 +99,44 @@ class PinnedImage:
         if self._pdata is None:
             self._pdata = sorted(self.pe.runtime_functions())
         return self._pdata
+
+    def fragments(self, rva: int, n: int) -> list[tuple[int, int, int]]:
+        """The `.pdata` entries outside [rva, rva + n) whose unwind data chains, directly or through another such entry, to
+        the entry that starts at `rva` (D-072): parts of that function the compiler placed elsewhere."""
+        if self._chains is None:
+            from recon.adapters.x64_msvc import unwind as uw
+            self._chains = {}
+            for b, e, u in self.runtime_functions():
+                try:
+                    c = uw.read_unwind(self.read, u).chained
+                except (ValueError, IndexError):
+                    continue
+                if c is not None:
+                    self._chains.setdefault(c[0], []).append((b, e, u))
+        out: list[tuple[int, int, int]] = []
+        work, seen = [rva], {rva}
+        while work:
+            for f in self._chains.get(work.pop(), ()):
+                if f[0] not in seen:
+                    seen.add(f[0])
+                    work.append(f[0])
+                    if not rva <= f[0] < rva + n:
+                        out.append(f)
+        return sorted(out)
+
+    def imported_through(self, rva: int) -> str | None:
+        """The name of the function the code at `rva` jumps to through the import address table, when it is such a thunk."""
+        if self._imports is None:
+            from recon.adapters.x64_msvc.imports import import_slots
+            self._imports = {at: i.name for at, i in import_slots(self.pe.blob, self.read).items() if i.name}
+        try:
+            code = self.read(rva, 7)
+        except ValueError:
+            return None
+        k = 1 if code[0] == 0x48 else 0
+        if code[k:k + 2] != bytes((0xFF, 0x25)):
+            return None
+        return self._imports.get(rva + k + 6 + int.from_bytes(code[k + 2:k + 6], "little", signed=True))
 
 
 def locate_image(checkout: str | Path) -> Path:

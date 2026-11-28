@@ -18,13 +18,26 @@ from recon.core.ir.model import Fn
 SCN_MEM_EXECUTE = 0x2000_0000
 
 
+def with_fragments(image: PinnedImage, rva: int, n: int) -> int:
+    """The length of the function at `rva` read with the parts its unwind data chains to it that follow on from its `n`
+    bytes without a gap (D-072): the compiler splits one function's `.pdata` into chained entries where its frame changes
+    shape, and the extents list the first entry's range only. A part apart from them is left out."""
+    end = rva + n
+    for b, e, _u in image.fragments(rva, n):
+        if b != end:
+            break
+        end = e
+    return end - rva
+
+
 def normal_form(image: PinnedImage, validated: frozenset[str] | None, rva: int, n: int) -> Fn:
     """The admitted normal form of the function at `rva`, `n` bytes long, or NotReconstructed."""
+    n = with_fragments(image, rva, n)
     entries = [(b, e, uw.read_unwind(image.read, u)) for b, e, u in image.runtime_functions() if rva <= b < rva + n]
     a = pg.analyse(image.read(rva, n), rva, image.image_base, validated, entries)
     if isinstance(a, pg.Refusal):
         raise NotReconstructed(a.code)
-    fn = pg.to_ir(a, image.image_base, entries, image.read)
+    fn = pg.to_ir(a, image.image_base, entries, image.read, image.imported_through)
     if isinstance(fn, pg.Refusal):
         raise NotReconstructed(fn.detail.upper().replace("-", "_"))
     return validate.require(validate.admit(passes.normalise(fn, CALLING), CALLING))

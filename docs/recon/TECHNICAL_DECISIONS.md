@@ -638,3 +638,30 @@ the stack arguments. A home slot whose address leaves is now refused as `VARIADI
 (or the address is not one fixed slot); any other is a local, which changes no parameter. Measured: `VARIADIC` 1,587 ->
 26; unknown signatures 84,690 -> 81,145; development functions at `CALLEE_SIGNATURE_UNKNOWN` 625 -> 574 (held-out 18 -> 16);
 `MISMATCH` 60 -> 55; byte-matched the same 100 + 10.
+
+## D-072 · 2026-11-27 · Structured-exception termination scopes, and functions read through their chained parts
+Under the D-071 engine's 574 development functions at `CALLEE_SIGNATURE_UNKNOWN`, five functions were the roots under 387 of
+them: two refused at `HANDLER_NOT_UNDERSTOOD`, two at `STACK_NOT_BALANCED_AT_EXIT`, one with handler data that is no table
+the engine reads (left as it is).
+
+The two handler roots are cleaned up after by the runtime's structured-exception handler (`__C_specific_handler`), which
+walks a scope table, not the C++ handler's `FuncInfo`. A function whose handler is a thunk that imports that handler is now
+read from its scope table (`eh.seh_unwinding`): termination scopes (`__finally`, no jump target) only, each covering code of
+the function and handing an exception to a handler outside it, nested or apart, an inner one listed before any that contains
+it; a call's state is the innermost scope its return address is in, and leaving it runs that scope's handler, then the next
+containing one's — the cleanup states D-058 represents for C++. An `__except` scope comes back into the function and stays
+`CATCH_BLOCKS_NOT_REPRESENTED`; anything else stays `HANDLER_NOT_UNDERSTOOD`.
+
+The two stack roots jump, frame still set up, to code whose `.pdata` entry chains its unwind data to theirs: the compiler
+splits one function's entries where its frame changes shape, and the extents list the first entry's range only. Of the 413
+pack functions with such chained parts, every one has them following on from its range without a gap and with no other
+function among them. A normal form now reads the function through those parts (`with_fragments`), so that decoding sees
+any table its code keeps after them; a part apart from them would be left out. The comparator's extent is not changed.
+
+Measured: normal forms all made again (50 min with 3 workers), signatures 24 min; unknown signatures 81,145 -> 80,807.
+The five roots are resolved but one (the unread table, under 3); the development functions at `CALLEE_SIGNATURE_UNKNOWN`
+stay 574 (held-out 16) and byte-matched the same 100 + 10, none lost: under the four resolved roots the same ~390 functions
+now meet roots that were hidden behind them — two `STACK_ARGUMENTS` (under 401 and 389), two `INDIRECT_CALL` (407 each), one
+`CONFLICTING_EVIDENCE` (388) and one `READS_A_LOCATION_NOBODY_SET` (137). The functions with chained parts that now reach the
+handler check are mostly cleaned up after by the statically linked buffer-check handler, whose data is no `FuncInfo`
+(`HANDLER_NOT_UNDERSTOOD` 242 -> 426, `CONFLICTING_EVIDENCE` 751 -> 499).
