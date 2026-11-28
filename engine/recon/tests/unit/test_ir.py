@@ -1115,3 +1115,13 @@ def test_a_function_is_read_through_the_parts_its_unwind_data_chains_to_it_that_
     assert m == len(code) and pg.analyse(code[:m], L.RVA, BASE, None, []).frame_refusal is None
     assert with_fragments(Image([(L.RVA + n + 16, L.RVA + n + 32, 0)]), L.RVA, n) == n     # a part apart is left out
     assert with_fragments(Image([]), L.RVA, n) == n
+
+
+def test_padding_between_the_last_instruction_and_a_table_is_not_code():
+    """D-073: f(): return table[0]; ret, a nop of padding, then the table the code reads."""
+    a = Asm()
+    a.lazy(lambda at: I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem(R.RIP, BASE + at["table"])))
+    a(A.ret())(I.create(C.NOPD))
+    a.label("table").data(bytes(8))
+    r = pg.analyse(a.assemble()[0], L.RVA, BASE, None)
+    assert isinstance(r, pg.Analysis) and r.data_start is not None and r.insns[-1].rva < r.data_start

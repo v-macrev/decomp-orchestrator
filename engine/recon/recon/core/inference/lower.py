@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from recon.core import sem
 from recon.core.analysis import graph
 from recon.core.inference.signature import FLOAT, INT, CalleeOf, Convention, NotReconstructed, Signature, Slot
 from recon.core.ir import memory as mem
@@ -16,6 +17,8 @@ from recon.core.ir import passes
 from recon.core.ir.build import drop_dead, simplify_phis, substitute
 from recon.core.ir.model import FRAME, Arg, Block, Const, Fn, Op, Phi, Term
 
+#: operations that compute with floating values (a value one of them uses is floating)
+FLOATING_OPS = frozenset(k for k, (_n, rule) in sem.OPS.items() if rule in ("fsame", "fcmp", "fun", "f2f", "f2i"))
 #: operations whose low bits depend on the same low bits of their operands only
 LOW = frozenset({"add", "sub", "mul", "neg", "not", "and", "or", "xor"})
 ROUND = 40
@@ -82,8 +85,9 @@ def _cleaned(fn: Fn) -> Fn:
 
 # ---------------------------------------------------------------------------------------- exits and calls
 
-def expose(fn: Fn, conv: Convention, callee: CalleeOf, result: Slot | None) -> Fn:
-    """Calls and exits with what the signatures say, entry values that are no arguments as undefined."""
+def expose(fn: Fn, conv: Convention, callee: CalleeOf, result: Slot | None, stack_left_out: bool = False) -> Fn:
+    """Calls and exits with what the signatures say, entry values that are no arguments as undefined. With
+    `stack_left_out`, a callee's arguments on the stack are left out of its call (only the caller's signature is wanted)."""
     e = _Edit(fn)
     params = {v: n for n, v in fn.params}
     given = {n for pair in conv.slots for n in pair}
@@ -102,6 +106,8 @@ def expose(fn: Fn, conv: Convention, callee: CalleeOf, result: Slot | None) -> F
         out = []
         for k, p in enumerate(s.params):
             if k >= len(conv.slots):
+                if stack_left_out:
+                    break
                 raise NotReconstructed("STACK_ARGUMENTS")
             out.append(e.low(have[conv.place(k, p.kind)], p.width, ops, at))
         return out
@@ -346,27 +352,52 @@ def _spilled(fn: Fn, conv: Convention, abi, d: dict, params: dict) -> set[int]:
     return out
 
 
-def _frame_for_signature(fn: Fn, conv: Convention, abi) -> None:
-    """What a frame left in memory may still say about the parameters (D-070, D-071): a read at or above the first stack
-    argument is an argument there (STACK_ARGUMENTS). The address of a home slot leaving the function's own reads and writes
-    is how a variable argument list is walked (VARIADIC) when every position from that slot on has its entry value spilled to
-    its own home slot, as `va_start` needs; any other home slot whose address leaves is a local the compiler placed there.
-    Locals in memory change no parameter."""
+def _frame_for_signature(fn: Fn, conv: Convention, abi) -> tuple[Slot, ...]:
+    """What a frame left in memory says about the parameters (D-070, D-071, D-073). A read at or above the first stack
+    argument, at a fixed place a word apart from it, is the argument there: its position follows the registers' and its
+    width is the read's, floating when a floating operation uses it, an integer otherwise; the stack parameters come back,
+    positions nothing reads before one that is read as integers. Anything else there (an address of it that leaves, a
+    place that is no word of its own, readings of one place as an integer and as a floating value) is refused
+    (STACK_ARGUMENTS). The address of a home slot leaving the function's own reads and writes is how a variable argument
+    list is walked (VARIADIC) when every position from that slot on has its entry value spilled to its own home slot, as
+    `va_start` needs; any other home slot whose address leaves is a local the compiler placed there. Locals in memory
+    change no parameter."""
     first = abi.word + abi.home
     d = {v: o for v, (_b, o) in fn.defining().items()}
     params = {v: n for n, v in fn.params}
+    uses: dict[int, list[Op | Phi | Term]] = {}
+    for b in fn.blocks:
+        for x in (*b.phis, *b.ops, b.term):
+            for a in ([a for _k, a in x.args] if isinstance(x, Phi) else x.args):
+                if isinstance(a, int):
+                    uses.setdefault(a, []).append(x)
     home: set[int] = set()
+    stack: dict[int, Slot] = {}
     for _b, o in fn.ops():
         if o.kind == FRAME:
             off = int(o.attr("off"))  # type: ignore[call-overload]
-            if off >= first:
-                raise NotReconstructed("STACK_ARGUMENTS")
-            if off >= abi.word:
+            if abi.word <= off < first:
                 home.add(o.defs[0])
+            elif off >= first:
+                _fixed_places_only(o.defs[0], uses)
         elif o.kind in ("load", "store") and o.args:
             at = mem.resolve(o.args[0], d.get, params)
-            if at is not None and at[0] == "frame" and at[1] >= first:
+            if at is None or at[0] != "frame" or at[1] < first:
+                continue
+            if (at[1] - first) % abi.word:
                 raise NotReconstructed("STACK_ARGUMENTS")
+            k = len(conv.slots) + (at[1] - first) // abi.word
+            if o.kind == "store":
+                stack.setdefault(k, Slot(INT, 64))
+                continue
+            w = fn.width(o.defs[0])
+            floating = any(isinstance(u, Op) and u.kind in FLOATING_OPS for u in uses.get(o.defs[0], ()))
+            if w not in (8, 16, 32, 64) or floating and w not in (32, 64):
+                raise NotReconstructed("STACK_ARGUMENTS")
+            slot = Slot(FLOAT if floating else INT, w)
+            if k in stack and stack[k].kind != slot.kind:
+                raise NotReconstructed("STACK_ARGUMENTS")
+            stack[k] = Slot(slot.kind, max(slot.width, stack[k].width)) if k in stack else slot
     spilled: set[int] | None = None
     work = list(home)
     while work:      # values computed from a home-space address by a fixed offset are home-space addresses too
@@ -391,6 +422,25 @@ def _frame_for_signature(fn: Fn, conv: Convention, abi) -> None:
                 k = max(0, -(-(at[1] - abi.word) // abi.word))
                 if all(j in spilled for j in range(k, len(conv.slots))):
                     raise NotReconstructed("VARIADIC")
+    top = max(stack, default=len(conv.slots) - 1)
+    return tuple(stack.get(k, Slot(INT, 64)) for k in range(len(conv.slots), top + 1))
+
+
+def _fixed_places_only(v: int, uses: dict) -> None:
+    """A stack argument's address is used only to read or write at a fixed place (by a fixed offset from it), never kept,
+    handed on or indexed: else the arguments past it cannot be told (STACK_ARGUMENTS)."""
+    work, seen = [v], {v}
+    while work:
+        x = work.pop()
+        for u in uses.get(x, ()):
+            if isinstance(u, Op) and u.kind in ("load", "store") and u.args[0] == x and x not in u.args[1:]:
+                continue
+            if isinstance(u, Op) and u.kind in ("add", "sub") and u.args[0] == x and isinstance(u.args[1], Const):
+                if u.defs[0] not in seen:
+                    seen.add(u.defs[0])
+                    work.append(u.defs[0])
+                continue
+            raise NotReconstructed("STACK_ARGUMENTS")
 
 
 def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None,
@@ -399,7 +449,7 @@ def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None,
     wanted (D-070): what the source would still have to spell (a local in memory, a read of the machine's environment, a
     value wider than a register inside the body) does not stop them, while anything that leaves them unsure does."""
     env = _environment(fn, conv, abi) if signature_only else set()
-    fn = _tidy(expose(fn, conv, callee, result), abi)
+    fn = _tidy(expose(fn, conv, callee, result, signature_only), abi)
     for _ in range(ROUND):
         before = fn.blocks
         fn = _tidy(_cleaned(narrow(fn)), abi)
@@ -414,7 +464,9 @@ def lower(fn: Fn, conv: Convention, abi, callee: CalleeOf, result: Slot | None,
     if any(o.kind == "undef" and not (o.defs[0] in env) for _b, o in fn.ops()):
         raise NotReconstructed("READS_A_LOCATION_NOBODY_SET")
     if signature_only:
-        _frame_for_signature(fn, conv, abi)
+        stack = _frame_for_signature(fn, conv, abi)
+        if stack:
+            slots = (*slots, *(Slot(INT, 64) for _k in range(len(slots), len(conv.slots))), *stack)
         return fn, slots
     if any(o.kind == FRAME for _b, o in fn.ops()):
         raise NotReconstructed("LOCAL_IN_MEMORY")

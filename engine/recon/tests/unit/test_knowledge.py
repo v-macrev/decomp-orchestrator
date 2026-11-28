@@ -21,14 +21,14 @@ from recon.adapters.x64_msvc import program as pg  # noqa: E402
 from recon.adapters.x64_msvc.abi import CALLING, SOURCE  # noqa: E402
 from recon.core import knowledge as kn  # noqa: E402
 from recon.core.budget import Budget, BudgetExhausted, active  # noqa: E402
-from recon.core.inference.signature import INT, NotReconstructed, Signature, Slot  # noqa: E402
+from recon.core.inference.signature import FLOAT, INT, NotReconstructed, Signature, Slot  # noqa: E402
 from recon.core.ir import passes, validate  # noqa: E402
 from recon.core.synthesis import candidates as cd  # noqa: E402
 
 TESTS = Path(__file__).resolve().parents[1]
 
 
-def program(*fns: Asm, store=None, declared=None, universe: bool = False, slot=None) -> cd.Program:
+def program(*fns: Asm, store=None, declared=None, universe: bool = False, slot=None, constant=None) -> cd.Program:
     """Functions at their own RVAs; a function's key digests its bytes, as an adapter's digests its extent of the image."""
     code = {f.rva: f for f in fns}
 
@@ -44,7 +44,7 @@ def program(*fns: Asm, store=None, declared=None, universe: bool = False, slot=N
         f = code.get(at - BASE)
         return None if f is None else f"{f.rva:x}:" + hashlib.sha256(f.assemble()[0]).hexdigest()[:16]
 
-    return cd.Program(normal, SOURCE, CALLING, BASE, lambda at, n: None, lambda a, w: None,
+    return cd.Program(normal, SOURCE, CALLING, BASE, lambda at, n: None, constant or (lambda a, w: None),
                       declared or (lambda at: None), store=store, key=key,
                       universe=(lambda: [BASE + r for r in code]) if universe else None, slot=slot or (lambda at: None))
 
@@ -395,6 +395,18 @@ def test_callers_that_set_more_arguments_than_a_callee_reads_leave_that_reading_
     assert p.signature(BASE + RVA) == best           # the callee's own reading is not replaced
 
 
+def test_a_caller_passing_its_own_first_argument_on_still_shows_the_positions_up_to_the_last_it_sets():
+    """D-073: h(p): f(p, 7) sets only the second location, the first passed on from h's entry: f takes two all the same."""
+    callee = Asm(RVA)(I.create_reg_reg(C.XOR_R32_RM32, R.EAX, R.EAX))(T.ret())
+    h = Asm(0x3100)(T.sub_rsp(40))(I.create_reg_i32(C.MOV_R32_IMM32, R.EDX, 7))
+    h.branch(C.CALL_REL32_64, RVA)
+    h(T.add_rsp(40))(T.ret())
+    p = program(callee, caller(0x3000, RVA, False), h, universe=True)
+    p.index_callers()
+    assert p.signature(BASE + RVA).params == ()
+    assert any(len(s.params) == 2 for s in p.alternatives(BASE + RVA))
+
+
 def test_callers_that_read_a_result_a_callee_does_not_leave_one_give_that_reading_first():
     callee = Asm(RVA)(T.store(mem(R.RCX), R.RDX))(T.ret())
     fns = [callee, caller(0x3000, RVA, True)]
@@ -658,12 +670,64 @@ def test_a_read_of_the_thread_block_does_not_hide_the_parameters():
     assert s is not None and s.params == () and s.result is not None
 
 
-def test_a_read_above_the_home_space_is_a_stack_argument_and_leaves_the_signature_unknown():
-    """f(a, b, c, d, e): return e. The fifth argument is on the stack, which the signature cannot say."""
+def test_a_read_above_the_home_space_is_the_stack_argument_there():
+    """D-073: f(a, b, c, d, e): return e. The fifth argument is on the stack; the four before it are read by nothing."""
     f = Asm(0x3000)(I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem(R.RSP, 0x28)))(T.ret())
-    p = program(f)
-    assert p.signature(BASE + 0x3000) is None
-    assert p.why_unknown(BASE + 0x3000) == "STACK_ARGUMENTS"
+    s = program(f).signature(BASE + 0x3000)
+    assert s is not None and s.params == (Slot(INT, 64),) * 4 + (Slot(INT, 32),) and s.result == Slot(INT, 32)
+
+
+def test_a_floating_stack_argument_is_one_a_floating_operation_uses():
+    """D-073: f(a, b, c, d, e, g): return g + g, g a float in the sixth position."""
+    f = Asm(0x3000)(I.create_reg_mem(C.MOVSS_XMM_XMMM32, R.XMM0, mem(R.RSP, 0x30)))(I.create_reg_reg(C.ADDSS_XMM_XMMM32, R.XMM0, R.XMM0))(T.ret())
+    s = program(f).signature(BASE + 0x3000)
+    assert s is not None and len(s.params) == 6 and s.params[4] == Slot(INT, 64) and s.params[5].kind == FLOAT and s.params[5].width == 32
+
+
+def test_the_address_of_a_stack_argument_handed_on_leaves_the_signature_unknown():
+    """D-073: f(..., e): t(&e). What lies past it cannot be told."""
+    f = Asm(0x3000)(T.sub_rsp(40))(T.lea(R.RCX, mem(R.RSP, 0x50)))
+    f.branch(C.CALL_REL32_64, 0x6000)
+    f(T.add_rsp(40))(T.ret())
+    p = program(f, _taker())
+    assert p.signature(BASE + 0x3000) is None and p.why_unknown(BASE + 0x3000) == "STACK_ARGUMENTS"
+
+
+def test_a_caller_of_a_function_with_stack_arguments_has_a_signature_of_its_own():
+    """D-073: g(x): return f(x, 0, 0, 0, 5), f reading its fifth argument. Only g's own signature is wanted, which its stack
+    argument to f does not change."""
+    f = Asm(0x6000)(I.create_reg_mem(C.MOV_R32_RM32, R.EAX, mem(R.RSP, 0x28)))(I.create_reg_reg(C.ADD_R32_RM32, R.EAX, R.ECX))(T.ret())
+    g = Asm(0x3000)(T.sub_rsp(0x38))(I.create_mem_i32(C.MOV_RM32_IMM32, mem(R.RSP, 0x20), 5))
+    g(I.create_reg_reg(C.XOR_R32_RM32, R.EDX, R.EDX))(I.create_reg_reg(C.XOR_R32_RM32, R.R8D, R.R8D))(I.create_reg_reg(C.XOR_R32_RM32, R.R9D, R.R9D))
+    g.branch(C.CALL_REL32_64, 0x6000)
+    g(T.add_rsp(0x38))(T.ret())
+    p = program(g, f)
+    s = p.signature(BASE + 0x3000)
+    assert len(p.signature(BASE + 0x6000).params) == 5
+    assert s is not None and [x.kind for x in s.params] == [INT]
+
+
+def test_a_merge_of_what_a_call_left_is_no_argument_the_caller_sets():
+    """D-073: g(p): x = 1; loop { (*slot)(p + 8, x) } where only the first call sees x in the second argument location: on
+    every later turn it holds what the call before left there, which no compiler means as an argument."""
+    g = Asm(0x3000)(T.push(R.RBX))(T.sub_rsp(32))(T.mov_rr(R.RBX, R.RCX))(I.create_reg_i32(C.MOV_R32_IMM32, R.EDX, 1))
+    g.label("top")(T.lea(R.RCX, mem(R.RBX, 8)))(I.create_mem(C.CALL_RM64, mem(R.RIP, BASE + 0x9000)))
+    g(I.create_reg_reg(C.TEST_RM32_R32, R.EAX, R.EAX))
+    g.branch(C.JNE_REL32_64, "top")
+    g(T.add_rsp(32))(T.pop(R.RBX))(T.ret())
+    (sig,) = cd.indirect_signatures(program(g).normal(BASE + 0x3000), SOURCE).values()
+    assert len(sig.params) == 1
+
+
+def test_a_call_through_read_only_memory_that_holds_a_function_calls_that_function():
+    """D-073: g(p): return (*kSlot)(p), kSlot a constant pointer to f: g calls f, and has f's signature for it."""
+    f = Asm(0x6000)(I.create_reg_mem(C.LEA_R32_M, R.EAX, mem(R.RCX, 1)))(T.ret())
+    g = Asm(0x3000)(I.create_mem(C.JMP_RM64, mem(R.RIP, BASE + 0x9000)))
+    p = program(g, f, constant=lambda at, w: BASE + 0x6000 if at == BASE + 0x9000 and w == 64 else None)
+    assert BASE + 0x6000 in p.edges(BASE + 0x3000)
+    s = p.signature(BASE + 0x3000)
+    assert s is not None and s.params == p.signature(BASE + 0x6000).params and s.result is not None
+    assert program(g, f).signature(BASE + 0x3000) is None      # without the constant it stays a jump through a value
 
 
 def test_the_address_of_the_home_space_passed_on_is_a_variable_argument_list_and_leaves_the_signature_unknown():

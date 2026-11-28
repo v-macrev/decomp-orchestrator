@@ -15,14 +15,29 @@ from recon.core.inference.signature import INT, Convention, Signature, Slot
 from recon.core.ir.model import Arg, Const, Fn, Op
 
 
-def direct_callees(fn: Fn) -> tuple[int, ...]:
-    """The addresses a normal form calls or jumps to as a call, in order of first appearance."""
+def direct_callees(fn: Fn, held: Callable[[int], int | None] | None = None) -> tuple[int, ...]:
+    """The addresses a normal form calls or jumps to as a call, in order of first appearance. With `held(address)`, the
+    function whose address read-only memory at `address` holds (or None), a call through a value read from such memory
+    calls that function too (D-073)."""
     out: dict[int, None] = {}
+    d = {v: o for v, (_b, o) in fn.defining().items()} if held is not None else {}
     for b in fn.blocks:
         for o in (*b.ops, b.term):
             if o.kind in ("call", "tail") and o.args and isinstance(o.args[0], Const):
                 out.setdefault(o.args[0].value, None)
+            elif held is not None and o.kind in ("call", "tail") and o.args:
+                t = held_target(d, o.args[0], held)
+                if t is not None:
+                    out.setdefault(t, None)
     return tuple(out)
+
+
+def held_target(d: dict, v: Arg, held: Callable[[int], int | None]) -> int | None:
+    """The function a call through `v` reaches when `v` is read from read-only memory that holds a function's address."""
+    o = d.get(v) if isinstance(v, int) else None
+    if isinstance(o, Op) and o.kind == "load" and o.args and isinstance(o.args[0], Const):
+        return held(o.args[0].value)
+    return None
 
 
 def computed_width(fn: Fn, d: dict, v: Arg) -> int:
@@ -40,7 +55,8 @@ def caller_set(fn: Fn, conv: Convention, d: dict) -> Callable[[Arg, str], bool]:
     as arguments, though every call's normal form lists every argument location with whatever it holds. An earlier call's
     result is the caller's when the caller moved it; left where the call put it (the floating result is also the first
     floating argument location) it is not told apart from what any call leaves there, and is not counted. A merge is the
-    caller's own when one of its values is (the least fixed point, so a loop of merges of nothing set is not)."""
+    caller's own when one of its values is (the least fixed point, so a loop of merges of nothing set is not), and none of
+    its values, directly or through other merges, is what a call left in a location it may change, or nothing set."""
     params = {v for _n, v in fn.params}
     results = (conv.result_int, conv.result_float)
     left: set[int] = set()
@@ -71,6 +87,16 @@ def caller_set(fn: Fn, conv: Convention, d: dict) -> Callable[[Arg, str], bool]:
             if u not in own:
                 own.add(u)
                 work.append(u)
+    # a merge one of whose values is what a call left in a location it may change, or nothing set, holds that on the path
+    # it comes from: no caller means it as an argument there, whatever it set on the others (D-073)
+    tainted = {v for v in left} | {v for v, o in d.items() if isinstance(o, Op) and o.kind == "undef"}
+    work = list(tainted)
+    while work:
+        for u in users.get(work.pop(), ()):
+            if u not in tainted:
+                tainted.add(u)
+                work.append(u)
+    own -= {v for v in tainted if v in d and d[v] is not None and not isinstance(d[v], Op)}
     # a merge of what calls left in one result location with nothing the caller set is left there too (D-069)
     merges = {v: [a for _k, a in o.args] for v, o in d.items() if o is not None and not isinstance(o, Op)}
     changed = True
@@ -194,4 +220,4 @@ def indirect_signatures(fn: Fn, conv: Convention) -> dict[int, Signature]:
     return out
 
 
-__all__ = ["call_sites", "caller_set", "computed_width", "direct_callees", "indirect_signatures", "really_used"]
+__all__ = ["call_sites", "caller_set", "computed_width", "direct_callees", "held_target", "indirect_signatures", "really_used"]

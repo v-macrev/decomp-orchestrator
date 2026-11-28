@@ -14,7 +14,7 @@ from recon.adapters.x64_msvc import eh
 from recon.adapters.x64_msvc import switch as sw
 from recon.adapters.x64_msvc import unwind as uw
 from recon.adapters.x64_msvc.abi import CALLING, CLOBBERED, WIDTHS
-from recon.adapters.x64_msvc.decode import _iced, decode_function
+from recon.adapters.x64_msvc.decode import PADDING, _iced, decode_function
 from recon.adapters.x64_msvc.lift import lift
 from recon.core.analysis import cfg as cf
 from recon.core.analysis import dataflow as df
@@ -99,6 +99,8 @@ def analyse(code: bytes, rva: int, image_base: int, validated: frozenset[str] | 
     if dec.error is not None:
         return Refusal("decode", CONFLICT if dec.error == "ambiguous-data-reference" else INVALID, dec.error)
     stop = dec.data_start if dec.data_start is not None else rva + len(code)
+    if dec.data_start is not None:   # padding between the last instruction and the table is not code (D-073)
+        stop = max((i.end for i in dec.insns if i.rva < stop and i.mnemonic not in PADDING), default=stop)
     insns, bad = lift_range(code[: stop - rva], rva, image_base, validated)
     if bad:
         forms = sorted({(u.form, u.reason) for u in bad})

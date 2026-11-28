@@ -395,6 +395,10 @@ D-072:            full prewarm (normal forms 50 min, signatures 24 min, 3 worker
                   handler and stack roots resolved but one (under 3); CALLEE_SIGNATURE_UNKNOWN stays 574 (16), BYTE_MATCHED the
                   same 100 + 10: the ~390 functions behind them meet hidden roots, 2 STACK_ARGUMENTS, 2 INDIRECT_CALL, 1
                   CONFLICTING_EVIDENCE, 1 READS_A_LOCATION_NOBODY_SET
+D-073:            full prewarm (normal forms 60 min, 3 workers), then signatures and campaign once more: unknown signatures
+                  80,807 -> 76,036; development CALLEE_SIGNATURE_UNKNOWN 574 -> 494 (held-out 16 -> 13), BYTE_MATCHED
+                  100 + 10 -> 106 + 10, none lost, MISMATCH 55 -> 44. Next at STACK_ARGUMENT 23 -> 48, READS_A_LOCATION_NOBODY_SET
+                  119 -> 154, LOCAL_IN_MEMORY 83 -> 103, CONSTRUCT_UNSUPPORTED 89 -> 105
 Next:             declarations of imported functions (189 of the leaf callees are import thunks), then READS_A_LOCATION_NOBODY_SET
 ```
 

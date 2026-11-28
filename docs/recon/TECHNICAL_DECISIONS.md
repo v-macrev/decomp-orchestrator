@@ -665,3 +665,35 @@ now meet roots that were hidden behind them — two `STACK_ARGUMENTS` (under 401
 `CONFLICTING_EVIDENCE` (388) and one `READS_A_LOCATION_NOBODY_SET` (137). The functions with chained parts that now reach the
 handler check are mostly cleaned up after by the statically linked buffer-check handler, whose data is no `FuncInfo`
 (`HANDLER_NOT_UNDERSTOOD` 242 -> 426, `CONFLICTING_EVIDENCE` 751 -> 499).
+
+## D-073 · 2026-11-28 · Stack parameters in signatures, constant function pointers, and merges of what a call left
+Behind the four roots D-072 resolved, the same ~390 development functions at `CALLEE_SIGNATURE_UNKNOWN` met six roots: two
+functions reading stack arguments (under 401 and 389), two jumping through a constant pointer to a function (407 each), one
+whose padding before a table read as code falling off its end (388) and one reading what a call left (137). Each is a rule
+of its own, none a function's.
+
+- **Stack parameters.** A signature now has positions past the four registers: a read at or above the first stack argument,
+  at a fixed place a word apart from it, is the argument there, as wide as the read, floating when a floating operation
+  uses it. Its address leaving, a place that is no word of its own, or one place read both ways is still
+  `STACK_ARGUMENTS`. A caller inferring its own signature leaves a callee's stack arguments out of the call, which says
+  nothing about the caller's parameters; source writing still refuses a call with stack arguments (`Convention.place`).
+- **Constant function pointers.** A call through a value read from read-only memory that holds a function's address (not
+  an import's slot, which a declaration gives) calls that function: it is filed with the callees, so walks and keys
+  follow it, and the call has that function's signature.
+- **Padding before a table.** Padding after a function's last instruction and before the table data its code reads is no
+  code: the control flow ends at the last instruction.
+- **Merges of what a call left.** A merge is the caller's own value only when none of its values, directly or through other
+  merges, is what a call left in a location it may change or nothing set: on that path it holds whatever the call left,
+  which no compiler passes as an argument. Read as one (any own value sufficed), it gave a call in a loop arguments the
+  caller never set again after the first turn, and the caller's reading then read what the call left.
+- **Callers' readings up to the last position set.** What callers show of a callee's parameters is every position up to
+  the last one a caller sets; one before it that the caller leaves is passed on from its own entry, an integer, as an
+  indirect call's reading already had it (D-051). Read as ending at the first position left, a caller the rules above
+  newly showed, setting the second and third locations and passing the first on, made a callee read as taking nothing,
+  and one byte-matched function was lost.
+
+Measured: normal forms all made again (60 min with 3 workers), signatures 28 min, then once more with the callers' rule
+(signatures and campaign 60 min); unknown signatures 80,807 -> 76,036. Development `CALLEE_SIGNATURE_UNKNOWN` 574 -> 494
+(held-out 16 -> 13), byte-matched 100 + 10 -> 106 + 10, none lost, `MISMATCH` 55 -> 44. The freed functions stop next at
+`STACK_ARGUMENT` 23 -> 48 (a call with stack arguments, which source writing refuses), `READS_A_LOCATION_NOBODY_SET`
+119 -> 154, `LOCAL_IN_MEMORY` 83 -> 103, `CONSTRUCT_UNSUPPORTED` 89 -> 105 and `INDIRECT_CALL` 383 -> 396.

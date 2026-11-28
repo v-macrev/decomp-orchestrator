@@ -53,6 +53,9 @@ class Convention:
     result_float: str
 
     def place(self, k: int, kind: str) -> str:
+        """The location of position `k`; a position past the registers is on the stack, which has none (STACK_ARGUMENTS)."""
+        if k >= len(self.slots):
+            raise NotReconstructed("STACK_ARGUMENTS")
         return self.slots[k][0 if kind == INT else 1]
 
     def result(self, kind: str) -> str:

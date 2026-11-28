@@ -160,7 +160,7 @@ class Program:
         self.stats["ir_nodes_analysed"] += ir_nodes(f)
         self._keep(at, f)
         sites = call_sites(f, self.conv)
-        self._edges[at] = direct_callees(f)
+        self._edges[at] = direct_callees(f, self._held)
         if self._store is not None and k is not None:
             with self._store.transaction():
                 self._put("normal", k, f)
@@ -207,7 +207,7 @@ class Program:
         holds the form but not these (they are filed under the code that reads them, D-055) gets them once, and no later
         program reads the whole form again to learn what it calls (D-061)."""
         f = self._fns.get(at)
-        edges = direct_callees(f) if isinstance(f, Fn) else ()
+        edges = direct_callees(f, self._held) if isinstance(f, Fn) else ()
         sites = call_sites(f, self.conv) if isinstance(f, Fn) else {}
         self._edges[at] = edges
         if self._store is not None and k is not None:
@@ -221,6 +221,14 @@ class Program:
 
     def callee(self, target: Arg) -> Signature | None:
         return self.signature(target.value) if isinstance(target, Const) else None
+
+    def _held(self, address: int) -> int | None:
+        """The function of the program whose address read-only memory at `address` holds (D-073): a constant function
+        pointer, not an import's slot (a declaration gives those, `slot`)."""
+        if self._slot(address) is not None:
+            return None
+        c = self.constant(address, 64)
+        return c if c is not None and self._key(c) is not None else None
 
     def name(self, at: int) -> str | None:
         """The name a declaration gives the function at `at`, when it is a plain identifier the source can call."""
@@ -461,13 +469,17 @@ class Program:
 
     def _resolver(self, fn: Fn) -> tuple[Callable[[Arg], Signature | None], dict]:
         """How `fn`'s calls are read: a direct callee by its signature; a call through a value read from a slot that holds
-        a declared function (an import) by that declaration; any other call through a value by what the site shows.
+        a declared function (an import) by that declaration; one read from read-only memory that holds a function's address
+        by that function's signature (D-073); any other call through a value by what the site shows.
         Every reading of `fn`'s own code goes through this one resolver, so they agree on what its results are."""
         through = indirect_signatures(fn, self.conv)
         imported: dict[int, Signature] = {}
         for v, (_b, o) in fn.defining().items():
             if isinstance(o, Op) and o.kind == "load" and o.args and isinstance(o.args[0], Const):
                 sig = self._slot(o.args[0].value)
+                if sig is None:
+                    held = self._held(o.args[0].value)
+                    sig = self.signature(held) if held is not None else None
                 if sig is not None:
                     imported[v] = sig
 
@@ -543,15 +555,18 @@ class Program:
             ints, floats = {conv.result_int}, {conv.result_float}
 
             def prefix(s: dict) -> list[Slot]:
+                """The positions up to the last one the caller sets; one before it that it leaves is passed on from its
+                own entry (D-051, D-073)."""
                 put = {n: w for n, w in s["set"]}
+                last = max((k for k, (i_loc, f_loc) in enumerate(conv.slots) if i_loc in put or f_loc in put), default=-1)
                 out = []
-                for i_loc, f_loc in conv.slots:
+                for i_loc, f_loc in conv.slots[: last + 1]:
                     if i_loc in put:
                         out.append(Slot(INT, next(x for x in (64, 32, 16, 8) if put[i_loc] >= x) if put[i_loc] >= 8 else 64))
                     elif f_loc in put:
                         out.append(Slot(sg.FLOAT, 32 if put[f_loc] == 32 else 64))
                     else:
-                        break
+                        out.append(Slot(INT, 64))
                 return out
 
             given = [prefix(s) for s in sites]
