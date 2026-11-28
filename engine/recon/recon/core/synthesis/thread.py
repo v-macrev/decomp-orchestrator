@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 
 from recon.core.ir.build import substitute
-from recon.core.ir.model import Arg, Const, Fn, Op
+from recon.core.ir.model import Arg, Const, Fn, Op, Phi
 
 
 @dataclass(frozen=True)
@@ -65,8 +65,10 @@ def _slot(d: dict[int, Op], v: Arg, index: int) -> bool:
 
 
 def thread_locals(fn: Fn, t: ThreadLocals | None) -> Fn:
-    """The function with every reach of a thread-local variable read as the variable's address (its template address);
-    unchanged when a reach is used otherwise (the module's block kept, handed on or indexed), or when there is none."""
+    """The function with every reach of a thread-local variable read as the variable's address (its template address),
+    the module's block itself as the template's start wherever else it goes (left in a location, handed on); unchanged
+    when there is none, or when a constant added to the block leads past the template. The array, the module's slot or its
+    block may be one value the compiler keeps across a branch (a merge of such values)."""
     if t is None:
         return fn
     base = {v for n, v in fn.params if n == t.base}
@@ -83,51 +85,62 @@ def thread_locals(fn: Fn, t: ThreadLocals | None) -> Fn:
             for _k, a in p.args:
                 if isinstance(a, int):
                     uses.setdefault(a, []).append(p)  # type: ignore[arg-type]
-    arrays = {o.defs[0] for o in d.values() if o.kind == "load" and fn.width(o.defs[0]) == 64
-              and (p := _plus(d, o.args[0])) is not None and p[0] in base and p[1] == t.array}
-    blocks: set[int] = set()
+    phis = {p.id: p for b in fn.blocks for p in b.phis}
+
+    def merged(found: set[int]) -> set[int]:
+        """`found` with every merge all of whose values are in it (a value the compiler keeps across a branch)."""
+        changed = True
+        while changed:
+            changed = False
+            for p in phis.values():
+                vals = {a for _k, a in p.args} - {p.id}
+                if p.id not in found and vals and all(isinstance(a, int) and a in found for a in vals):
+                    found.add(p.id)
+                    changed = True
+        return found
+    arrays = merged({o.defs[0] for o in d.values() if o.kind == "load" and fn.width(o.defs[0]) == 64
+                     and (p := _plus(d, o.args[0])) is not None and p[0] in base and p[1] == t.array})
+    slots = merged({v for v in d if _slot(d, v, t.index)})
+    found: set[int] = set()
     for o in d.values():
         if o.kind != "load" or fn.width(o.defs[0]) != 64 or not isinstance(o.args[0], int):
             continue
         a = d.get(o.args[0])
-        if a is not None and a.kind == "add" and any(x in arrays for x in a.args) and any(_slot(d, x, t.index) for x in a.args):
-            blocks.add(o.defs[0])
+        if a is not None and a.kind == "add" and any(x in arrays for x in a.args) and any(x in slots for x in a.args):
+            found.add(o.defs[0])
+    blocks = merged(found)
     if not blocks:
         return fn
-    sub: dict[int, Arg] = {}
-    moved: dict[int, int] = {}                     # a load or store whose address is the block itself -> its offset 0
+    # the module's block is the template, place for place: every use of it is the template's start, a constant added to
+    # it the place that far in (a place past the template is no variable of the module: left as it is)
+    sub: dict[int, Arg] = {v: Const(t.start, 64) for v in blocks}
     for v in blocks:
         for u in uses.get(v, []):
             if isinstance(u, Op) and u.kind == "add" and (p := _plus(d, u.defs[0])) is not None and p[0] == v:
                 if not t.holds(t.start + p[1]):
                     return fn
                 sub[u.defs[0]] = Const(t.start + p[1], 64)
-            elif isinstance(u, Op) and u.kind in ("load", "store") and u.args[0] == v and v not in u.args[1:]:
-                moved[id(u)] = v
-            else:
-                return fn
-    blocks_ops = []
-    for b in fn.blocks:
-        ops = []
-        for o in b.ops:
-            if id(o) in moved:
-                o = replace(o, args=(Const(t.start, 64), *o.args[1:]))
-            ops.append(o)
-        blocks_ops.append(replace(b, ops=tuple(ops)))
-    out = substitute(replace(fn, blocks=tuple(blocks_ops)), sub, set())
+    out = substitute(fn, sub, {v for v in blocks if v in phis})
     # the reaches nothing uses now go: the module's blocks, the arrays, the index reads and the sums leading to them
-    chain, work = set(sub), [*blocks, *arrays]
+    chain, work = set(sub) - blocks, [*blocks, *arrays]
     while work:
         v = work.pop()
         o = d.get(v)
-        if v in chain or o is None or o.kind not in ("load", "add", "shl", "mul", "zext"):
+        if v in chain:
+            continue
+        if v in phis and v in arrays | slots | blocks:
+            chain.add(v)
+            work.extend(a for _k, a in phis[v].args if isinstance(a, int))
+            continue
+        if o is None or o.kind not in ("load", "add", "shl", "mul", "zext"):
             continue
         chain.add(v)
         work.extend(a for a in o.args if isinstance(a, int) and a not in base)
     while True:
         used = {a for b in out.blocks for x in (*b.ops, b.term) for a in x.args if isinstance(a, int)} | \
                {a for b in out.blocks for p in b.phis for _k, a in p.args if isinstance(a, int)}
-        kept = tuple(replace(b, ops=tuple(o for o in b.ops if not (o.defs and o.defs[0] in chain and o.defs[0] not in used)))
+        kept = tuple(replace(b, phis=tuple(p for p in b.phis if not (p.id in chain and p.id not in used)),
+                             ops=tuple(o for o in b.ops if not (o.defs and o.defs[0] in chain and o.defs[0] not in used)))
                      for b in out.blocks)
         if kept == out.blocks:
             break

@@ -727,3 +727,20 @@ Measured (no knowledge recomputed: the facts are untouched; campaign 50 min, 3 w
 thread-local variable, by upstream's comparator. The 23 freed stop next at `CALLEE_SIGNATURE_UNKNOWN` 8, `LOCAL_IN_MEMORY`
 6, `NO_MATCH` 4 (compiled, every reference right, other bytes differ) and one each of the declaration codes. Of the 131
 left, 22 still read the thread block in a way not read yet, and most of the rest are unknown callee signatures in disguise.
+
+## D-075 · 2026-11-28 · Thread-local reaches across a branch, and the module's block wherever it goes
+Of the 22 development functions D-074 left reading the thread block, most keep part of the reach in one value across a
+branch: the storage array read on both ways and merged, the module's slot computed before a branch, or the module's block
+itself merged where two ways meet. D-074 matched only straight-line reaches, so those were read half or not at all.
+
+- **A merge of reaches is a reach.** A merge all of whose incoming values (other than itself) are storage arrays, module
+  slots or module blocks is one too; the rule applies to arrays, slots and blocks alike, to a fixed point.
+- **The block is the template wherever it goes.** Every use of the module's block, not only a constant added to it, is
+  read as the template's start: a block handed to a callee or left in a location is the address of the first variable of
+  the module, place for place the same object. A constant added that leads past the template still leaves the function
+  as it is. The reach's parts nothing uses afterwards, merges among them, go.
+- Not taken: a merge of an array with a value a call left (tried; no evidence beyond the functions that need it).
+
+Measured (campaign only, 3 workers, 29 min): development `READS_A_LOCATION_NOBODY_SET` 131 -> 126, byte-matched the same
+107 + 10, none lost or won; the five freed stop next at `CALLEE_SIGNATURE_UNKNOWN`, `CONSTRUCT_UNSUPPORTED` 2,
+`MEMBER_NOT_DECLARED` and `TAIL_RESULT_DIFFERS`.

@@ -54,15 +54,16 @@ def test_without_the_image_s_facts_nothing_is_read_as_thread_local():
     assert thread_locals(fn, other) is fn
 
 
-def test_a_module_block_handed_on_is_left_as_it_is():
-    """f(): g(block): the block itself leaves, which no variable is."""
+def test_a_module_block_handed_on_is_the_template_s_start():
+    """f(): g(block): the block itself leaves; place for place it is the template, so what leaves is its start."""
     a = reach(Asm(0x3000), 0x10)
     a(T.sub_rsp(40))(T.mov_rr(R.RCX, R.RAX))
     a.branch(C.CALL_REL32_64, 0x6000)
     a(T.add_rsp(40))(T.ret())
     g = Asm(0x6000)(T.ret())
-    fn = program(a, g).normal(BASE + 0x3000)
-    assert thread_locals(fn, TLS) is fn
+    fn = thread_locals(program(a, g).normal(BASE + 0x3000), TLS)
+    (call,) = [o for _b, o in fn.ops() if o.kind == "call"]
+    assert Const(START, 64) in call.args and all(dict(fn.params)["gs_base"] not in o.args for _b, o in fn.ops())
 
 
 def test_the_source_names_the_variable_thread_local_and_does_what_the_function_does():
@@ -111,3 +112,19 @@ def test_the_ranking_counts_a_section_relative_field_right_when_it_holds_the_var
     target = bytes((0xBA, 0x10, 0, 0, 0, 0xC3))
     assert batch.distance(f, target, 0x3000, lambda r: 0x10).total == 0
     assert batch.distance(f, target, 0x3000, lambda r: 0x18).references == 1
+
+
+def test_a_storage_array_kept_across_a_branch_is_reached_through_the_same_way():
+    """f(x): the array read on either way of a branch, the variable reached after they meet."""
+    a = Asm(0x3000)(I.create_reg_reg(C.TEST_RM32_R32, R.ECX, R.ECX))
+    a.branch(C.JE_REL32_64, "other")
+    a(I.create_reg_mem(C.MOV_R64_RM64, R.RAX, gs(0x58)))(I.create_reg_i32(C.MOV_R32_IMM32, R.R9D, 1))
+    a.branch(C.JMP_REL32_64, "meet")
+    a.label("other")(I.create_reg_mem(C.MOV_R64_RM64, R.RAX, gs(0x58)))(I.create_reg_i32(C.MOV_R32_IMM32, R.R9D, 2))
+    a.label("meet")(I.create_reg_mem(C.MOV_R32_RM32, R.ECX, mem(R.RIP, INDEX)))(I.create_reg_i32(C.MOV_R32_IMM32, R.EDX, 0x20))
+    a(I.create_reg_mem(C.MOV_R64_RM64, R.RAX, mem(R.RAX, index=R.RCX, scale=8)))(I.create_mem_reg(C.MOV_RM32_R32, mem(R.RDX, index=R.RAX), R.R9D))
+    a(T.ret())
+    fn = thread_locals(program(a).normal(BASE + 0x3000), TLS)
+    gs_base = dict(fn.params)["gs_base"]
+    assert all(gs_base not in o.args for _b, o in fn.ops()) and all(gs_base not in [v for _k, v in p.args] for b in fn.blocks for p in b.phis)
+    assert [o.args[0] for _b, o in fn.ops() if o.kind == "store"] == [Const(START + 0x20, 64)]
